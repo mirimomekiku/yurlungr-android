@@ -49,6 +49,9 @@ class ChatSession(
     override val id: String = restored?.id ?: UUID.randomUUID().toString()
     private val appContext = context.applicationContext
     private val paths = RuntimePaths(appContext)
+    private val clientVersion = runCatching {
+        appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName
+    }.getOrNull() ?: "unknown"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     val listeners = mutableSetOf<ChatListener>()
@@ -187,7 +190,7 @@ class ChatSession(
                     putJsonObject("clientInfo") {
                         put("name", "yurlungr")
                         put("title", "Yurlungr")
-                        put("version", "0.3.0")
+                        put("version", clientVersion)
                     }
                 })
                 val agentCaps = (init as? JsonObject)?.get("agentCapabilities") as? JsonObject
