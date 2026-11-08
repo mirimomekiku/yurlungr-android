@@ -20,13 +20,25 @@ android {
         // Sideload-only as a result; Play Store would reject it.
         targetSdk = 28
         versionCode = 1
-        versionName = "0.1.0-spike"
+        versionName = "0.0.1"
+    }
+
+    // One APK per CPU architecture (smaller downloads; each carries only its own native libraries),
+    // plus a universal APK for anyone unsure which one their phone needs.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            isUniversalApk = true
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Spike: sign release with the debug key so it can be sideloaded.
+            // Alpha: release is signed with the debug key so it can be sideloaded over a debug
+            // install (same signature keeps the runtime and chats). A real release key comes later.
             signingConfig = signingConfigs.getByName("debug")
         }
     }

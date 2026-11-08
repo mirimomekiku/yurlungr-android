@@ -47,10 +47,25 @@
 - **Stays alive.** A foreground service keeps agents running with the screen off and notifies you when
   one finishes or needs approval.
 
+## Download
+
+Grab the APK for your phone's CPU from the [latest release](https://github.com/mirimomekiku/yurlungr-android/releases/latest)
+and install it (allow installs from your browser or file manager when asked):
+
+| APK | For |
+|---|---|
+| `yurlungr-<version>-arm64-v8a.apk` | Almost every phone from the last several years (recommended) |
+| `yurlungr-<version>-armeabi-v7a.apk` | Older 32-bit phones |
+| `yurlungr-<version>-x86_64.apk` / `-x86.apk` | Emulators and x86 devices |
+| `yurlungr-<version>-universal.apk` | Any of the above, if you're unsure (slightly larger) |
+
+Not sure? `adb shell getprop ro.product.cpu.abi` prints your phone's ABI. Each release lists SHA-256
+checksums in `SHA256SUMS.txt`.
+
 ## Quick start
 
-**Requirements:** an arm64 Android phone (Android 7.0+; developed on a ROG Phone 3 with Android 12 and a
-Pixel 6), about 4 GB free, and USB debugging to install. Build with JDK 17+.
+**Requirements:** an Android phone (Android 7.0+; arm64 is the tested target, developed on a ROG Phone 3
+with Android 12 and a Pixel 6), about 4 GB free. To build from source: JDK 17+ and USB debugging.
 
 ```sh
 git clone https://github.com/mirimomekiku/yurlungr-android.git
