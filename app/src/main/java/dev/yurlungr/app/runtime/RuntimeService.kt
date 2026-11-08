@@ -34,6 +34,7 @@ class RuntimeService : Service() {
         when (intent?.action) {
             ACTION_EXIT -> {
                 ChatSessions.stopAll()
+                dev.yurlungr.app.web.WebRunSessions.stopAll(this)
                 TerminalSessions.closeAll(this)
                 return START_NOT_STICKY
             }

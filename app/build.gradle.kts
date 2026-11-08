@@ -15,6 +15,7 @@ android {
     defaultConfig {
         applicationId = runtimeAppId
         minSdk = 24
+        testInstrumentationRunner = "dev.yurlungr.app.web.WebRunSmokeInstrumentation"
         // Must stay at 28: from targetSdk 29 Android forbids exec() of files in the app's
         // data directory, which is where the embedded runtime's binaries live (same as Termux).
         // Sideload-only as a result; Play Store would reject it.

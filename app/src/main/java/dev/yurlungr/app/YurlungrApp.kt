@@ -19,6 +19,7 @@ class YurlungrApp : Application() {
     override fun onCreate() {
         super.onCreate()
         TerminalSessions.init(this)
+        dev.yurlungr.app.web.WebRunSessions.init(this)
         ChatSessions.init(this)
         dev.yurlungr.app.runtime.RuntimeStatus.init(this)
         RemoteHosts.init(this)

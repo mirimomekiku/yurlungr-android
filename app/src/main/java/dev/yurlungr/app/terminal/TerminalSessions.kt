@@ -17,6 +17,7 @@ import dev.yurlungr.app.runtime.RuntimePaths
 import dev.yurlungr.app.runtime.RuntimeService
 import dev.yurlungr.app.runtime.RuntimeStatus
 import java.util.UUID
+import java.io.File
 
 /**
  * App-wide registry of terminal sessions. Lives as long as the process; [RuntimeService]
@@ -45,7 +46,10 @@ object TerminalSessions {
     private val names = HashMap<TerminalSession, String>()
     private val commands = HashMap<TerminalSession, String?>()
     private val statusIds = HashMap<TerminalSession, String>()
-    fun endProcess(session: TerminalSession) { session.finishIfRunning() }
+    private val managed = HashMap<TerminalSession, ManagedLifecycle>()
+    data class ManagedLifecycle(val end: () -> Unit, val close: () -> Unit, val restart: () -> Unit, val exited: () -> Unit)
+    fun manage(session: TerminalSession, lifecycle: ManagedLifecycle) { managed[session] = lifecycle }
+    fun endProcess(session: TerminalSession) { managed[session]?.end?.invoke() ?: session.finishIfRunning() }
     fun statusId(session: TerminalSession): String = statusIds[session].orEmpty()
 
     fun rename(session: TerminalSession, name: String) {
@@ -57,6 +61,7 @@ object TerminalSessions {
 
     fun restart(context: Context, session: TerminalSession) {
         if (session !in sessions) return
+        managed[session]?.let { it.restart(); return }
         val command = commands[session]
         val name = names[session]
         close(context, session)
@@ -67,22 +72,23 @@ object TerminalSessions {
      * Opens a terminal tab. With [command], runs it in a login bash and then leaves an
      * interactive shell open so the output stays readable.
      */
-    fun create(context: Context, command: String? = null, name: String? = null): TerminalSession {
+    fun create(context: Context, command: String? = null, name: String? = null, keepShell: Boolean = true, workingDirectory: File? = null): TerminalSession {
         val paths = RuntimePaths(context)
         val statusId = UUID.randomUUID().toString()
+        val cwd = workingDirectory ?: paths.home
         val welcome = "if [ ! -f \"\$HOME/.hushlogin\" ] && [ -z \"\$TERMUX_HUSHLOGIN\" ] && [ -f '${paths.libexec}/motd.sh' ]; then '${paths.bash}' '${paths.libexec}/motd.sh'; fi"
         val (shell, args) = if (command == null) {
             // Like Termux: prefer $PREFIX/bin/login (sets up LD_PRELOAD, motd), run as a login shell.
             val login = if (paths.login.canExecute()) paths.login else paths.bash
             login to arrayOf("-${login.name}")
         } else {
-            paths.bash to arrayOf("-bash", "-c", "$command\n$welcome\nexec bash -l")
+            paths.bash to arrayOf("-bash", "-c", if (keepShell) "$command\n$welcome\nexec bash -l" else command)
         }
         val session = TerminalSession(
             shell.path,
-            paths.home.path,
+            cwd.path,
             args,
-            (RuntimeEnv.map(paths) + ("YURLUNGR_SESSION_ID" to statusId)).map { (key, value) -> "$key=$value" }.toTypedArray(),
+            (RuntimeEnv.map(paths, cwd) + ("YURLUNGR_SESSION_ID" to statusId)).map { (key, value) -> "$key=$value" }.toTypedArray(),
             TRANSCRIPT_ROWS,
             client,
         )
@@ -100,6 +106,13 @@ object TerminalSessions {
     }
 
     fun close(context: Context, session: TerminalSession) {
+        managed[session]?.let { it.close(); return }
+        closeDirect(context,session)
+    }
+
+    /** Used after a managed process has finished its own cleanup. */
+    fun closeDirect(context: Context, session: TerminalSession) {
+        managed.remove(session)
         session.finishIfRunning()
         sessions.remove(session)
         names.remove(session)
@@ -130,6 +143,7 @@ object TerminalSessions {
         }
 
         override fun onSessionFinished(finishedSession: TerminalSession) {
+            managed[finishedSession]?.exited?.invoke()
             changeTick++
             RuntimeStatus.refresh()
         }

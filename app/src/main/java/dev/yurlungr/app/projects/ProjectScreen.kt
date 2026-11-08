@@ -136,11 +136,18 @@ fun ProjectScreen(
     var askIdentity by remember { mutableStateOf<String?>(null) } // pending commit message
     // Kept until a commit succeeds, so cancelling the identity prompt doesn't lose it.
     var commitMessage by rememberSaveable(dir.path) { mutableStateOf("") }
-    val isAndroid = remember(dir) { File(dir, "gradlew").isFile }
+    var capabilities by remember(dir.path) { mutableStateOf<dev.yurlungr.app.web.ProjectCapabilities?>(null) }
+    val isAndroid = capabilities?.android ?: false
+    var showWebRun by remember(dir.path) { mutableStateOf(false) }
     var showBranches by remember { mutableStateOf(false) }
 
     LaunchedEffect(dir, refreshTick, reload) {
-        status = git.status(dir)
+        launch { status = git.status(dir) }
+        launch { capabilities = withContext(Dispatchers.IO) {
+            runCatching { dev.yurlungr.app.web.ProjectDetector.detect(dir) }.getOrElse {
+                dev.yurlungr.app.web.ProjectCapabilities(File(dir,"gradlew").isFile,emptyList())
+            }
+        } }
     }
 
     fun runGit(label: String, onSuccess: () -> Unit = {}, block: suspend () -> dev.yurlungr.app.runtime.CommandResult) {
@@ -191,6 +198,7 @@ fun ProjectScreen(
                 }
             }
         }
+        dev.yurlungr.app.web.WebRunCard(dir, onLogs = onOpenTerminal)
         SectionTabs(tab, changeCount = status?.changes?.size ?: 0) { tab = it }
         Box(Modifier.weight(1f)) {
             when (tab) {
@@ -228,7 +236,14 @@ fun ProjectScreen(
                 ProjectTab.Chats -> ChatsTab(dir, onOpenChat)
             }
         }
-        ActionBar(dir, isAndroid, onNewChat, runInTerminal, onOpenTerminal)
+        ActionBar(dir, isAndroid, onNewChat, runInTerminal, onOpenTerminal,
+            hasWeb = capabilities?.web?.isNotEmpty() == true, onRunWeb = { showWebRun = true })
+    }
+
+    if (showWebRun) capabilities?.web?.takeIf { it.isNotEmpty() }?.let { webProjects ->
+        dev.yurlungr.app.web.WebRunSheet(dir, webProjects, onDismiss = { showWebRun = false },
+            onStarted = { /* Keep the project visible while the server starts; Logs opens its terminal. */ },
+            runInTerminal = runInTerminal)
     }
 
     if (showBranches) status?.takeIf { it.isRepo }?.let { s ->
@@ -365,7 +380,8 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
 
 /** Chat (pick an agent) · Build & install (Android projects) · Terminal. */
 @Composable
-private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit, runInTerminal: (String, String) -> Unit, onOpenTerminal: () -> Unit) {
+private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit, runInTerminal: (String, String) -> Unit,
+    onOpenTerminal: () -> Unit, hasWeb: Boolean, onRunWeb: () -> Unit) {
     val context = LocalContext.current
     val installed = remember { agentStatuses(RuntimePaths(context)).filter { it.installed }.map { it.agent } }
     var agentMenu by remember { mutableStateOf(false) }
@@ -395,6 +411,9 @@ private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit,
                     "Build ${dir.name}",
                 )
             }
+        }
+        if (hasWeb) {
+            ActionTile("Run", Ph.Globe, Modifier.weight(1f), tile = AppColors.tiles.lime, onClick = onRunWeb)
         }
         Box(Modifier.weight(1f)) {
             var terminalMenu by remember { mutableStateOf(false) }
