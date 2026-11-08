@@ -1,0 +1,637 @@
+package dev.yurlungr.app.chat
+
+import android.content.Context
+import android.util.Log
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import dev.yurlungr.app.acp.AcpConnection
+import dev.yurlungr.app.acp.AcpException
+import dev.yurlungr.app.agents.Agent
+import dev.yurlungr.app.runtime.RuntimeEnv
+import dev.yurlungr.app.runtime.RuntimePaths
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
+import java.io.File
+import java.util.UUID
+
+/**
+ * One conversation with one agent on this phone: owns the agent process and turns ACP
+ * traffic into [ChatItem]s. All state is mutated on the main thread, and every mutation is
+ * reported to [listeners] so the chat can be mirrored to another device.
+ */
+class ChatSession(
+    context: Context,
+    override val agent: Agent,
+    val cwd: File,
+    restored: SavedChat? = null,
+) : ChatModel, AcpConnection.Handler {
+    override val id: String = restored?.id ?: UUID.randomUUID().toString()
+    private val appContext = context.applicationContext
+    private val paths = RuntimePaths(appContext)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    val listeners = mutableSetOf<ChatListener>()
+
+    override val items = mutableStateListOf<ChatItem>().apply { restored?.items?.let(::addAll) }
+    override val cwdLabel: String get() = cwdLabel(cwd.path)
+    override val folderName: String get() = cwd.name
+    override val isRemote = false
+
+    private var _state by mutableStateOf<ChatState>(ChatState.Saved)
+    override var state: ChatState
+        get() = _state
+        private set(value) {
+            if (_state == value) return
+            _state = value
+            listeners.forEach { it.onStateChanged(this) }
+        }
+
+    private var _title by mutableStateOf(restored?.title ?: "${agent.displayName} · ${cwd.name}")
+    override var title: String
+        get() = _title
+        private set(value) {
+            _title = value
+            meta()
+        }
+    private var _modes by mutableStateOf<List<SessionMode>>(emptyList())
+    override var modes: List<SessionMode>
+        get() = _modes
+        private set(value) {
+            _modes = value
+            meta()
+        }
+    private var _currentModeId by mutableStateOf<String?>(null)
+    override var currentModeId: String?
+        get() = _currentModeId
+        private set(value) {
+            _currentModeId = value
+            meta()
+        }
+    /** A sign-in URL the agent printed, if any. */
+    private var _loginUrl by mutableStateOf<String?>(null)
+    override var loginUrl: String?
+        get() = _loginUrl
+        private set(value) {
+            _loginUrl = value
+            meta()
+        }
+
+    private var _commands by mutableStateOf<List<SlashCommand>>(emptyList())
+    override var commands: List<SlashCommand>
+        get() = _commands
+        private set(value) {
+            _commands = value
+            meta()
+        }
+    private var _configOptions by mutableStateOf<List<ConfigOption>>(emptyList())
+    override var configOptions: List<ConfigOption>
+        get() = _configOptions
+        private set(value) {
+            _configOptions = value
+            meta()
+        }
+    private var _usage by mutableStateOf<Usage?>(null)
+    override var usage: Usage?
+        get() = _usage
+        private set(value) {
+            _usage = value
+            meta()
+        }
+    private var _caps by mutableStateOf(PromptCaps())
+    override var caps: PromptCaps
+        get() = _caps
+        private set(value) {
+            _caps = value
+            meta()
+        }
+
+    var updatedAt by mutableStateOf(restored?.updatedAt ?: System.currentTimeMillis())
+        private set
+
+    /** The agent-side session to resume with `session/load` after a restart. */
+    private var acpSessionId: String? = restored?.acpSessionId
+    /** While loading a saved session the agent replays history we already show; drop it. */
+    private var replaying = false
+
+    /** Persist hook (set by the registry). */
+    var onChanged: ((ChatSession) -> Unit)? = null
+    /** Process started/stopped (the registry keeps the foreground service in sync). */
+    var onActiveChanged: ((ChatSession) -> Unit)? = null
+    /** Called with the finished turn's summary / what needs approval (for notifications). */
+    var onTurnFinished: ((ChatSession, String) -> Unit)? = null
+    var onNeedsAttention: ((ChatSession, String) -> Unit)? = null
+
+    /** An agent process is (or should be) running for this chat. */
+    val isActive: Boolean get() = connection?.exited == false
+
+    /** Last stderr lines, shown when the agent fails to start. */
+    private val stderrTail = ArrayDeque<String>()
+    private var connection: AcpConnection? = null
+    private var sessionId: String? = null
+    private val toolCalls = HashMap<String, ChatItem.ToolCall>()
+
+    // ---- lifecycle ---------------------------------------------------------------------
+
+    fun start() {
+        state = ChatState.Starting
+        scope.launch {
+            try {
+                cwd.mkdirs()
+                val process = withContext(Dispatchers.IO) {
+                    ProcessBuilder(paths.bash.path, "-c", "exec ${agent.acpCommand}")
+                        .directory(cwd)
+                        .apply {
+                            environment().run {
+                                clear()
+                                putAll(RuntimeEnv.map(paths, cwd))
+                                putAll(agent.env(paths))
+                            }
+                        }
+                        .start()
+                }
+                val conn = AcpConnection(process, scope, this@ChatSession)
+                connection = conn
+                onActiveChanged?.invoke(this@ChatSession)
+                val init = conn.request("initialize", buildJsonObject {
+                    put("protocolVersion", 1)
+                    putJsonObject("clientCapabilities") {
+                        putJsonObject("fs") {
+                            put("readTextFile", true)
+                            put("writeTextFile", true)
+                        }
+                        put("terminal", false)
+                    }
+                    putJsonObject("clientInfo") {
+                        put("name", "yurlungr")
+                        put("title", "Yurlungr")
+                        put("version", "0.3.0")
+                    }
+                })
+                val agentCaps = (init as? JsonObject)?.get("agentCapabilities") as? JsonObject
+                caps = AcpExtras.parseCaps(agentCaps)
+                val canLoad = agentCaps?.get("loadSession")?.jsonPrimitive?.contentOrNull == "true"
+                val previous = acpSessionId
+                val session = if (previous != null && canLoad) loadOrNew(conn, previous) else newSession(conn)
+                readModes(session["modes"] as? JsonObject)
+                session["configOptions"]?.let { configOptions = AcpExtras.parseConfigOptions(it) }
+                state = ChatState.Ready
+                changed()
+                flushPending()
+            } catch (e: AcpException) {
+                state = if (e.code == AcpException.AUTH_REQUIRED) ChatState.AuthRequired else ChatState.Failed(failureText(e))
+            } catch (e: Exception) {
+                Log.e(TAG, "start failed", e)
+                state = ChatState.Failed(failureText(e))
+            }
+        }
+    }
+
+    private suspend fun newSession(conn: AcpConnection): JsonObject {
+        val session = conn.request("session/new", buildJsonObject {
+            put("cwd", cwd.path)
+            putJsonArray("mcpServers") {}
+        }).jsonObject
+        sessionId = session.string("sessionId")
+        acpSessionId = sessionId
+        return session
+    }
+
+    /** Resumes the agent's own session (keeps its context); falls back to a new one. */
+    private suspend fun loadOrNew(conn: AcpConnection, previous: String): JsonObject {
+        replaying = true
+        return try {
+            val session = conn.request("session/load", buildJsonObject {
+                put("sessionId", previous)
+                put("cwd", cwd.path)
+                putJsonArray("mcpServers") {}
+            }) as? JsonObject ?: JsonObject(emptyMap())
+            sessionId = previous
+            session
+        } catch (e: AcpException) {
+            if (e.code == AcpException.AUTH_REQUIRED || conn.exited) throw e
+            add(ChatItem.Notice("Couldn't restore ${agent.displayName}'s memory of this chat; it starts fresh from here."))
+            newSession(conn)
+        } finally {
+            replaying = false
+        }
+    }
+
+    /** Opens the agent process for a saved chat (no-op if it's already running). */
+    override fun resume() {
+        if (state == ChatState.Saved) start()
+    }
+
+    /** Tears down the agent and starts again (e.g. after signing in). Keeps the saved session id. */
+    override fun restart() {
+        connection?.close()
+        connection = null
+        sessionId = null
+        loginUrl = null
+        start()
+    }
+
+    /** Ends the agent process but keeps the chat (it can be resumed later). */
+    fun stop() {
+        cancel()
+        connection?.close()
+        connection = null
+        sessionId = null
+        state = ChatState.Saved
+        changed()
+        onActiveChanged?.invoke(this)
+    }
+
+    override fun endSession() = stop()
+
+    override fun delete() = ChatSessions.delete(appContext, this)
+
+    /** Ends the process for good (chat deleted). */
+    fun close() {
+        cancel()
+        connection?.close()
+        connection = null
+        scope.cancel()
+        listeners.clear()
+        onActiveChanged?.invoke(this)
+    }
+
+    /** Snapshot for [ChatStore]; call on the main thread. */
+    fun snapshot() = SavedChat(
+        id = id,
+        agent = agent.name,
+        cwd = cwd.path,
+        title = title,
+        acpSessionId = acpSessionId,
+        updatedAt = updatedAt,
+        items = items.toList(),
+    )
+
+    // ---- user actions ------------------------------------------------------------------
+
+    /** First message of a new chat: shown now, sent as soon as the agent is ready (even after sign-in). */
+    private var pendingPrompt: Pair<String, List<Attachment>>? = null
+
+    fun queue(text: String, attachments: List<Attachment>) {
+        if (text.isBlank() && attachments.isEmpty()) return
+        showUserMessage(text, attachments)
+        pendingPrompt = text to attachments
+        changed()
+        if (state == ChatState.Ready) flushPending()
+    }
+
+    private fun flushPending() {
+        val (text, attachments) = pendingPrompt ?: return
+        pendingPrompt = null
+        prompt(text, attachments)
+    }
+
+    private fun showUserMessage(text: String, attachments: List<Attachment>) {
+        // Like ChatGPT: the first message names the chat (an agent-provided title still wins later).
+        if (items.none { it is ChatItem.User } && title == defaultTitle) {
+            title = text.trim().lineSequence().firstOrNull { it.isNotBlank() }?.take(48)
+                ?: attachments.firstOrNull()?.name ?: title
+        }
+        add(ChatItem.User(text.trim(), attachments.map { it.name }))
+    }
+
+    private val defaultTitle get() = "${agent.displayName} · ${cwd.name}"
+
+    override fun send(text: String, attachments: List<Attachment>) {
+        if (state != ChatState.Ready || (text.isBlank() && attachments.isEmpty())) return
+        showUserMessage(text, attachments)
+        prompt(text, attachments)
+    }
+
+    private fun prompt(text: String, attachments: List<Attachment>) {
+        val conn = connection ?: return
+        val sid = sessionId ?: return
+        state = ChatState.Running
+        changed()
+        scope.launch {
+            try {
+                val blocks = withContext(Dispatchers.IO) { Attachments.toPromptBlocks(cwd, attachments, caps) }
+                val result = conn.request("session/prompt", buildJsonObject {
+                    put("sessionId", sid)
+                    put("prompt", buildJsonArray {
+                        // ACP requires at least one block; a text block also gives the agent context for files.
+                        add(buildJsonObject {
+                            put("type", "text")
+                            put("text", text.trim().ifEmpty { "See the attached file(s)." })
+                        })
+                        blocks.forEach { add(it) }
+                    })
+                }).jsonObject
+                when (val reason = result.string("stopReason")) {
+                    "end_turn", null -> Unit
+                    "cancelled" -> add(ChatItem.Notice("Stopped"))
+                    else -> add(ChatItem.Notice("Turn ended: ${reason.replace('_', ' ')}"))
+                }
+                state = ChatState.Ready
+                onTurnFinished?.invoke(this@ChatSession, lastAgentText())
+            } catch (e: AcpException) {
+                state = when {
+                    // The sign-in card explains this; no need for an error notice (or the agent's debug log).
+                    e.code == AcpException.AUTH_REQUIRED -> ChatState.AuthRequired
+                    conn.exited -> ChatState.Failed(failureText(e))
+                    else -> {
+                        add(ChatItem.Notice(e.message ?: "Request failed", isError = true))
+                        ChatState.Ready
+                    }
+                }
+                // Not delivered: resend automatically once the user has signed in and the agent restarts.
+                if (state == ChatState.AuthRequired) pendingPrompt = text to attachments
+            }
+            changed()
+        }
+    }
+
+    override fun cancel() {
+        val conn = connection ?: return
+        val sid = sessionId ?: return
+        // Pending permission prompts are answered "cancelled" as the protocol requires.
+        items.filterIsInstance<ChatItem.Permission>().filter { it.resolved == null }.forEach {
+            it.resolved = "Cancelled"
+            it.decision.complete(null)
+            updated(it)
+        }
+        scope.launch {
+            runCatching { conn.notify("session/cancel", buildJsonObject { put("sessionId", sid) }) }
+        }
+    }
+
+    override fun setMode(modeId: String) {
+        val conn = connection ?: return
+        val sid = sessionId ?: return
+        scope.launch {
+            try {
+                conn.request("session/set_mode", buildJsonObject {
+                    put("sessionId", sid)
+                    put("modeId", modeId)
+                })
+                currentModeId = modeId
+            } catch (e: AcpException) {
+                add(ChatItem.Notice("Couldn't switch mode: ${e.message}", isError = true))
+            }
+        }
+    }
+
+    override fun setConfigOption(id: String, value: String) = setConfig(id, kotlinx.serialization.json.JsonPrimitive(value))
+    override fun setConfigOption(id: String, value: Boolean) = setConfig(id, kotlinx.serialization.json.JsonPrimitive(value))
+
+    private fun setConfig(id: String, value: JsonPrimitive) {
+        val conn = connection ?: return
+        val sid = sessionId ?: return
+        scope.launch {
+            try {
+                val result = conn.request("session/set_config_option", buildJsonObject {
+                    put("sessionId", sid)
+                    put("configId", id)
+                    if (value.isString) put("value", value.content) else put("value", value)
+                    if (!value.isString) put("type", "boolean")
+                }) as? JsonObject
+                result?.get("configOptions")?.let { configOptions = AcpExtras.parseConfigOptions(it) }
+            } catch (e: AcpException) {
+                add(ChatItem.Notice("Couldn't change setting: ${e.message}", isError = true))
+            }
+        }
+    }
+
+    override fun answerPermission(item: ChatItem.Permission, option: PermissionOption) {
+        if (item.resolved != null) return
+        item.resolved = option.name
+        item.decision.complete(option.optionId)
+        updated(item)
+        changed()
+    }
+
+    /** Answers a permission prompt identified by its item key (from a remote device). */
+    fun answerPermission(itemKey: Long, optionId: String) {
+        val item = items.firstOrNull { it.key == itemKey } as? ChatItem.Permission ?: return
+        val option = item.options.firstOrNull { it.optionId == optionId } ?: return
+        answerPermission(item, option)
+    }
+
+    // ---- ACP handler -------------------------------------------------------------------
+
+    override suspend fun onRequest(method: String, params: JsonObject): JsonElement = when (method) {
+        "session/request_permission" -> requestPermission(params)
+        "fs/read_text_file" -> readTextFile(params)
+        "fs/write_text_file" -> writeTextFile(params)
+        else -> throw AcpException(AcpException.METHOD_NOT_FOUND, "Method not supported: $method")
+    }
+
+    override fun onNotification(method: String, params: JsonObject) {
+        if (method != "session/update") return
+        val update = params["update"] as? JsonObject ?: return
+        val kind = update.string("sessionUpdate")
+        // session/load replays the whole history; the saved transcript already shows it.
+        // Mode, commands and settings still apply to the resumed session.
+        if (replaying && kind !in setOf("current_mode_update", "available_commands_update", "config_option_update")) return
+        when (kind) {
+            "agent_message_chunk" -> appendChunk(update, thought = false)
+            "agent_thought_chunk" -> appendChunk(update, thought = true)
+            "tool_call", "tool_call_update" -> upsertToolCall(update)
+            "plan" -> updatePlan(update)
+            "current_mode_update" -> currentModeId = update.string("currentModeId") ?: currentModeId
+            "session_info_update" -> update.string("title")?.let { title = it }
+            "notice" -> (update.string("message") ?: update.string("text"))?.let { add(ChatItem.Notice(it)) }
+            "available_commands_update" -> commands = AcpExtras.parseCommands(update["availableCommands"])
+            "config_option_update" -> configOptions = AcpExtras.parseConfigOptions(update["configOptions"])
+            "usage_update" -> AcpExtras.parseUsage(update)?.let { usage = it }
+            // user_message_chunk is a replay of our own messages: already shown.
+        }
+    }
+
+    override fun onStderr(line: String) {
+        stderrTail.addLast(line)
+        while (stderrTail.size > 30) stderrTail.removeFirst()
+        // Some CLIs print a sign-in URL instead of opening a browser; offer it as a button.
+        if (LOGIN_HINT.containsMatchIn(line)) URL_REGEX.find(line)?.let { loginUrl = it.value }
+    }
+
+    override fun onExit(code: Int) {
+        // Only react if the *current* connection died (not one replaced by restart()).
+        if (connection?.exited != true) return
+        if (state != ChatState.AuthRequired) state = ChatState.Failed("Agent exited (code $code)${stderrSuffix()}")
+        onActiveChanged?.invoke(this)
+    }
+
+    // ---- update handling ---------------------------------------------------------------
+
+    private fun add(item: ChatItem) {
+        items += item
+        listeners.forEach { it.onItemAdded(this, item) }
+    }
+
+    private fun updated(item: ChatItem) = listeners.forEach { it.onItemUpdated(this, item) }
+
+    private fun meta() = listeners.forEach { it.onMetaChanged(this) }
+
+    private fun appendChunk(update: JsonObject, thought: Boolean) {
+        val content = update["content"] as? JsonObject ?: return
+        val text = when (content.string("type")) {
+            "text" -> content.string("text")
+            "resource_link" -> content.string("uri")?.let { "[$it]" }
+            "image" -> "[image]"
+            else -> null
+        } ?: return
+        val messageId = update.string("messageId")
+        val last = items.lastOrNull()
+        val item: ChatItem = if (thought) {
+            (last as? ChatItem.Thought)?.takeIf { it.messageId == messageId }
+                ?: ChatItem.Thought(messageId).also(::add)
+        } else {
+            (last as? ChatItem.AgentText)?.takeIf { it.messageId == messageId }
+                ?: ChatItem.AgentText(messageId).also(::add)
+        }
+        when (item) {
+            is ChatItem.Thought -> item.text += text
+            is ChatItem.AgentText -> item.text += text
+            else -> return
+        }
+        listeners.forEach { it.onTextAppended(this, item, text) }
+    }
+
+    private fun upsertToolCall(update: JsonObject) {
+        val id = update.string("toolCallId") ?: return
+        val existing = toolCalls[id]
+        val item = existing ?: ChatItem.ToolCall(id).also { toolCalls[id] = it }
+        update.string("title")?.let { item.title = it }
+        update.string("kind")?.let { item.kind = it }
+        update.string("status")?.let { item.status = it }
+        (update["content"] as? JsonArray)?.let { arr -> item.content = arr.mapNotNull(::parseToolContent) }
+        (update["locations"] as? JsonArray)?.let { arr ->
+            item.locations = arr.mapNotNull { loc ->
+                val obj = loc as? JsonObject ?: return@mapNotNull null
+                val path = obj.string("path") ?: return@mapNotNull null
+                obj["line"]?.jsonPrimitive?.intOrNull?.let { "$path:$it" } ?: path
+            }
+        }
+        if (existing == null) add(item) else updated(item)
+    }
+
+    private fun parseToolContent(el: JsonElement): ToolContent? {
+        val obj = el as? JsonObject ?: return null
+        return when (obj.string("type")) {
+            "content" -> (obj["content"] as? JsonObject)?.string("text")?.let { ToolContent.Text(it) }
+            "diff" -> ToolContent.Diff(obj.string("path") ?: "?", obj.string("oldText"), obj.string("newText") ?: "")
+            "terminal" -> obj.string("terminalId")?.let { ToolContent.Terminal(it) }
+            else -> null
+        }
+    }
+
+    private fun updatePlan(update: JsonObject) {
+        val entries = (update["entries"] as? JsonArray)?.mapNotNull { el ->
+            val obj = el as? JsonObject ?: return@mapNotNull null
+            PlanEntry(obj.string("content") ?: "", obj.string("status") ?: "pending", obj.string("priority") ?: "medium")
+        } ?: return
+        // Keep one live plan card per run of updates; a new plan after other output gets a new card.
+        val existing = items.lastOrNull { it is ChatItem.Plan || it is ChatItem.User } as? ChatItem.Plan
+        val plan = existing ?: ChatItem.Plan()
+        plan.entries = entries
+        if (existing == null) add(plan) else updated(plan)
+    }
+
+    private fun readModes(obj: JsonObject?) {
+        obj ?: return
+        modes = (obj["availableModes"] as? JsonArray)?.mapNotNull { el ->
+            val m = el as? JsonObject ?: return@mapNotNull null
+            SessionMode(m.string("id") ?: return@mapNotNull null, m.string("name") ?: "?", m.string("description"))
+        }.orEmpty()
+        currentModeId = obj.string("currentModeId")
+    }
+
+    private suspend fun requestPermission(params: JsonObject): JsonElement {
+        val toolCall = params["toolCall"] as? JsonObject
+        toolCall?.let(::upsertToolCall)
+        val toolTitle = toolCall?.string("title")
+            ?: toolCall?.string("toolCallId")?.let { toolCalls[it]?.title }
+            ?: "Tool call"
+        val options = (params["options"] as? JsonArray)?.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            PermissionOption(o.string("optionId") ?: return@mapNotNull null, o.string("name") ?: "?", o.string("kind") ?: "")
+        }.orEmpty()
+        val item = ChatItem.Permission(toolTitle, options, CompletableDeferred())
+        add(item)
+        onNeedsAttention?.invoke(this, "Approve: $toolTitle")
+        val chosen = item.decision.await()
+        return buildJsonObject {
+            putJsonObject("outcome") {
+                if (chosen == null) {
+                    put("outcome", "cancelled")
+                } else {
+                    put("outcome", "selected")
+                    put("optionId", chosen)
+                }
+            }
+        }
+    }
+
+    private suspend fun readTextFile(params: JsonObject): JsonElement = withContext(Dispatchers.IO) {
+        val file = File(params.string("path") ?: throw AcpException(-32602, "path required"))
+        if (!file.isFile) throw AcpException(-32002, "File not found: ${file.path}")
+        val line = params["line"]?.jsonPrimitive?.intOrNull
+        val limit = params["limit"]?.jsonPrimitive?.intOrNull
+        val text = if (line == null && limit == null) {
+            file.readText()
+        } else {
+            file.useLines { lines ->
+                lines.drop(((line ?: 1) - 1).coerceAtLeast(0))
+                    .let { if (limit != null) it.take(limit) else it }
+                    .joinToString("\n")
+            }
+        }
+        buildJsonObject { put("content", text) }
+    }
+
+    private suspend fun writeTextFile(params: JsonObject): JsonElement = withContext(Dispatchers.IO) {
+        val file = File(params.string("path") ?: throw AcpException(-32602, "path required"))
+        file.parentFile?.mkdirs()
+        file.writeText(params.string("content") ?: "")
+        JsonObject(emptyMap())
+    }
+
+    // ---- helpers -----------------------------------------------------------------------
+
+    private fun changed() {
+        updatedAt = System.currentTimeMillis()
+        onChanged?.invoke(this)
+    }
+
+    private fun lastAgentText(): String =
+        (items.lastOrNull { it is ChatItem.AgentText } as? ChatItem.AgentText)?.text?.trim()?.lineSequence()
+            ?.firstOrNull { it.isNotBlank() }.orEmpty()
+
+    private fun failureText(e: Exception): String = (e.message ?: e.toString()) + stderrSuffix()
+
+    private fun stderrSuffix(): String =
+        if (stderrTail.isEmpty()) "" else "\n\n" + stderrTail.takeLast(8).joinToString("\n")
+
+    private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
+
+    companion object {
+        private const val TAG = "ChatSession"
+        private val URL_REGEX = Regex("""https://\S+""")
+        private val LOGIN_HINT = Regex("(?i)auth|login|log in|sign in|oauth")
+    }
+}
