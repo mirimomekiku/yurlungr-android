@@ -1,0 +1,23 @@
+package dev.yurlungr.app.ui
+
+import androidx.compose.material3.IconButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.ui.unit.dp
+
+/** Opens the app sidebar; null outside the app shell. */
+val LocalOpenDrawer = compositionLocalOf<(() -> Unit)?> { null }
+
+/** True on top-level screens, which show ☰ (sidebar) instead of ‹ (back). */
+val LocalTopLevel = compositionLocalOf { false }
+
+/** ☰ on top-level screens, ‹ on screens deeper in the stack. */
+@Composable
+fun NavButton(onBack: () -> Unit) {
+    val openDrawer = LocalOpenDrawer.current
+    if (LocalTopLevel.current && openDrawer != null) {
+        IconButton(onClick = openDrawer) { PhIcon(Ph.List, "Open menu", size = 24.dp) }
+    } else {
+        IconButton(onClick = onBack) { PhIcon(Ph.CaretLeft, "Back", size = 24.dp) }
+    }
+}
