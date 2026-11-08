@@ -1,0 +1,282 @@
+package dev.yurlungr.app.setup
+
+import android.app.ActivityManager
+import android.content.Context
+import android.os.Build
+import android.os.PowerManager
+import android.os.StatFs
+import android.provider.Settings
+import androidx.core.app.NotificationManagerCompat
+import dev.yurlungr.app.agents.agentStatuses
+import dev.yurlungr.app.runtime.CommandRunner
+import dev.yurlungr.app.runtime.RuntimeEnv
+import dev.yurlungr.app.runtime.RuntimePaths
+import java.util.Locale
+
+enum class CheckStatus { Pass, Warn, Fail, Info }
+
+/** Fixes the UI knows how to offer; kept as data so checks stay free of UI/Activity code. */
+enum class Fix {
+    InstallBootstrap, Notifications, BatteryOptimization, PhantomProcesses, OpenTerminal, InstallAgents, InstallAndroidSdk,
+}
+
+data class Check(
+    val id: String,
+    val title: String,
+    val status: CheckStatus,
+    val detail: String,
+    val fix: Fix? = null,
+    val required: Boolean = true,
+)
+
+data class ReportLine(val status: String, val name: String, val detail: String)
+
+/** Environment checks for the embedded runtime. Each is cheap and safe to re-run. */
+object DoctorChecks {
+    private const val GB = 1024L * 1024 * 1024
+    private const val PREFS = "doctor"
+    private const val KEY_PHANTOM_DONE = "phantom_fix_done"
+
+    suspend fun runAll(context: Context): List<Check> {
+        val paths = RuntimePaths(context)
+        return buildList {
+            add(device())
+            add(storage(paths))
+            add(appIdentity(context, paths))
+            add(execAllowed(context))
+            add(bootstrap(paths))
+            if (paths.isBootstrapInstalled) {
+                add(shell(paths))
+                add(apt(paths))
+                add(termuxExec(paths))
+                add(agents(paths))
+                add(androidSdk(paths))
+            }
+            add(notifications(context))
+            add(battery(context))
+            add(phantomProcesses(context))
+            add(cliReport(paths))
+        }
+    }
+
+    fun markPhantomFixDone(context: Context, done: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_PHANTOM_DONE, done).apply()
+    }
+
+    fun readReport(context: Context): List<ReportLine> {
+        val file = RuntimePaths(context).spikeReport
+        if (!file.isFile) return emptyList()
+        return file.readLines().mapNotNull { line ->
+            val parts = line.split('\t', limit = 3)
+            if (parts.size == 3) ReportLine(parts[0], parts[1], parts[2]) else null
+        }
+    }
+
+    private fun device(): Check {
+        val arch = RuntimePaths.termuxArch()
+        val detail = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) · " +
+            "${Build.MANUFACTURER} ${Build.MODEL} · ${Build.SUPPORTED_ABIS.firstOrNull()}"
+        return Check(
+            "device", "Device", if (arch != null) CheckStatus.Pass else CheckStatus.Fail,
+            if (arch != null) detail else "$detail — no Termux packages for this ABI",
+        )
+    }
+
+    private fun storage(paths: RuntimePaths): Check {
+        val free = runCatching { StatFs(paths.filesDir.parentFile!!.path).availableBytes }.getOrDefault(0L)
+        val freeGb = String.format(Locale.US, "%.1f", free.toDouble() / GB)
+        return if (free >= 4 * GB) {
+            Check("storage", "Free storage", CheckStatus.Pass, "$freeGb GB free")
+        } else {
+            Check(
+                "storage", "Free storage", CheckStatus.Warn,
+                "$freeGb GB free — agent CLIs, JDK and Gradle need roughly 3–4 GB",
+                required = false,
+            )
+        }
+    }
+
+    private fun appIdentity(context: Context, paths: RuntimePaths): Check {
+        if (!paths.dataDirMatches(context)) {
+            return Check(
+                "identity", "Data directory", CheckStatus.Fail,
+                "App data is at ${context.filesDir}, not ${paths.filesDir}. Packages only work for the " +
+                    "primary user — install outside work profiles / secondary users.",
+            )
+        }
+        return if (paths.packageName == "com.termux") {
+            Check("identity", "App ID", CheckStatus.Pass, "com.termux — official Termux bootstrap and repos are compatible")
+        } else {
+            Check(
+                "identity", "App ID", CheckStatus.Fail,
+                "${paths.packageName}: official packages are built for /data/data/com.termux. " +
+                    "Use a bootstrap rebuilt with TERMUX_APP_PACKAGE=${paths.packageName}.",
+            )
+        }
+    }
+
+    private fun execAllowed(context: Context): Check {
+        val target = context.applicationInfo.targetSdkVersion
+        return if (target <= 28) {
+            Check("exec", "Can run binaries", CheckStatus.Pass, "targetSdk $target allows exec() from app data")
+        } else {
+            Check("exec", "Can run binaries", CheckStatus.Fail, "targetSdk $target blocks exec() from app data (needs ≤ 28)")
+        }
+    }
+
+    private fun bootstrap(paths: RuntimePaths): Check =
+        if (paths.isBootstrapInstalled) {
+            Check("bootstrap", "Base system", CheckStatus.Pass, "Installed at ${paths.prefix}")
+        } else {
+            Check(
+                "bootstrap", "Base system", CheckStatus.Fail,
+                "Not installed. Downloads the latest Termux bootstrap (~30 MB) from GitHub.",
+                fix = Fix.InstallBootstrap,
+            )
+        }
+
+    private suspend fun shell(paths: RuntimePaths): Check {
+        val r = CommandRunner.shell(paths, "echo \"\$(uname -m) · bash \$BASH_VERSION\"", timeoutMs = 15_000)
+        return Check(
+            "shell", "Shell runs", if (r.ok) CheckStatus.Pass else CheckStatus.Fail,
+            if (r.ok) r.firstLine else "exit ${r.exitCode}: ${r.output.takeLast(300)}",
+        )
+    }
+
+    private suspend fun apt(paths: RuntimePaths): Check {
+        val r = CommandRunner.shell(paths, "apt --version", timeoutMs = 15_000)
+        return Check(
+            "apt", "Package manager", if (r.ok) CheckStatus.Pass else CheckStatus.Fail,
+            if (r.ok) r.firstLine else "exit ${r.exitCode}: ${r.output.takeLast(300)}",
+        )
+    }
+
+    private fun termuxExec(paths: RuntimePaths): Check {
+        val lib = RuntimeEnv.termuxExecLib(paths)
+        return if (lib != null) {
+            Check("termux-exec", "Shebang fixups (termux-exec)", CheckStatus.Pass, lib.name)
+        } else {
+            Check(
+                "termux-exec", "Shebang fixups (termux-exec)", CheckStatus.Warn,
+                "Not found — scripts using #!/usr/bin/env may fail. Run: pkg install termux-exec",
+                required = false,
+            )
+        }
+    }
+
+    private fun notifications(context: Context): Check {
+        val enabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+        return Check(
+            "notifications", "Notifications", if (enabled) CheckStatus.Pass else CheckStatus.Warn,
+            if (enabled) "Enabled" else "Disabled — you won't see runtime status or agent alerts",
+            fix = if (enabled) null else Fix.Notifications,
+            required = false,
+        )
+    }
+
+    private fun battery(context: Context): Check {
+        val ignoring = context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
+        return Check(
+            "battery", "Battery optimization", if (ignoring) CheckStatus.Pass else CheckStatus.Warn,
+            if (ignoring) "Unrestricted" else "Restricted — Android may kill long-running agents in the background",
+            fix = if (ignoring) null else Fix.BatteryOptimization,
+            required = false,
+        )
+    }
+
+    private fun phantomProcesses(context: Context): Check {
+        val sdk = Build.VERSION.SDK_INT
+        if (sdk < 31) return Check("phantom", "Phantom process killer", CheckStatus.Pass, "Not present before Android 12")
+
+        // Android 12L+ exposes this as a global setting ("Disable child process restrictions").
+        val monitor = runCatching {
+            Settings.Global.getString(context.contentResolver, "settings_enable_monitor_phantom_procs")
+        }.getOrNull()
+        if (monitor == "false") {
+            return Check("phantom", "Phantom process killer", CheckStatus.Pass, "Disabled (child process restrictions off)")
+        }
+        val markedDone = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_PHANTOM_DONE, false)
+        if (markedDone) {
+            return Check(
+                "phantom", "Phantom process killer", CheckStatus.Pass,
+                "Marked as fixed by you (Android 12 doesn't let apps verify this)",
+                fix = Fix.PhantomProcesses,
+            )
+        }
+        return Check(
+            "phantom", "Phantom process killer", CheckStatus.Warn,
+            "Android may kill processes beyond 32 (signal 9) during npm/Gradle/agent runs. One-time fix needed.",
+            fix = Fix.PhantomProcesses,
+            required = false,
+        )
+    }
+
+    private fun agents(paths: RuntimePaths): Check {
+        val statuses = agentStatuses(paths)
+        val missing = statuses.filter { !it.installed }.map { it.agent.displayName }
+        return if (missing.isEmpty()) {
+            val signedOut = statuses.filter { it.signedIn == false }.map { it.agent.displayName }
+            Check(
+                "agents", "Coding agents", CheckStatus.Pass,
+                "All agents installed" +
+                    if (signedOut.isEmpty()) " and signed in" else " · not signed in: ${signedOut.joinToString()}",
+                required = false,
+            )
+        } else {
+            Check(
+                "agents", "Coding agents", CheckStatus.Warn,
+                "Not installed: ${missing.joinToString()}",
+                fix = Fix.InstallAgents,
+                required = false,
+            )
+        }
+    }
+
+    private fun androidSdk(paths: RuntimePaths): Check =
+        if (paths.isAndroidSdkInstalled) {
+            Check(
+                "android-sdk", "Android SDK (build APKs)", CheckStatus.Pass,
+                "Platform 36 + native build tools at ~/android-sdk",
+                required = false,
+            )
+        } else {
+            Check(
+                "android-sdk", "Android SDK (build APKs)", CheckStatus.Info,
+                "Not set up. Needed to build Android apps on this phone (~600 MB).",
+                fix = Fix.InstallAndroidSdk,
+                required = false,
+            )
+        }
+
+    private fun cliReport(paths: RuntimePaths): Check {
+        if (!paths.spikeReport.isFile) {
+            return Check(
+                "cli-report", "Agent CLI compatibility", CheckStatus.Info,
+                "Not run yet. In the terminal: bash ~/spike-test.sh",
+                fix = if (paths.isBootstrapInstalled) Fix.OpenTerminal else null,
+                required = false,
+            )
+        }
+        val lines = paths.spikeReport.readLines()
+        val pass = lines.count { it.startsWith("PASS\t") }
+        val fail = lines.count { it.startsWith("FAIL\t") }
+        return Check(
+            "cli-report", "Agent CLI compatibility", if (fail == 0) CheckStatus.Pass else CheckStatus.Warn,
+            "$pass passed · $fail failed — details below",
+            required = false,
+        )
+    }
+
+    /** ADB/manual steps for the phantom process killer, by Android version. */
+    fun phantomFixInstructions(): Pair<String, String?> = when {
+        Build.VERSION.SDK_INT >= 34 ->
+            "Developer options → enable “Disable child process restrictions”." to null
+        Build.VERSION.SDK_INT >= 32 ->
+            "Run once from a computer with USB debugging enabled:" to
+                "adb shell settings put global settings_enable_monitor_phantom_procs false"
+        else ->
+            "Android 12: run once from a computer with USB debugging enabled (survives reboots):" to
+                "adb shell \"/system/bin/device_config set_sync_disabled_for_tests persistent; " +
+                "/system/bin/device_config put activity_manager max_phantom_processes 2147483647\""
+    }
+}
