@@ -189,7 +189,7 @@ private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Un
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).widthIn(max = 280.dp)) {
                     Text(chat.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text(
-                        listOfNotNull(chat.cwdLabel, stateLabel(chat.state), chat.usage?.let(AcpExtras::usageLabel)).joinToString(" · "),
+                        listOfNotNull(chat.cwdLabel, stateLabel(chat.state), if (chat.skipPermissions) "Skip permissions enabled" else null, chat.usage?.let(AcpExtras::usageLabel)).joinToString(" · "),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

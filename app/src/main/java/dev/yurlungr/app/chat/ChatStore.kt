@@ -28,6 +28,7 @@ data class SavedChat(
     val acpSessionId: String?,
     val updatedAt: Long,
     val items: List<ChatItem>,
+    val skipPermissions: Boolean = false,
 )
 
 /**
@@ -72,6 +73,7 @@ object ChatStore {
         put("agent", chat.agent)
         put("cwd", chat.cwd)
         put("title", chat.title)
+        put("skipPermissions", chat.skipPermissions)
         chat.acpSessionId?.let { put("acpSessionId", it) }
         put("updatedAt", chat.updatedAt)
         putJsonArray("items") { chat.items.forEach { add(encodeItem(it)) } }
@@ -148,6 +150,7 @@ object ChatStore {
         agent = obj.str("agent") ?: error("missing agent"),
         cwd = obj.str("cwd") ?: error("missing cwd"),
         title = obj.str("title") ?: "Chat",
+        skipPermissions = (obj["skipPermissions"] as? JsonPrimitive)?.booleanOrNull ?: false,
         acpSessionId = obj.str("acpSessionId"),
         updatedAt = (obj["updatedAt"] as? JsonPrimitive)?.longOrNull ?: 0L,
         items = (obj["items"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonObject)?.let(::decodeItem) },

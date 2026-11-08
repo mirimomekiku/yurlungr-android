@@ -137,23 +137,27 @@ fun RemoteHomeScreen(host: RemoteHost, onBack: () -> Unit, onOpenChat: (String) 
 
     newChatFor?.let { agent ->
         var folder by remember { mutableStateOf("scratch") }
+        var skipPermissions by remember { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = { newChatFor = null },
             title = { Text("New ${agent.displayName} chat on ${conn.deviceName}") },
             text = {
-                OutlinedTextField(
-                    folder,
-                    { folder = it },
-                    label = { Text("Project folder") },
-                    supportingText = { Text("~/projects/${folder.trim()} on the host") },
-                    singleLine = true,
-                    keyboardOptions = Keyboards.Identifier,
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    dev.yurlungr.app.chat.PermissionPicker(skipPermissions) { skipPermissions = it }
+                    OutlinedTextField(
+                        folder,
+                        { folder = it },
+                        label = { Text("Project folder") },
+                        supportingText = { Text("~/projects/${folder.trim()} on the host") },
+                        singleLine = true,
+                        keyboardOptions = Keyboards.Identifier,
+                    )
+                }
             },
             confirmButton = {
                 Button(onClick = {
                     newChatFor = null
-                    conn.createChat(agent, folder.trim().ifEmpty { "scratch" }) { onOpenChat(it.id) }
+                    conn.createChat(agent, folder.trim().ifEmpty { "scratch" }, skipPermissions) { onOpenChat(it.id) }
                 }) { Text("Start") }
             },
             dismissButton = { TextButton(onClick = { newChatFor = null }) { Text("Cancel") } },

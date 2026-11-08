@@ -28,6 +28,8 @@ interface ChatModel {
     val modes: List<SessionMode>
     val currentModeId: String?
     val loginUrl: String?
+    /** Whether this chat opted into the agent's skip-permissions override. */
+    val skipPermissions: Boolean get() = false
     /** The agent runs on another device: sign-in has to happen there. */
     val isRemote: Boolean
     val isRunning: Boolean get() = state == ChatState.Running

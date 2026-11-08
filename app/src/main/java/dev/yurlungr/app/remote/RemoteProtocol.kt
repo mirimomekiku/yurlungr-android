@@ -81,6 +81,7 @@ object RemoteProtocol {
         put("t", "meta")
         put("chat", chat.id)
         put("title", chat.title)
+        put("skipPermissions", chat.skipPermissions)
         put("cwd", chat.cwdLabel)
         chat.currentModeId?.let { put("mode", it) }
         chat.loginUrl?.let { put("loginUrl", it) }

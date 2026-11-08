@@ -44,8 +44,8 @@ object ChatSessions {
 
     val activeCount: Int get() = chats.count { it.isActive }
 
-    fun create(context: Context, agent: Agent, cwd: File): ChatSession {
-        val chat = wire(ChatSession(context.applicationContext, agent, cwd))
+    fun create(context: Context, agent: Agent, cwd: File, skipPermissions: Boolean = false): ChatSession {
+        val chat = wire(ChatSession(context.applicationContext, agent, cwd, skipPermissions = skipPermissions))
         chats.add(0, chat)
         // Save right away: a chat stuck at sign-in would otherwise vanish on the next restart.
         chat.onChanged?.invoke(chat)

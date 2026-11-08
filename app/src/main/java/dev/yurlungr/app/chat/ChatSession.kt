@@ -44,6 +44,7 @@ class ChatSession(
     override val agent: Agent,
     val cwd: File,
     restored: SavedChat? = null,
+    skipPermissions: Boolean = restored?.skipPermissions ?: false,
 ) : ChatModel, AcpConnection.Handler {
     override val id: String = restored?.id ?: UUID.randomUUID().toString()
     private val appContext = context.applicationContext
@@ -56,6 +57,8 @@ class ChatSession(
     override val cwdLabel: String get() = cwdLabel(cwd.path)
     override val folderName: String get() = cwd.name
     override val isRemote = false
+    override var skipPermissions by mutableStateOf(skipPermissions)
+        private set
 
     private var _state by mutableStateOf<ChatState>(ChatState.Saved)
     override var state: ChatState
@@ -158,7 +161,7 @@ class ChatSession(
             try {
                 cwd.mkdirs()
                 val process = withContext(Dispatchers.IO) {
-                    ProcessBuilder(paths.bash.path, "-c", "exec ${agent.acpCommand}")
+                    ProcessBuilder(paths.bash.path, "-c", "exec ${agent.launchCommand(skipPermissions)}")
                         .directory(cwd)
                         .apply {
                             environment().run {
@@ -194,6 +197,7 @@ class ChatSession(
                 val session = if (previous != null && canLoad) loadOrNew(conn, previous) else newSession(conn)
                 readModes(session["modes"] as? JsonObject)
                 session["configOptions"]?.let { configOptions = AcpExtras.parseConfigOptions(it) }
+                if (skipPermissions) applySkipPermissions(conn)
                 state = ChatState.Ready
                 changed()
                 flushPending()
@@ -204,6 +208,32 @@ class ChatSession(
                 state = ChatState.Failed(failureText(e))
             }
         }
+    }
+
+    private suspend fun applySkipPermissions(conn: AcpConnection) {
+        if (agent == Agent.Antigravity) return // applied by its documented ACP launch flag
+        val mode = PermissionModes.skipMode(modes)
+        if (mode != null) {
+            conn.request("session/set_mode", buildJsonObject {
+                put("sessionId", sessionId)
+                put("modeId", mode.id)
+            })
+            currentModeId = mode.id
+            return
+        }
+        val option = configOptions.firstOrNull { it.category == "mode" || it.id == "mode" }
+        val choice = option?.choices?.firstOrNull { PermissionModes.isSkipMode(it.value) }
+        if (option != null && choice != null) {
+            val response = conn.request("session/set_config_option", buildJsonObject {
+                put("sessionId", sessionId)
+                put("configId", option.id)
+                put("value", choice.value)
+            }) as? JsonObject
+            response?.get("configOptions")?.let { configOptions = AcpExtras.parseConfigOptions(it) }
+            return
+        }
+        // Never send a queued prompt under a different policy than the one requested.
+        error("${agent.displayName} doesn't advertise a skip-permissions mode. Start a chat with Agent default permissions, or update the agent.")
     }
 
     private suspend fun newSession(conn: AcpConnection): JsonObject {
@@ -284,6 +314,7 @@ class ChatSession(
         acpSessionId = acpSessionId,
         updatedAt = updatedAt,
         items = items.toList(),
+        skipPermissions = skipPermissions,
     )
 
     // ---- user actions ------------------------------------------------------------------
@@ -389,6 +420,9 @@ class ChatSession(
                     put("modeId", modeId)
                 })
                 currentModeId = modeId
+                if (agent != Agent.Antigravity) skipPermissions = PermissionModes.isSkipMode(modeId)
+                meta()
+                changed()
             } catch (e: AcpException) {
                 add(ChatItem.Notice("Couldn't switch mode: ${e.message}", isError = true))
             }
@@ -401,6 +435,7 @@ class ChatSession(
     private fun setConfig(id: String, value: JsonPrimitive) {
         val conn = connection ?: return
         val sid = sessionId ?: return
+        val isPermissionMode = configOptions.any { it.id == id && (it.category == "mode" || it.id == "mode") }
         scope.launch {
             try {
                 val result = conn.request("session/set_config_option", buildJsonObject {
@@ -410,6 +445,11 @@ class ChatSession(
                     if (!value.isString) put("type", "boolean")
                 }) as? JsonObject
                 result?.get("configOptions")?.let { configOptions = AcpExtras.parseConfigOptions(it) }
+                if (agent != Agent.Antigravity && isPermissionMode && value.isString) {
+                    skipPermissions = PermissionModes.isSkipMode(value.content)
+                    meta()
+                    changed()
+                }
             } catch (e: AcpException) {
                 add(ChatItem.Notice("Couldn't change setting: ${e.message}", isError = true))
             }

@@ -186,7 +186,7 @@ class RemoteConnection(val host: RemoteHost) {
         return newChat(id, summary.agent).also { it.open() }
     }
 
-    fun createChat(agent: Agent, folder: String, onCreated: (RemoteChat) -> Unit) {
+    fun createChat(agent: Agent, folder: String, skipPermissions: Boolean = false, onCreated: (RemoteChat) -> Unit) {
         val req = nextReq++
         pendingCreates[req] = onCreated
         send(buildJsonObject {
@@ -194,6 +194,7 @@ class RemoteConnection(val host: RemoteHost) {
             put("req", req)
             put("agent", agent.name)
             put("folder", folder)
+            put("skipPermissions", skipPermissions)
         })
     }
 

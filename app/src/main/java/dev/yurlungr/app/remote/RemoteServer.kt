@@ -274,7 +274,7 @@ object RemoteServer : ChatListener {
             "create" -> {
                 val agent = RemoteProtocol.agentOf(msg.str("agent")) ?: return
                 val folder = msg.str("folder").orEmpty().trim().takeIf { FOLDER.matches(it) } ?: "scratch"
-                val created = ChatSessions.create(appContext, agent, File(RuntimePaths(appContext).projects, folder))
+                val created = ChatSessions.create(appContext, agent, File(RuntimePaths(appContext).projects, folder), skipPermissions = (msg["skipPermissions"] as? JsonPrimitive)?.booleanOrNull ?: false)
                 client.subscriptions += created.id
                 refreshClients()
                 send(conn, buildJsonObject {

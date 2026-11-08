@@ -63,6 +63,8 @@ class RemoteChat(
         private set
     override var caps by mutableStateOf(PromptCaps())
         private set
+    override var skipPermissions by mutableStateOf(false)
+        private set
     override val isRemote = true
 
     /** Host item key ↔ local item (local items get their own keys). */
@@ -97,6 +99,7 @@ class RemoteChat(
     }
 
     private fun applyMeta(obj: JsonObject) {
+        skipPermissions = (obj["skipPermissions"] as? JsonPrimitive)?.booleanOrNull ?: false
         obj.str("title")?.let { title = it }
         obj.str("cwd")?.let { cwdLabel = it }
         currentModeId = obj.str("mode")

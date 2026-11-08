@@ -136,6 +136,7 @@ fun NewChatScreen(
     var input by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue("")) }
     val attachments = remember { mutableStateListOf<Attachment>() }
     var choosingFolder by remember { mutableStateOf(false) }
+    var skipPermissions by rememberSaveable { mutableStateOf(false) }
     val status = statuses.firstOrNull { it.agent == agent }
 
     Column(
@@ -187,6 +188,8 @@ fun NewChatScreen(
             ) {
                 AgentNotice(status, onLogin = { onLogin(agent) }, onInstall = onInstallAgents)
             }
+            Spacer(Modifier.height(12.dp))
+            PermissionPicker(skipPermissions) { skipPermissions = it }
             Spacer(Modifier.height(20.dp))
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
@@ -232,7 +235,7 @@ fun NewChatScreen(
             agentName = agent.displayName,
             onSend = { text, files ->
                 NewChatPrefs.save(context, agent, folder)
-                val chat = ChatSessions.create(context, agent, File(paths.projects, folder))
+                val chat = ChatSessions.create(context, agent, File(paths.projects, folder), skipPermissions = skipPermissions)
                 chat.queue(text, files)
                 input = TextFieldValue("")
                 attachments.clear()

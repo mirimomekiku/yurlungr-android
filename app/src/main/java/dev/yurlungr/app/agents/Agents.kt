@@ -58,6 +58,12 @@ enum class Agent(
         loginHint = "Sign in with your Google account in the browser that opens. If it asks for a code, paste it here. It exits when done.",
     );
 
+    /** Antigravity exposes its approval override as a launch flag, separately from ACP modes.
+     * https://antigravity.google/docs/ide/extensions/acp/
+     */
+    fun launchCommand(skipPermissions: Boolean): String =
+        if (this == Antigravity && skipPermissions) "$acpCommand --dangerously-skip-permissions" else acpCommand
+
     /** Extra environment for the ACP process. */
     fun env(paths: RuntimePaths): Map<String, String> = when (this) {
         Claude -> mapOf(
