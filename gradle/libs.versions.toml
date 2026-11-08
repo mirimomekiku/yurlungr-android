@@ -1,0 +1,27 @@
+[versions]
+agp = "8.13.1"
+kotlin = "2.2.21"
+coroutines = "1.10.2"
+serialization = "1.9.0"
+coreKtx = "1.17.0"
+activityCompose = "1.12.4"
+composeBom = "2026.06.01"
+termux = "v0.118.3"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+compose-ui = { group = "androidx.compose.ui", name = "ui" }
+compose-foundation = { group = "androidx.compose.foundation", name = "foundation" }
+compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+junit = { group = "junit", name = "junit", version = "4.13.2" }
+java-websocket = { group = "org.java-websocket", name = "Java-WebSocket", version = "1.6.0" }
+kotlinx-serialization-json ={ group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serialization" }
+termux-terminal-view ={ group = "com.github.termux.termux-app", name = "terminal-view", version.ref = "termux" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

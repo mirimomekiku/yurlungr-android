@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Lets the package installer read APKs built inside the runtime (granted per install). -->
+<paths>
+    <files-path name="files" path="." />
+</paths>
