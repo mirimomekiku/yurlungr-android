@@ -9,3 +9,6 @@
 .externalNativeBuild/
 .cxx/
 .kotlin/
+
+# Branding sources (mascot, poses) are kept locally, not in the repo.
+/branding/

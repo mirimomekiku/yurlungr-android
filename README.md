@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="branding/mascot.png" alt="The Yurlungr mascot: a pixel-art rainbow serpent in shadow with one glowing eye" width="200">
-</p>
-
 <h1 align="center">Yurlungr</h1>
 
 <p align="center">
@@ -201,7 +197,6 @@ credential file; Antigravity's is not documented, so it shows as *Installed*.
 | [DESIGN.md](DESIGN.md) | The Bento × Daylight design system: colour and tile tokens, type, shape, components, motion, icons, mascot |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How the embedded runtime, agents over ACP, projects, editor, terminal and two-phone sharing fit together, plus a source map |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Building, testing, opening screens directly, regenerating icons, and cutting a release |
-| [branding/](branding/README.md) | The Pixel Noir mascot, launcher icon and poses |
 
 ## Limitations
 

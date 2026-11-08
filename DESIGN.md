@@ -73,4 +73,5 @@ LobeHub Icons (`agents/AgentBadge.kt`), shown without a container.
 
 The mascot and launcher icon are the **Pixel Noir** rainbow serpent: 2.5D pixel art, red at the tail to
 violet at the head, one narrow glowing eye, no mouth. The brand voice is mysterious, never cute (no smiles,
-open mouths or tongues). Files and the icon recipe are in [`branding/`](branding/README.md).
+open mouths or tongues). The launcher icon is adaptive (`res/mipmap-anydpi-v26`) on a `#020104`
+background, with square and round PNGs for Android 7.
