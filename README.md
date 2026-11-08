@@ -58,6 +58,8 @@ and install it (allow installs from your browser or file manager when asked):
 Not sure? `adb shell getprop ro.product.cpu.abi` prints your phone's ABI. Each release lists SHA-256
 checksums in `SHA256SUMS.txt`.
 
+Changes in this version: [0.0.2 release notes](docs/releases/0.0.2.md).
+
 ## Quick start
 
 **Requirements:** an Android phone (Android 7.0+; arm64 is the tested target, developed on a ROG Phone 3
@@ -67,7 +69,7 @@ with Android 12 and a Pixel 6), about 4 GB free. To build from source: JDK 17+ a
 git clone https://github.com/mirimomekiku/yurlungr-android.git
 cd yurlungr-android
 ./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
 ```
 
 Then, on the phone:
@@ -96,6 +98,15 @@ Then, on the phone:
 - Attachments (＋): photos and files go to `<project>/.yurlungr/attachments/` (git-ignored) and are sent as
   ACP images, embedded text resources or file links, depending on what the agent accepts. Large photos
   are downscaled.
+- New chats offer **Permissions: Agent default / Skip (YOLO)**. Skip selects the agent's advertised
+  full-access ACP mode (or Antigravity's `--dangerously-skip-permissions` launch flag) before sending
+  the first prompt, and is remembered with that chat. If the installed agent doesn't expose such a
+  mode, the prompt stays queued and the chat shows an error. Existing chats expose the agent's supported
+  modes in the mode picker; Antigravity's launch flag requires a new chat to change. Remote new chats
+  have the same setup option.
+- Replies use CommonMark parsing with nested lists, headings, emphasis, quotes, tables, strikethrough,
+  fenced code and clickable links. Local file links open in the file viewer (Markdown previews or the
+  text editor); remote file links aren't opened on the client. Markdown previews also resolve relative links.
 - Chats are saved after every turn and restored as history after a restart; opening one restarts the
   agent and reloads its session (`session/load`).
 - Code: `chat/` (`ChatSession`, `ChatScreen`, `Composer`, `AcpExtras`, `Attachments`, `ChatStore`),
@@ -107,9 +118,14 @@ Then, on the phone:
 <summary><b>Projects & git</b></summary>
 
 - **Workspace** per project: the name (tap to switch projects or open *All projects*), Branch / Changes /
-  To push stat tiles, and Files · Changes · History · Chats tabs, with Chat, Build and Terminal along the
-  bottom. The sidebar's *Projects* reopens the last workspace.
-- **Files** is a tree with change marks; tapping a file opens the editor.
+  To push stat tiles, and Files · Changes · History · Chats tabs. Bottom actions include Chat, Terminal,
+  Android Build and web Run when applicable. The sidebar's *Projects* reopens the last workspace.
+- **Files** is a tree with change marks. **Git details** adds explicit ignored/not-ignored labels and
+  filters for All, Not ignored, Ignored and Uncommitted. Uncommitted lists every changed path, including
+  deletions; ignored paths come from Git itself (nested rules, exceptions and global exclusions apply).
+  Refresh re-reads the tree and Git state. Tapping a Markdown file (`.md`, case-insensitive, also
+  `.markdown` / `.mdown`) opens a rendered viewer with **Edit** to open the text editor; Back from the
+  editor returns to the preview. Other files open in the editor.
 - **Changes**: per-file diffs, *Commit all*, Pull (`--ff-only`), Push (sets the upstream on first push),
   a standard `.gitignore` when build output shows up, and *Publish to GitHub* (`gh repo create`).
 - **Branches** (tap the Branch tile): pull, create, switch (remote branches become tracking branches;
@@ -119,6 +135,20 @@ Then, on the phone:
   details with changed files and diffs.
 - **All projects** lists folders on the phone and, when `gh` is signed in, your GitHub repositories and
   those of your organisations (grouped by owner), marked Cloned, Local or not cloned, with search.
+- **Run locally** appears for detected Vite apps and static HTML sites, alongside Android's Build action
+  when both are present. Run setup lets you select an app folder, package manager, Vite script, port,
+  dependency installation and optional custom command. Workspace packages install dependencies at the
+  workspace root. Detection reads manifests only and checks common app folders without scanning caches.
+- Each web run owns a loopback-only address (`127.0.0.1`) and a managed terminal with live logs. The
+  project card shows setup/running/failure state, **Open browser**, **Logs**, and confirmed **Stop/Restart**.
+  Opening waits for that run's health endpoint; Vite HTTP and HMR are forwarded through its local listener.
+  The foreground runtime service keeps runs alive while you use the browser. Stop/Close ends the run's
+  process group, while preserving logs unless you close the terminal. App restarts stop stale runs;
+  servers do not automatically restart after process death.
+- Next.js, Astro, Nuxt, CRA and Angular are detected as candidates; their launch setups still need
+  on-device validation. Package presence alone does not make a repository runnable. Custom commands
+  must use `127.0.0.1` and the supplied `$PORT`; project-specific native dependencies can still fail on
+  Android and their errors remain in Logs. Static serving blocks dotfiles and paths outside the app folder.
 - **Terminal** from a project offers the terminals already open there, or a new one.
 - Git runs with `GIT_TERMINAL_PROMPT=0`, so a missing login fails fast instead of hanging.
 - Code: `projects/` (`Git`, `GitGraph`, `ProjectScreen`, `ProjectsScreen`, `HistoryView`, `BranchSheet`).
@@ -135,7 +165,8 @@ Then, on the phone:
   size (Settings → Editor).
 - *Format with Prettier* runs `npx prettier@3.3.3` in the file's folder (so project config applies) for
   JS/TS/JSON/CSS/SCSS/HTML/Markdown/YAML.
-- CRLF files are edited as LF and saved back as CRLF; files over 1 MB or binary files are not opened.
+- Markdown opens in a read-only rendered viewer with an Edit action; other text files open directly in
+  the editor. CRLF files are edited as LF and saved back as CRLF; files over 1 MB or binary files are not opened.
 - Code: `editor/`.
 
 </details>
@@ -145,7 +176,19 @@ Then, on the phone:
 
 - Termux's `terminal-view` with multiple sessions, a floating session rail (tap the session title),
   `[‹ 1/3 ›]` switching, and two rows of extra keys (esc, ctrl, alt, tab, arrows, home/end, page keys).
-- Code: `terminal/`.
+- Long-press a numbered session tile to open a bottom sheet with **Rename**, **Restart process**,
+  **End process**, or **Close session**. Restart, End and Close require confirmation; the rail's ×
+  shortcut also asks before closing.
+  Ending leaves the exited terminal visible; closing removes the tab. Restart reruns the original session command.
+- The **keyboard icon** pill to the right of the session arrows directly shows/hides the extra-key rows,
+  remembered across launches. It uses the same container as the session switcher.
+- New terminals show a compact status MOTD: current session, working folder,
+  Git branch, working/idle chats, approval count, and account sign-in indicators. Run `yurlungr-status`
+  to refresh after changing folders or signing in. Sign-in indicators use the same file-presence hints
+  as the app; Antigravity stays unknown. No credentials are read or displayed.
+  Uses Termux's `~/.termux/motd.sh` hook; an existing custom hook and `$PREFIX/etc/motd` are preserved.
+  `~/.hushlogin` still suppresses the automatic welcome, and `NO_COLOR` disables status styling.
+- Code: `terminal/`, `runtime/RuntimeStatus.kt`, `assets/motd.sh`.
 
 </details>
 
@@ -161,8 +204,8 @@ Then, on the phone:
 
 All of it is scripted in `app/src/main/assets/agents-setup.sh`; re-running it updates the agents. Each
 agent also gets a managed "you're on an Android phone" note in its own instructions file
-(`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`). Sign-in state is read from each CLI's
-credential file; Antigravity's is not documented, so it shows as *Installed*.
+(`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`). Sign-in state is inferred from each CLI's
+credential-file presence; Antigravity's is not documented, so it shows as *Installed*.
 
 </details>
 
@@ -206,6 +249,9 @@ credential file; Antigravity's is not documented, so it shows as *Installed*.
   sideloaded app, not a Play Store one.
 - `libtermux.so` (JitPack v0.118.3) is not 16 KB page-aligned; fine on current test devices.
 - Sign-in detection is a credential-file heuristic; API-key setups show as not signed in.
+- Local web runs have been verified with Vite 8.3.6 on arm64. Other frameworks are detected as
+  candidates, and project-specific native dependencies or other ABIs still need compatibility testing.
+- Alpha release APKs use the debug signing key; see [Development](DEVELOPMENT.md) before changing it.
 
 ## Credits
 
@@ -214,4 +260,5 @@ Built on [Termux](https://termux.dev) (bootstrap, packages and terminal librarie
 (also shown in Settings → Open-source licenses): [Inter](https://rsms.me/inter/) and
 [Space Grotesk](https://github.com/floriankarsten/space-grotesk) (SIL OFL 1.1),
 [Phosphor Icons](https://phosphoricons.com) (MIT), agent logos from
-[LobeHub Icons](https://github.com/lobehub/lobe-icons) (MIT; trademarks of their owners).
+[LobeHub Icons](https://github.com/lobehub/lobe-icons) (MIT; trademarks of their owners), and
+[CommonMark Java](https://github.com/commonmark/commonmark-java) (BSD 2-Clause) for Markdown parsing.
