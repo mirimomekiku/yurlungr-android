@@ -8,6 +8,7 @@ BASE = 'package/assets'
 # Kotlin name -> (weight, file stem)
 ICONS = {
     'List': ('regular', 'list'),
+    'Keyboard': ('regular', 'keyboard'),
     'NotePencil': ('regular', 'note-pencil'),
     'DotsThreeVertical': ('bold', 'dots-three-vertical'),
     'Plus': ('regular', 'plus'),

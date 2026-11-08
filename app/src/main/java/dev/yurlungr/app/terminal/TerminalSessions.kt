@@ -41,6 +41,22 @@ object TerminalSessions {
 
     /** Custom tab names (e.g. "Claude login"); otherwise the shell-set title is used. */
     private val names = HashMap<TerminalSession, String>()
+    private val commands = HashMap<TerminalSession, String?>()
+    fun endProcess(session: TerminalSession) { session.finishIfRunning() }
+
+    fun rename(session: TerminalSession, name: String) {
+        if (session !in sessions) return
+        if (name.isBlank()) names.remove(session) else names[session] = name.trim()
+        changeTick++
+    }
+
+    fun restart(context: Context, session: TerminalSession) {
+        if (session !in sessions) return
+        val command = commands[session]
+        val name = names[session]
+        close(context, session)
+        create(context, command, name)
+    }
 
     /**
      * Opens a terminal tab. With [command], runs it in a login bash and then leaves an
@@ -63,6 +79,7 @@ object TerminalSessions {
             TRANSCRIPT_ROWS,
             client,
         )
+        commands[session] = command
         if (name != null) names[session] = name
         sessions += session
         current = session
@@ -78,16 +95,13 @@ object TerminalSessions {
         session.finishIfRunning()
         sessions.remove(session)
         names.remove(session)
+        commands.remove(session)
         if (current === session) current = sessions.lastOrNull()
         RuntimeService.refresh(context)
     }
 
     fun closeAll(context: Context) {
-        sessions.toList().forEach { it.finishIfRunning() }
-        sessions.clear()
-        names.clear()
-        current = null
-        RuntimeService.refresh(context)
+        sessions.toList().forEach { close(context, it) }
     }
 
     fun title(session: TerminalSession, index: Int): String =

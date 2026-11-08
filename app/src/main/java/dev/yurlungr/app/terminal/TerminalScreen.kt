@@ -24,6 +24,7 @@ import dev.yurlungr.app.ui.LocalTopLevel
 import android.view.KeyEvent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -39,6 +40,12 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -50,9 +57,14 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import android.content.Context
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -92,12 +104,16 @@ fun TerminalScreen(onBack: () -> Unit) {
     val modifiers = remember { ModifierKeys() }
     var terminalView by remember { mutableStateOf<TerminalView?>(null) }
 
-    fun restart(finished: TerminalSession) {
-        TerminalSessions.close(context, finished)
-        TerminalSessions.create(context)
+    var actionSession by remember { mutableStateOf<TerminalSession?>(null) }
+    var requestedAction by remember { mutableStateOf<SessionAction?>(null) }
+    fun requestAction(target: TerminalSession, action: SessionAction?) {
+        actionSession = target
+        requestedAction = action
     }
 
     var railOpen by remember { mutableStateOf(false) }
+    val prefs = remember { context.getSharedPreferences("terminal", Context.MODE_PRIVATE) }
+    var extraKeysVisible by rememberSaveable { mutableStateOf(prefs.getBoolean("extra_keys", true)) }
 
     Column(
         Modifier
@@ -106,7 +122,18 @@ fun TerminalScreen(onBack: () -> Unit) {
             .systemBarsPadding()
             .imePadding(),
     ) {
-        HeaderPills(onBack = onBack, railOpen = railOpen, onToggleRail = { railOpen = !railOpen })
+        HeaderPills(
+            onBack = onBack,
+            railOpen = railOpen,
+            onToggleRail = { railOpen = !railOpen },
+            extraKeysVisible = extraKeysVisible,
+            onToggleExtraKeys = {
+                extraKeysVisible = !extraKeysVisible
+                prefs.edit().putBoolean("extra_keys", extraKeysVisible).apply()
+                modifiers.ctrl = false
+                modifiers.alt = false
+            },
+        )
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
             AndroidView(
@@ -118,7 +145,7 @@ fun TerminalScreen(onBack: () -> Unit) {
                             onFontScale = { bigger ->
                                 fontPx = (fontPx + if (bigger) 2 else -2).coerceIn(minFont, maxFont)
                             },
-                            onRestartFinished = { TerminalSessions.current?.let(::restart) },
+                            onRestartFinished = { TerminalSessions.current?.let { requestAction(it, SessionAction.Restart) } },
                         )
                         client.view = view
                         view.setTerminalViewClient(client)
@@ -155,17 +182,24 @@ fun TerminalScreen(onBack: () -> Unit) {
                 ) {
                     Text("Process exited with code ${session.exitStatus}", color = Fg)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { TerminalSessions.close(context, session) }) { Text("Close") }
-                        Button(onClick = { restart(session) }) { Text("Restart") }
+                        TextButton(onClick = { requestAction(session, SessionAction.Close) }) { Text("Close") }
+                        Button(onClick = { requestAction(session, SessionAction.Restart) }) { Text("Restart") }
                     }
                 }
             }
 
             // Floating, translucent session rail over the left edge; hides after picking.
-            FloatingRail(railOpen, Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 6.dp)) { railOpen = false }
+            FloatingRail(railOpen, Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 6.dp),
+                onActions = ::requestAction, onPicked = { railOpen = false })
         }
 
-        ExtraKeysGrid(modifiers = modifiers, view = terminalView)
+        AnimatedVisibility(visible = extraKeysVisible) { ExtraKeysGrid(modifiers = modifiers, view = terminalView) }
+    }
+
+    actionSession?.let { target ->
+        SessionActionsSheet(target, requestedAction,
+            onDismiss = { actionSession = null; requestedAction = null },
+            onRestarted = { railOpen = false })
     }
 
     LaunchedEffect(fontPx) { terminalView?.setTextSize(fontPx) }
@@ -176,9 +210,15 @@ fun TerminalScreen(onBack: () -> Unit) {
     }
 }
 
-/** Floating pills: [☰ | session title ⌄] on the left (title toggles the rail), [‹ n/N ›] on the right. */
+/** Session rail on the left; session arrows and a direct extra-keys toggle on the right. */
 @Composable
-private fun HeaderPills(onBack: () -> Unit, railOpen: Boolean, onToggleRail: () -> Unit) {
+private fun HeaderPills(
+    onBack: () -> Unit,
+    railOpen: Boolean,
+    onToggleRail: () -> Unit,
+    extraKeysVisible: Boolean,
+    onToggleExtraKeys: () -> Unit,
+) {
     @Suppress("UNUSED_EXPRESSION") TerminalSessions.changeTick // recompose on title changes
     val sessions = TerminalSessions.sessions
     val index = sessions.indexOf(TerminalSessions.current).coerceAtLeast(0)
@@ -196,6 +236,7 @@ private fun HeaderPills(onBack: () -> Unit, railOpen: Boolean, onToggleRail: () 
             }
             Row(
                 Modifier
+                    .weight(1f, fill = false)
                     .clip(RoundedCornerShape(18.dp))
                     .touchOnlyClickable(onToggleRail)
                     .padding(start = 2.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
@@ -208,38 +249,62 @@ private fun HeaderPills(onBack: () -> Unit, railOpen: Boolean, onToggleRail: () 
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 170.dp),
+                    modifier = Modifier.weight(1f, fill = false).widthIn(max = 170.dp),
                 )
                 Spacer(Modifier.width(6.dp))
                 PhIcon(if (railOpen) Ph.CaretLeft else Ph.CaretRight, if (railOpen) "Hide sessions" else "Show sessions", size = 12.dp, tint = Muted)
             }
         }
         Spacer(Modifier.width(8.dp))
-        Row(Modifier.height(48.dp).mist(24.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            BarIcon(Ph.CaretLeft, "Previous session", size = 16.dp, enabled = sessions.size > 1) {
-                sessions.getOrNull((index - 1 + sessions.size) % sessions.size)?.let(TerminalSessions::select)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.height(48.dp).mist(24.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                BarIcon(Ph.CaretLeft, "Previous session", size = 16.dp, enabled = sessions.size > 1) {
+                    sessions.getOrNull((index - 1 + sessions.size) % sessions.size)?.let(TerminalSessions::select)
+                }
+                Text("${index + 1}/${sessions.size}", color = Fg.copy(alpha = 0.85f), fontFamily = FontFamily.Monospace, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+                BarIcon(Ph.CaretRight, "Next session", size = 16.dp, enabled = sessions.size > 1) {
+                    sessions.getOrNull((index + 1) % sessions.size)?.let(TerminalSessions::select)
+                }
             }
-            Text("${index + 1}/${sessions.size}", color = Fg.copy(alpha = 0.85f), fontFamily = FontFamily.Monospace, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
-            BarIcon(Ph.CaretRight, "Next session", size = 16.dp, enabled = sessions.size > 1) {
-                sessions.getOrNull((index + 1) % sessions.size)?.let(TerminalSessions::select)
+            Row(
+                Modifier.height(48.dp).mist(24.dp)
+                    .semantics {
+                        contentDescription = if (extraKeysVisible) "Hide extra keys" else "Show extra keys"
+                        stateDescription = if (extraKeysVisible) "Shown" else "Hidden"
+                    }
+                    .touchOnlyClickable(onToggleExtraKeys)
+                    .padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PhIcon(Ph.Keyboard, null, size = 20.dp, tint = if (extraKeysVisible) Accent else Fg)
+                PhIcon(if (extraKeysVisible) Ph.CaretDown else Ph.CaretUp, null, size = 12.dp, tint = Muted)
             }
         }
     }
 }
 
 @Composable
-private fun FloatingRail(visible: Boolean, modifier: Modifier, onPicked: () -> Unit) {
+private fun FloatingRail(visible: Boolean, modifier: Modifier,
+    onActions: (TerminalSession, SessionAction?) -> Unit, onPicked: () -> Unit) {
     AnimatedVisibility(
         visible = visible,
         enter = fadeIn(tween(Motion.SHORT)) + slideInHorizontally(tween(Motion.MEDIUM, easing = Motion.Emphasized)) { -it / 2 },
         exit = fadeOut(tween(Motion.SHORT)) + slideOutHorizontally(tween(Motion.SHORT)) { -it / 2 },
         modifier = modifier,
-    ) { SessionRail(onPicked) }
+    ) { SessionRail(onPicked, onActions) }
 }
 
 /** Numbered session tiles (dot = still running), + for a new one, × closes the current. */
+private enum class SessionAction(val label: String, val explanation: String) {
+    Rename("Rename", ""),
+    Restart("Restart process", "Stop the current process and rerun this session's original command."),
+    End("End process", "Stop the running process. Its output will stay visible in this session."),
+    Close("Close session", "Stop its process if running and remove this terminal tab."),
+}
+
 @Composable
-private fun SessionRail(onPicked: () -> Unit) {
+private fun SessionRail(onPicked: () -> Unit, onActions: (TerminalSession, SessionAction?) -> Unit) {
     val context = LocalContext.current
     @Suppress("UNUSED_EXPRESSION") TerminalSessions.changeTick
     val accent = AppColors.tiles.lime.fill
@@ -258,10 +323,12 @@ private fun SessionRail(onPicked: () -> Unit) {
                     .size(46.dp)
                     .clip(RoundedCornerShape(15.dp))
                     .background(if (selected) accent else Color.White.copy(alpha = 0.07f))
-                    .touchOnlyClickable {
-                        TerminalSessions.select(s)
-                        onPicked()
-                    },
+                    .focusProperties { canFocus = false }
+                    .combinedClickable(
+                        onClick = { TerminalSessions.select(s); onPicked() },
+                        onLongClickLabel = "Session actions",
+                        onLongClick = { onActions(s, null) },
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -293,7 +360,91 @@ private fun SessionRail(onPicked: () -> Unit) {
             contentAlignment = Alignment.Center,
         ) { PhIcon(Ph.Plus, "New terminal", size = 18.dp, tint = Muted) }
         Box(Modifier.width(28.dp).height(1.dp).background(Color.White.copy(alpha = 0.08f)))
-        BarIcon(Ph.X, "Close terminal", tint = Muted) { TerminalSessions.current?.let { TerminalSessions.close(context, it) } }
+        BarIcon(Ph.X, "Close terminal", tint = Muted) {
+            TerminalSessions.current?.let { onActions(it, SessionAction.Close) }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SessionActionsSheet(
+    target: TerminalSession,
+    initialAction: SessionAction?,
+    onDismiss: () -> Unit,
+    onRestarted: () -> Unit,
+) {
+    val context = LocalContext.current
+    @Suppress("UNUSED_EXPRESSION") TerminalSessions.changeTick
+    var action by remember(target, initialAction) { mutableStateOf(initialAction) }
+    var renameText by remember(target) { mutableStateOf("") }
+    // The target may exit or be removed while the sheet is open.
+    val exists = target in TerminalSessions.sessions
+    val title = TerminalSessions.title(target, TerminalSessions.sessions.indexOf(target).coerceAtLeast(0))
+    LaunchedEffect(exists) { if (!exists) { onDismiss() } }
+    ModalBottomSheet(
+        onDismissRequest = { onDismiss() },
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(Modifier.fillMaxWidth().imePadding().padding(start = 20.dp, end = 20.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(when (val selectedAction = action) {
+                null -> "Session actions"
+                SessionAction.Rename -> "Rename terminal"
+                else -> "${selectedAction.label}?"
+            }, style = MaterialTheme.typography.titleLarge)
+            Text(title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            when (val selectedAction = action) {
+                null -> SessionAction.entries.forEach { option ->
+                    val enabled = exists && (option != SessionAction.End || target.isRunning)
+                    ListItem(
+                        headlineContent = { Text(option.label, color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant) },
+                        leadingContent = { PhIcon(when (option) {
+                            SessionAction.Rename -> Ph.PencilSimple
+                            SessionAction.Restart -> Ph.ArrowClockwise
+                            SessionAction.End -> Ph.Stop
+                            SessionAction.Close -> Ph.X
+                        }, null) },
+                        modifier = Modifier.clip(RoundedCornerShape(16.dp)).clickable(enabled = enabled) {
+                            if (option == SessionAction.Rename) renameText = title
+                            action = option
+                        },
+                    )
+                }
+                SessionAction.Rename -> {
+                    OutlinedTextField(renameText, { renameText = it }, singleLine = true,
+                        label = { Text("Name") }, modifier = Modifier.fillMaxWidth())
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = { action = null }) { Text("Cancel") }
+                        Button(enabled = exists, onClick = {
+                            TerminalSessions.rename(target, renameText)
+                            onDismiss()
+                        }) { Text("Save") }
+                    }
+                }
+                else -> {
+                    Text(selectedAction.explanation, style = MaterialTheme.typography.bodyLarge)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = { onDismiss() }) { Text("Cancel") }
+                        Button(
+                            enabled = exists && (selectedAction != SessionAction.End || target.isRunning),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error,
+                                contentColor = MaterialTheme.colorScheme.onError),
+                            onClick = {
+                                // Clear the pending action first so it cannot be confirmed twice.
+                                onDismiss()
+                                if (target in TerminalSessions.sessions) when (selectedAction) {
+                                    SessionAction.Restart -> { TerminalSessions.restart(context, target); onRestarted() }
+                                    SessionAction.End -> TerminalSessions.endProcess(target)
+                                    SessionAction.Close -> TerminalSessions.close(context, target)
+                                    else -> Unit
+                                }
+                            },
+                        ) { Text(selectedAction.label) }
+                    }
+                }
+            }
+        }
     }
 }
 
