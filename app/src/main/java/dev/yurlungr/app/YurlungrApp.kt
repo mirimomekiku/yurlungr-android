@@ -20,6 +20,7 @@ class YurlungrApp : Application() {
         super.onCreate()
         TerminalSessions.init(this)
         ChatSessions.init(this)
+        dev.yurlungr.app.runtime.RuntimeStatus.init(this)
         RemoteHosts.init(this)
         RemoteServer.init(this)
         if (Build.VERSION.SDK_INT >= 26) {
@@ -43,7 +44,10 @@ class YurlungrApp : Application() {
         Thread {
             runCatching { RuntimeAssets.install(this, RuntimePaths(this)) }
                 .onFailure { Log.w("YurlungrApp", "Installing runtime assets failed", it) }
-            main.post { RuntimeBridge.start(this) }
+            main.post {
+                RuntimeBridge.start(this)
+                dev.yurlungr.app.runtime.RuntimeStatus.refresh()
+            }
         }.start()
     }
 

@@ -73,6 +73,7 @@ object ChatSessions {
     }
 
     private fun wire(chat: ChatSession) = chat.apply {
+        listeners += dev.yurlungr.app.runtime.RuntimeStatus
         onChanged = { c ->
             val snapshot = c.snapshot() // taken on the main thread
             io.execute { ChatStore.write(appContext, snapshot) }

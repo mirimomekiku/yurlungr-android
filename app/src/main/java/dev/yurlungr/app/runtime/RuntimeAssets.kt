@@ -16,6 +16,7 @@ object RuntimeAssets {
         "spike-test.sh" to File(paths.home, "spike-test.sh"),
         "agents-setup.sh" to File(paths.libexec, "agents-setup.sh"),
         "android-sdk-setup.sh" to File(paths.libexec, "android-sdk-setup.sh"),
+        "motd.sh" to File(paths.libexec, "motd.sh"),
     )
 
     /** Commands tools use to open a browser. All route to `yurlungr-open`. */
@@ -31,6 +32,16 @@ object RuntimeAssets {
             dest.parentFile?.mkdirs()
             context.assets.open(asset).use { input -> FileOutputStream(dest).use { input.copyTo(it) } }
             Os.chmod(dest.path, EXEC)
+        }
+
+        val motdLauncher = "#!${paths.bin}/sh\n# Yurlungr dynamic MOTD\nexec '${paths.bash}' '${paths.libexec}/motd.sh'\n"
+        writeShim(paths, "yurlungr-status", motdLauncher)
+        // Termux's supported dynamic MOTD hook. Never overwrite a user's own hook or static MOTD.
+        val hook = File(paths.home, ".termux/motd.sh")
+        if (!hook.exists() && runCatching { Os.lstat(hook.path); false }.getOrDefault(true)) {
+            hook.parentFile?.mkdirs()
+            hook.writeText(motdLauncher)
+            Os.chmod(hook.path, EXEC)
         }
 
         writeShim(paths, "yurlungr-open", openShim(paths))

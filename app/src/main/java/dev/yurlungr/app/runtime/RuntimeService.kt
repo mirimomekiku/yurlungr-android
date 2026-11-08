@@ -103,6 +103,7 @@ class RuntimeService : Service() {
         private const val ACTION_TOGGLE_WAKE_LOCK = "dev.yurlungr.app.action.TOGGLE_WAKE_LOCK"
         /** Starts/refreshes the service while chats or terminals exist, stops it when none are left. */
         fun refresh(context: Context) {
+            RuntimeStatus.refresh()
             val intent = Intent(context, RuntimeService::class.java)
             if (ChatSessions.activeCount > 0 || TerminalSessions.sessions.isNotEmpty() || RemoteServer.isRunning) {
                 ContextCompat.startForegroundService(context, intent)
