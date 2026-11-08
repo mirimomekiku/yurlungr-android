@@ -194,53 +194,14 @@ credential file; Antigravity's is not documented, so it shows as *Installed*.
 
 </details>
 
-## Design
+## Documentation
 
-The UI follows **Bento × Daylight**: light-first white cards on a cool grey ground, with colour-blocked
-tiles (lime, lilac, peach, sky), Space Grotesk headings and Inter body text, and chunky 24 dp corners.
-Dark mode uses a near-black ground with the same tiles at full strength. Colours, type and shapes live in
-`ui/Theme.kt` (`AppColors.tiles`, `AppColors.status`); shared pieces are in `ui/Common.kt` (`ScreenHeader`,
-`Group`/`GroupRow`, `StatTile`, `HeaderTile`, `StatusLabel`, `TilePill`). Motion is in `ui/Motion.kt`,
-skeleton placeholders in `ui/Skeleton.kt`, and non-spinner loaders in `ui/Loaders.kt`. Icons are
-[Phosphor](https://phosphoricons.com), vendored as `ImageVector`s by `tools/phosphor-gen.py`.
-
-The mascot and launcher icon are the Pixel Noir rainbow serpent: mysterious, never cute. See
-[`branding/`](branding/README.md).
-
-## Architecture
-
-| Path (`app/src/main/java/dev/yurlungr/app/`) | What it does |
+| Doc | What's in it |
 |---|---|
-| `runtime/` | Bootstrap installer, environment, command runner, foreground service, and the URL / install bridge (`xdg-open` and `yurlungr-install` shims → an inbox folder → the app) |
-| `acp/` | JSON-RPC 2.0 over the agent's stdio |
-| `chat/` | Chat sessions, persistence, the chat and new-chat screens, the composer |
-| `agents/` | Agent launch recipes, install / sign-in detection, logos |
-| `projects/` | Git operations, the workspace, history graph, branches, project list |
-| `editor/` | Lexer, themes, Prettier formatting, the editor screen |
-| `terminal/` | Terminal sessions and screen |
-| `remote/` | Phone-to-phone protocol, server and client |
-| `setup/` | System checks, settings |
-| `ui/` | Theme, shared components, motion, icons, sidebar |
-| `MainActivity.kt` | Routes and navigation (sidebar places replace the stack; drilling in pushes) |
-
-## Development
-
-```sh
-./gradlew testDebugUnitTest   # parsers, graph layout, lexer and editor helpers, chat store, protocol
-./gradlew lintDebug
-```
-
-Debug builds can open a screen directly, which is handy for checking layouts without tapping through:
-
-```sh
-adb shell am start -n com.termux/dev.yurlungr.app.MainActivity --es screen devices
-# screens: chat, projects, terminal, agents, devices, settings, checks
-# --es file <path>                      opens the editor
-# --es project <path> --es tab history  opens a project tab
-```
-
-To add an icon, list it in `tools/phosphor-gen.py` and regenerate `ui/PhosphorIcons.kt` (never edit the
-generated file by hand).
+| [DESIGN.md](DESIGN.md) | The Bento × Daylight design system: colour and tile tokens, type, shape, components, motion, icons, mascot |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | How the embedded runtime, agents over ACP, projects, editor, terminal and two-phone sharing fit together, plus a source map |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | Building, testing, opening screens directly, regenerating icons, and cutting a release |
+| [branding/](branding/README.md) | The Pixel Noir mascot, launcher icon and poses |
 
 ## Limitations
 
@@ -259,6 +220,3 @@ Built on [Termux](https://termux.dev) (bootstrap, packages and terminal librarie
 [Space Grotesk](https://github.com/floriankarsten/space-grotesk) (SIL OFL 1.1),
 [Phosphor Icons](https://phosphoricons.com) (MIT), agent logos from
 [LobeHub Icons](https://github.com/lobehub/lobe-icons) (MIT; trademarks of their owners).
-
-The name Yurlungr refers to a Rainbow Serpent of Yolŋu tradition; the artwork deliberately avoids
-Aboriginal art styles.
