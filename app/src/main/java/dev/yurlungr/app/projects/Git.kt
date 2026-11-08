@@ -113,6 +113,12 @@ class Git(private val paths: RuntimePaths) {
         return parseStatus(r.output).copy(hasOrigin = "origin" in remotes)
     }
 
+    /** Ignored untracked paths, collapsing entire ignored directories to avoid scanning build caches. */
+    suspend fun ignoredPaths(dir: File): Set<String>? {
+        val result = run(dir, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+        return if (result.ok) FileTreeGitState.parseIgnoredPaths(result.output) else null
+    }
+
     /** Unified diff of one change against HEAD, or the whole file for new/unborn files. */
     suspend fun diff(dir: File, change: GitChange, unborn: Boolean): String {
         if (change.untracked || unborn) return addedFileDiff(File(dir, change.path))

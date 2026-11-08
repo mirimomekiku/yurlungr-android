@@ -33,6 +33,9 @@ import dev.yurlungr.app.ui.Keyboards
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import dev.yurlungr.app.ui.Chip
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -220,7 +223,7 @@ fun ProjectScreen(
                         )
                     },
                 )
-                ProjectTab.Files -> FilesTab(dir, status, onOpenFile)
+                ProjectTab.Files -> FilesTab(dir, status, git, refreshTick to reload, onOpenFile)
                 ProjectTab.History -> HistoryView(dir, git, status, refreshKey = refreshTick * 1000 + reload)
                 ProjectTab.Chats -> ChatsTab(dir, onOpenChat)
             }
@@ -732,30 +735,44 @@ fun UnifiedDiff(diff: String) {
 
 // ---- Files ---------------------------------------------------------------------------
 
-/** Expandable file tree; files with uncommitted changes are marked (M, A, D, ?). */
+/** Expandable file tree, with an optional view of Git ignore and working-tree state. */
 @Composable
-private fun FilesTab(root: File, status: GitStatus?, onOpenFile: (File) -> Unit) {
-    val open = remember(root.path) { mutableStateMapOf<String, List<File>>() } // expanded dir -> children
+private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<Int, Int>, onOpenFile: (File) -> Unit) {
+    val open = remember(root.path) { mutableStateMapOf<String, List<File>>() }
     var top by remember(root.path) { mutableStateOf<List<File>?>(null) }
+    var showGit by rememberSaveable(root.path) { mutableStateOf(false) }
+    var filter by rememberSaveable(root.path) { mutableStateOf(FileTreeFilter.All) }
+    var ignored by remember(root.path) { mutableStateOf<Set<String>?>(null) }
+    var checkingIgnored by remember(root.path) { mutableStateOf(false) }
+    var treeReload by remember(root.path) { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     suspend fun list(dir: File) = withContext(Dispatchers.IO) {
         dir.listFiles { f -> f.name != ".git" }.orEmpty().sortedWith(compareBy<File>({ !it.isDirectory }, { it.name.lowercase() }))
     }
-    LaunchedEffect(root, status) {
+    // Refreshing here also re-reads changes without requiring navigation away from the project.
+    var treeStatus by remember(root.path) { mutableStateOf(status) }
+    LaunchedEffect(root, status, refreshKey, treeReload) {
+        treeStatus = if (treeReload > 0) git.status(root) else status
         top = list(root)
-        for (path in open.keys.toList()) open[path] = list(File(path)) // pick up new/removed files
+        for (path in open.keys.toList()) open[path] = list(File(path))
+        ignored = null
+        checkingIgnored = treeStatus?.isRepo == true
+        if (checkingIgnored) {
+            ignored = runCatching { git.ignoredPaths(root) }.getOrNull()
+            checkingIgnored = false
+        }
     }
-    // Changed paths (relative), and the folders that contain them.
-    val marks = remember(status) {
-        status?.changes.orEmpty().associate { it.path.trimEnd('/') to changeMark(it) }
-    }
-    val dirtyDirs = remember(marks) {
-        marks.keys.flatMap { p -> generateSequence(p.substringBeforeLast('/', "")) { it.substringBeforeLast('/', "").takeIf { s -> s.isNotEmpty() } }.filter { it.isNotEmpty() } }.toSet()
-    }
-    val rows = remember(top, open.toMap()) {
-        buildList {
+    val gitState = remember(treeStatus, ignored) { FileTreeGitState(ignored.orEmpty(), treeStatus?.changes.orEmpty()) }
+    val effectiveFilter = if (showGit && ignored != null && treeStatus?.isRepo == true) filter else FileTreeFilter.All
+    val rows = remember(top, open.toMap(), gitState, effectiveFilter) {
+        if (effectiveFilter == FileTreeFilter.Changed) {
+            // Include deleted paths too; a filesystem-only tree cannot show them.
+            gitState.changesByPath.keys.sorted().map { File(root, it) to 0 }
+        } else buildList {
             fun add(files: List<File>, depth: Int) {
                 for (f in files) {
+                    val relative = f.relativeTo(root).invariantSeparatorsPath
+                    if (!gitState.includes(relative, f.isDirectory, effectiveFilter)) continue
                     add(f to depth)
                     open[f.path]?.let { add(it, depth + 1) }
                 }
@@ -764,24 +781,61 @@ private fun FilesTab(root: File, status: GitStatus?, onOpenFile: (File) -> Unit)
         }
     }
 
-    LazyColumn(contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp), modifier = Modifier.fillMaxSize()) {
-        if (top == null) items(6) { SkeletonListItem() }
-        else if (rows.isEmpty()) item { Text("Empty folder", modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        items(rows, key = { it.first.path }) { (f, depth) ->
-            val rel = f.relativeTo(root).path
-            val mark = marks[rel]
-            TreeRow(
-                name = f.name,
-                depth = depth,
-                isDir = f.isDirectory,
-                expanded = open.containsKey(f.path),
-                mark = mark ?: if (f.isDirectory && rel in dirtyDirs) "•" else null,
-                modifier = Modifier.animateItem(),
-            ) {
-                when {
-                    !f.isDirectory -> onOpenFile(f)
-                    open.containsKey(f.path) -> open.keys.filter { it == f.path || it.startsWith(f.path + "/") }.forEach { open.remove(it) }
-                    else -> scope.launch { open[f.path] = list(f) }
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (treeStatus?.isRepo == true) {
+                Chip("Git details", selected = showGit, onClick = { showGit = !showGit })
+                if (showGit && ignored != null) FileTreeFilter.entries.forEach { option ->
+                    Chip(option.label, selected = filter == option, onClick = { filter = option })
+                }
+            }
+            TextButton(onClick = { treeReload++ }) { Text("Refresh") }
+        }
+        if (showGit && treeStatus?.isRepo == true && ignored == null) {
+            Text(if (checkingIgnored) "Checking Git ignore rules…" else "Couldn't read ignore rules. Tap Refresh to retry.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+        }
+        LazyColumn(contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp), modifier = Modifier.weight(1f)) {
+            if (top == null) items(6) { SkeletonListItem() }
+            else if (rows.isEmpty()) item {
+                Text(if (effectiveFilter == FileTreeFilter.All) "Empty folder" else "No ${effectiveFilter.label.lowercase()} files here.",
+                    modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            items(rows, key = { it.first.path }) { (f, depth) ->
+                val relative = f.relativeTo(root).invariantSeparatorsPath
+                val change = gitState.changesByPath[relative]
+                val changed = gitState.isChanged(relative, f.isDirectory)
+                val isIgnored = ignored != null && gitState.isIgnored(relative)
+                val details = if (showGit && ignored != null && treeStatus?.isRepo == true) {
+                    when {
+                        isIgnored -> "Ignored"
+                        change != null -> if (change.untracked) "Untracked" else {
+                            val label = change.label.replaceFirstChar { it.uppercase() }
+                            when {
+                                change.index != ' ' && change.worktree != ' ' -> "$label · staged + unstaged"
+                                change.index != ' ' -> "$label · staged"
+                                else -> label
+                            }
+                        }
+                        changed -> "Changes"
+                        else -> "Not ignored"
+                    }
+                } else null
+                TreeRow(
+                    name = if (effectiveFilter == FileTreeFilter.Changed) relative else f.name,
+                    depth = depth, isDir = f.isDirectory, expanded = open.containsKey(f.path),
+                    enabled = if (effectiveFilter == FileTreeFilter.Changed) f.isFile else f.exists(),
+                    mark = change?.let(::changeMark) ?: if (changed) "•" else null,
+                    details = details, ignored = showGit && isIgnored,
+                    modifier = Modifier.animateItem(),
+                ) {
+                    when {
+                        !f.isDirectory -> onOpenFile(f)
+                        open.containsKey(f.path) -> open.keys.filter { it == f.path || it.startsWith(f.path + "/") }.forEach { open.remove(it) }
+                        else -> scope.launch { open[f.path] = list(f) }
+                    }
                 }
             }
         }
@@ -798,7 +852,7 @@ private fun changeMark(c: GitChange) = when (c.label) {
 }
 
 @Composable
-private fun TreeRow(name: String, depth: Int, isDir: Boolean, expanded: Boolean, mark: String?, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun TreeRow(name: String, depth: Int, isDir: Boolean, expanded: Boolean, mark: String?, details: String? = null, ignored: Boolean = false, enabled: Boolean = true, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val tones = AppColors.status
     val markColor = when (mark) {
         "?", "A" -> tones.success
@@ -811,7 +865,7 @@ private fun TreeRow(name: String, depth: Int, isDir: Boolean, expanded: Boolean,
             .height(42.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(if (mark != null && !isDir) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent)
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(start = 12.dp + 22.dp * depth, end = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -832,13 +886,17 @@ private fun TreeRow(name: String, depth: Int, isDir: Boolean, expanded: Boolean,
         Spacer(Modifier.width(10.dp))
         Text(
             name,
+            color = if (ignored) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
             fontFamily = FontFamily.Monospace,
             fontSize = 13.5.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
-        if (mark != null) Text(mark, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = markColor)
+        if (details != null) Text(details, style = MaterialTheme.typography.labelSmall,
+            color = if (mark != null) markColor else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 8.dp))
+        else if (mark != null) Text(mark, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = markColor)
     }
 }
 
