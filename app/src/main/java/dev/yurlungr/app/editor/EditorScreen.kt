@@ -144,7 +144,7 @@ fun EditorScreen(file: File, onBack: () -> Unit) {
     val paths = remember { RuntimePaths(context) }
     val scope = rememberCoroutineScope()
     val lang = remember(file) { Languages.forFile(file.name) }
-    remember { EditorPrefs.load(context) }
+    LaunchedEffect(context) { EditorPrefs.load(context) }
 
     var load by remember(file) { mutableStateOf<Load>(Load.Loading) }
     LaunchedEffect(file) {

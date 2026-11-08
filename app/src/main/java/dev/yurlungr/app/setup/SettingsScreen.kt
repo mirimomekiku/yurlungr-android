@@ -83,7 +83,7 @@ fun SettingsScreen(
     var showPhantomHelp by remember { mutableStateOf(false) }
     var showLicenses by remember { mutableStateOf(false) }
     var showThemes by remember { mutableStateOf(false) }
-    remember { EditorPrefs.load(context) }
+    LaunchedEffect(context) { EditorPrefs.load(context) }
     var gh by remember { mutableStateOf<GhStatus?>(null) }
     LaunchedEffect(refreshTick) { if (paths.isBootstrapInstalled) gh = Git(paths).ghStatus() }
     val version = remember {
