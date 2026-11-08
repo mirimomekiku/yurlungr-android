@@ -1,0 +1,100 @@
+package dev.yurlungr.app.runtime
+
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.FileObserver
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.widget.Toast
+import androidx.core.content.FileProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import java.io.File
+
+/**
+ * Receives requests from inside the runtime: "open this URL" from the `xdg-open` /
+ * `termux-open-url` shims (agent logins open OAuth pages this way) and "install this APK"
+ * from `yurlungr-install`.
+ */
+object RuntimeBridge {
+    private const val TAG = "RuntimeBridge"
+    private val main = Handler(Looper.getMainLooper())
+    private var observer: FileObserver? = null
+
+    /** Most recent URL a tool asked to open; the UI offers it again in case the browser didn't appear. */
+    var lastUrl by mutableStateOf<String?>(null)
+        private set
+
+    fun start(context: Context) {
+        val app = context.applicationContext
+        val paths = RuntimePaths(app)
+        if (observer != null || !paths.isBootstrapInstalled) return
+        val inbox = paths.inbox.apply { mkdirs() }
+
+        @Suppress("DEPRECATION") // File-based constructor needs API 29; minSdk is 24.
+        observer = object : FileObserver(inbox.path, MOVED_TO or CLOSE_WRITE) {
+            override fun onEvent(event: Int, name: String?) {
+                if (name != null && !name.startsWith(".")) consume(app, File(inbox, name))
+            }
+        }.also { it.startWatching() }
+
+        // Requests written while the app wasn't running.
+        inbox.listFiles { f -> !f.name.startsWith(".") }?.forEach { consume(app, it) }
+    }
+
+    private fun consume(context: Context, file: File) {
+        val value = runCatching { file.readText().trim() }.getOrNull()
+        val kind = file.extension
+        file.delete()
+        if (value.isNullOrEmpty()) return
+        main.post {
+            when (kind) {
+                "open" -> open(context, value)
+                "install" -> install(context, File(value))
+            }
+        }
+    }
+
+    /** Hands an APK from the runtime to Android's package installer (the user confirms). */
+    fun install(context: Context, apk: File) {
+        val paths = RuntimePaths(context)
+        val root = paths.filesDir.canonicalPath + File.separator
+        val canonical = runCatching { apk.canonicalPath }.getOrNull()
+        if (canonical == null || !canonical.startsWith(root) || !canonical.endsWith(".apk")) {
+            Log.w(TAG, "Refusing to install $apk")
+            return
+        }
+        // FileProvider resolves against Context.getFilesDir() (/data/user/0/...), not /data/data/.
+        val shareable = File(context.filesDir, canonical.removePrefix(root))
+        try {
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", shareable)
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, "application/vnd.android.package-archive")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Couldn't open installer for $apk", e)
+            Toast.makeText(context, "Couldn't open the installer: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun open(context: Context, url: String) {
+        val uri = Uri.parse(url)
+        // Only web links: the runtime must not be able to fire arbitrary intents.
+        if (uri.scheme?.lowercase() !in setOf("http", "https")) {
+            Log.w(TAG, "Ignoring non-http(s) URL: $url")
+            return
+        }
+        lastUrl = url
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: ActivityNotFoundException) {
+            Log.w(TAG, "No browser for $url", e)
+        }
+    }
+}
