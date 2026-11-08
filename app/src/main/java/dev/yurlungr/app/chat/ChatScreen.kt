@@ -256,7 +256,7 @@ private fun stateLabel(state: ChatState) = when (state) {
 private fun ChatItemView(chat: ChatModel, item: ChatItem) {
     when (item) {
         is ChatItem.User -> UserBubble(item)
-        is ChatItem.AgentText -> SelectionContainer { MarkdownText(item.text) }
+        is ChatItem.AgentText -> SelectionContainer { MarkdownText(item.text, allowLocalFiles = !chat.isRemote) }
         is ChatItem.Thought -> ThoughtView(item)
         is ChatItem.ToolCall -> ToolCallCard(item)
         is ChatItem.Plan -> PlanCard(item)

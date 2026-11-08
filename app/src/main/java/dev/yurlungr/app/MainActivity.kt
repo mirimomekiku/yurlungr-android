@@ -72,7 +72,7 @@ sealed interface Route {
     data class RemoteChat(val hostId: String, val chatId: String) : Route
     data object Projects : Route
     data class Project(val path: String, val tab: String? = null) : Route
-    data class FileView(val path: String) : Route
+    data class FileView(val path: String, val edit: Boolean = false) : Route
 }
 
 /**
@@ -164,6 +164,7 @@ class MainActivity : ComponentActivity() {
                     // Top-level places without their own back handling return to the new-chat screen.
                     BackHandler(enabled = nav.canGoBack) { nav.pop() }
                     CompositionLocalProvider(
+                        dev.yurlungr.app.ui.LocalOpenFile provides { nav.push(Route.FileView(it.path)) },
                         LocalOpenDrawer provides { scope.launch { drawer.open() } },
                         LocalTopLevel provides nav.isTopLevel,
                     ) {
@@ -266,7 +267,15 @@ class MainActivity : ComponentActivity() {
                 runInTerminal = { command, name -> runInTerminal(context, nav, command, name) },
                 onOpenTerminal = { nav.push(Route.Terminal) },
             )
-            is Route.FileView -> EditorScreen(File(route.path), onBack = back)
+            is Route.FileView -> {
+                val file = File(route.path)
+                if (!route.edit && dev.yurlungr.app.editor.isMarkdownFile(file.name)) {
+                    dev.yurlungr.app.editor.MarkdownScreen(file, resumeTick, onBack = back,
+                        onEdit = { nav.push(Route.FileView(route.path, edit = true)) })
+                } else {
+                    EditorScreen(file, onBack = back)
+                }
+            }
         }
     }
 

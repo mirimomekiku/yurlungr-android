@@ -9,6 +9,9 @@ composeBom = "2026.06.01"
 termux = "v0.118.3"
 
 [libraries]
+commonmark = { module = "org.commonmark:commonmark", version = "0.24.0" }
+commonmark-tables = { module = "org.commonmark:commonmark-ext-gfm-tables", version = "0.24.0" }
+commonmark-strikethrough = { module = "org.commonmark:commonmark-ext-gfm-strikethrough", version = "0.24.0" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }

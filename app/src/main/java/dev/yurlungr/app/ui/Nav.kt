@@ -8,6 +8,9 @@ import androidx.compose.ui.unit.dp
 /** Opens the app sidebar; null outside the app shell. */
 val LocalOpenDrawer = compositionLocalOf<(() -> Unit)?> { null }
 
+/** Opens a local file from an agent reply. */
+val LocalOpenFile = compositionLocalOf<((java.io.File) -> Unit)?> { null }
+
 /** True on top-level screens, which show ☰ (sidebar) instead of ‹ (back). */
 val LocalTopLevel = compositionLocalOf { false }
 
