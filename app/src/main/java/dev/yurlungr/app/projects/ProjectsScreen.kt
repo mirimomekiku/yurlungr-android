@@ -18,6 +18,11 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -34,6 +39,7 @@ import dev.yurlungr.app.ui.Chip
 import dev.yurlungr.app.ui.SectionLabel
 import dev.yurlungr.app.ui.StatusLabel
 import dev.yurlungr.app.ui.WaveDots
+import kotlinx.coroutines.launch
 import dev.yurlungr.app.ui.Keyboards
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -49,8 +55,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -71,6 +78,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -81,7 +89,6 @@ import androidx.compose.ui.unit.sp
 import dev.yurlungr.app.projects.Git.Companion.shellQuote
 import dev.yurlungr.app.runtime.RuntimePaths
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
@@ -128,6 +135,8 @@ fun ProjectsScreen(
     var repoError by remember { mutableStateOf(false) }
     var cloning by remember { mutableStateOf(false) }
     var creating by remember { mutableStateOf(false) }
+    var createBusy by remember { mutableStateOf(false) }
+    var createError by remember { mutableStateOf<String?>(null) }
     var addMenu by remember { mutableStateOf(false) }
     var reload by remember { mutableIntStateOf(0) }
     var filter by rememberSaveable { mutableStateOf(Filter.All) }
@@ -209,6 +218,7 @@ fun ProjectsScreen(
                 DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
                     DropdownMenuItem(leadingIcon = { PhIcon(Ph.FolderSimple, null, size = 18.dp) }, text = { Text("New project") }, onClick = {
                         addMenu = false
+                        createError = null
                         creating = true
                     })
                     DropdownMenuItem(leadingIcon = { PhIcon(Ph.DownloadSimple, null, size = 18.dp) }, text = { Text("Clone from URL") }, onClick = {
@@ -307,28 +317,50 @@ fun ProjectsScreen(
     }
 
     if (cloning) {
-        CloneDialog(
+        CloneSheet(
+            root = paths.projects,
             onDismiss = { cloning = false },
             onClone = { url, name ->
                 cloning = false
                 runInTerminal(
-                    "mkdir -p ~/projects && cd ~/projects && git clone ${shellQuote(url)} ${shellQuote(name)}",
+                    "mkdir -p ~/projects && cd ~/projects && git clone -- ${shellQuote(url)} ${shellQuote(name)}",
                     "Clone $name",
                 )
             },
         )
     }
     if (creating) {
-        NewProjectDialog(
-            onDismiss = { creating = false },
-            onCreate = { name, initGit ->
-                creating = false
+        NewProjectSheet(
+            root = paths.projects,
+            busy = createBusy,
+            error = createError,
+            onEdited = { createError = null },
+            onDismiss = { if (!createBusy) creating = false },
+            onCreate = create@{ name, initGit ->
+                if (createBusy) return@create
+                createBusy = true
+                createError = null
                 scope.launch {
-                    val dir = File(paths.projects, name)
-                    withContext(Dispatchers.IO) { dir.mkdirs() }
-                    if (initGit) git.init(dir)
-                    reload++
-                    onOpenProject(dir)
+                    try {
+                        val dir = File(paths.projects, name)
+                        withContext(Dispatchers.IO) {
+                            check(paths.projects.isDirectory || paths.projects.mkdirs()) { "Couldn't open the projects folder." }
+                            check(!dir.exists()) { "A project with this name already exists." }
+                            check(dir.mkdir()) { "Couldn't create the folder. Check free storage and try again." }
+                        }
+                        if (initGit) {
+                            val result = git.init(dir)
+                            check(result.ok) { "Folder created, but Git initialization failed. ${result.output.trim().takeLast(240)}" }
+                        }
+                        creating = false
+                        onOpenProject(dir)
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        createError = e.message ?: "Couldn't create this project. Try again."
+                    } finally {
+                        createBusy = false
+                        reload++
+                    }
                 }
             },
         )
@@ -549,60 +581,120 @@ private fun GitHubCard(gh: GhStatus?, runInTerminal: (String, String) -> Unit) {
     }
 }
 
-@Composable
-private fun CloneDialog(onDismiss: () -> Unit, onClone: (url: String, name: String) -> Unit) {
-    var url by remember { mutableStateOf("") }
-    var name by remember { mutableStateOf("") }
-    val derived = url.trim().trimEnd('/').substringAfterLast('/').substringAfterLast(':').removeSuffix(".git")
-    val finalName = name.trim().ifEmpty { derived }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Clone a repository") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(url, { url = it }, label = { Text("URL") }, placeholder = { Text("https://github.com/you/app") }, singleLine = true, keyboardOptions = Keyboards.Url)
-                OutlinedTextField(
-                    name,
-                    { name = it },
-                    label = { Text("Folder") },
-                    placeholder = { Text(derived.ifEmpty { "app" }) },
-                    supportingText = { Text("~/projects/$finalName") },
-                    singleLine = true,
-                    keyboardOptions = Keyboards.Identifier,
-                )
-            }
-        },
-        confirmButton = {
-            Button(onClick = { onClone(url.trim(), finalName) }, enabled = url.isNotBlank() && PROJECT_NAME.matches(finalName)) { Text("Clone") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
+private fun folderError(name: String, root: File): String? = when {
+    name.isEmpty() -> null
+    !PROJECT_NAME.matches(name) -> "Use up to 64 letters, digits, dots, underscores or hyphens."
+    name.startsWith('.') -> "Start with a letter, digit, underscore or hyphen."
+    File(root, name).exists() -> "A folder with this name already exists. Choose another name."
+    else -> null
 }
 
 @Composable
-private fun NewProjectDialog(onDismiss: () -> Unit, onCreate: (name: String, initGit: Boolean) -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var initGit by remember { mutableStateOf(true) }
-    AlertDialog(
+private fun ProjectSheetHeader(title: String, subtitle: String, clone: Boolean, onDismiss: () -> Unit, enabled: Boolean = true) {
+    val tile = if (clone) AppColors.tiles.sky else AppColors.tiles.lilac
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(48.dp).clip(RoundedCornerShape(16.dp)).background(tile.fill), contentAlignment = Alignment.Center) {
+            PhIcon(if (clone) Ph.DownloadSimple else Ph.FolderSimple, null, size = 24.dp, tint = tile.on)
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+        IconButton(onClick = onDismiss, enabled = enabled) { PhIcon(Ph.X, "Close", size = 20.dp) }
+    }
+    Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CloneSheet(root: File, onDismiss: () -> Unit, onClone: (url: String, name: String) -> Unit) {
+    var url by rememberSaveable { mutableStateOf("") }
+    var name by rememberSaveable { mutableStateOf("") }
+    val derived = url.trim().substringBefore('?').substringBefore('#').trimEnd('/').substringAfterLast('/').substringAfterLast(':').removeSuffix(".git")
+    val finalName = name.trim().ifEmpty { derived }
+    val error = folderError(finalName, root)
+    val validUrl = url.isNotBlank() && !url.trim().startsWith('-') && url.trim().none { it.isWhitespace() || it.isISOControl() }
+    val canClone = validUrl && finalName.isNotEmpty() && error == null
+    fun submit() { if (canClone) onClone(url.trim(), finalName) }
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        title = { Text("New project") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    name,
-                    { name = it },
-                    label = { Text("Name") },
-                    supportingText = { Text("Letters, digits, . _ -") },
-                    singleLine = true,
-                    keyboardOptions = Keyboards.Identifier,
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(initGit, { initGit = it })
-                    Text("Initialize a git repository")
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+    ) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(start = 20.dp, end = 20.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            ProjectSheetHeader("Clone from URL", "Bring a repository onto this phone and continue working here.", clone = true, onDismiss = onDismiss)
+            OutlinedTextField(
+                url, { url = it }, label = { Text("Repository URL") },
+                placeholder = { Text("https://github.com/you/app.git") },
+                supportingText = { Text("HTTPS or SSH repository URL") },
+                singleLine = true, keyboardOptions = Keyboards.Url.copy(imeAction = ImeAction.Next),
+                shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                name, { name = it }, label = { Text("Folder name") },
+                placeholder = { Text(derived.ifEmpty { "app" }) },
+                supportingText = { Text(error ?: "~/projects/${finalName.ifEmpty { "app" }}") },
+                isError = error != null, singleLine = true,
+                keyboardOptions = Keyboards.Identifier.copy(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { submit() }),
+                shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth(),
+            )
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Cancel") }
+                Button(onClick = ::submit, enabled = canClone, modifier = Modifier.weight(2f).heightIn(min = 52.dp)) {
+                    PhIcon(Ph.DownloadSimple, null, size = 18.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Clone repository")
                 }
             }
-        },
-        confirmButton = { Button(onClick = { onCreate(name.trim(), initGit) }, enabled = PROJECT_NAME.matches(name.trim())) { Text("Create") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NewProjectSheet(root: File, busy: Boolean, error: String?, onEdited: () -> Unit, onDismiss: () -> Unit, onCreate: (name: String, initGit: Boolean) -> Unit) {
+    var name by rememberSaveable { mutableStateOf("") }
+    var initGit by rememberSaveable { mutableStateOf(true) }
+    val trimmed = name.trim()
+    val nameError = folderError(trimmed, root)
+    val canCreate = !busy && trimmed.isNotEmpty() && nameError == null
+    val latestBusy by rememberUpdatedState(busy)
+    fun submit() { if (canCreate) onCreate(trimmed, initGit) }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = { !latestBusy }),
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+    ) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(start = 20.dp, end = 20.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            ProjectSheetHeader("New project", "Start with an empty folder for your next idea.", clone = false, onDismiss = onDismiss, enabled = !busy)
+            OutlinedTextField(
+                name, { name = it; onEdited() }, label = { Text("Project name") },
+                placeholder = { Text("my-project") },
+                supportingText = { Text(nameError ?: "~/projects/${trimmed.ifEmpty { "my-project" }}") },
+                isError = nameError != null, singleLine = true, enabled = !busy,
+                keyboardOptions = Keyboards.Identifier.copy(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { submit() }),
+                shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth(),
+            )
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                .clickable(enabled = !busy) { initGit = !initGit; onEdited() }.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(4.dp)) {
+                    Text("Initialize Git", style = MaterialTheme.typography.titleSmall)
+                    Text("Track changes in this project", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Checkbox(initGit, { initGit = it; onEdited() }, enabled = !busy)
+            }
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(onClick = onDismiss, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Cancel") }
+                Button(onClick = ::submit, enabled = canCreate, modifier = Modifier.weight(2f).heightIn(min = 52.dp)) {
+                    if (busy) WaveDots(dotSize = 4.dp) else PhIcon(Ph.Plus, null, size = 18.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (busy) "Creating…" else "Create project")
+                }
+            }
+        }
+    }
 }
