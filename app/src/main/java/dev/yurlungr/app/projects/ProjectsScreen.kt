@@ -34,7 +34,6 @@ import dev.yurlungr.app.ui.Chip
 import dev.yurlungr.app.ui.SectionLabel
 import dev.yurlungr.app.ui.StatusLabel
 import dev.yurlungr.app.ui.WaveDots
-import kotlinx.coroutines.launch
 import dev.yurlungr.app.ui.Keyboards
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -51,6 +50,10 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -79,6 +82,8 @@ import dev.yurlungr.app.projects.Git.Companion.shellQuote
 import dev.yurlungr.app.runtime.RuntimePaths
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -95,6 +100,7 @@ private enum class Filter(val label: String) { All("All"), Local("On this phone"
  * All projects: folders on this phone (with git status) and, when signed in to GitHub, the
  * account's repositories, each marked as on this phone or not cloned (Clone fetches it).
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProjectsScreen(
     refreshTick: Int,
@@ -110,6 +116,10 @@ fun ProjectsScreen(
 
     var projects by remember { mutableStateOf<List<File>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(true) }
+    var refreshing by remember { mutableStateOf(false) }
+    var refreshError by remember { mutableStateOf<String?>(null) }
+    val pullState = rememberPullToRefreshState()
     val statuses = remember { mutableStateMapOf<String, GitStatus>() }
     val origins = remember { mutableStateMapOf<String, String>() } // dir path -> github slug
     var gh by remember { mutableStateOf<GhStatus?>(null) }
@@ -125,29 +135,57 @@ fun ProjectsScreen(
     val collapsed = remember { mutableStateListOf<String>() } // owners whose repo group is folded
 
     LaunchedEffect(refreshTick, reload) {
-        projects = withContext(Dispatchers.IO) {
-            paths.projects.mkdirs()
-            paths.projects.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }.orEmpty()
-                .sortedByDescending { it.lastModified() }
-        }
-        loaded = true
-        val status = git.ghStatus()
-        gh = status
-        if (status.signedIn) {
-            fetchingRepos = true
-            launch {
-                val list = git.ghRepos()
-                repoError = list == null
-                if (list != null) {
-                    repos = list
-                    RepoCache.repos = list
-                }
-                fetchingRepos = false
+        loading = true
+        refreshError = null
+        repoError = false
+        try {
+            projects = withContext(Dispatchers.IO) {
+                check(paths.projects.isDirectory || paths.projects.mkdirs()) { "Cannot open projects folder" }
+                checkNotNull(paths.projects.listFiles { f -> f.isDirectory && !f.name.startsWith(".") })
+                    .sortedByDescending { it.lastModified() }
             }
-        }
-        for (p in projects) {
-            statuses[p.path] = git.status(p)
-            git.originSlug(p)?.let { origins[p.path] = it } ?: origins.remove(p.path)
+            loaded = true
+            val currentPaths = projects.map { it.path }.toSet()
+            statuses.keys.toList().filter { it !in currentPaths }.forEach { statuses.remove(it) }
+            origins.keys.toList().filter { it !in currentPaths }.forEach { origins.remove(it) }
+            val status = git.ghStatus()
+            gh = status
+            coroutineScope {
+                if (status.signedIn) {
+                    fetchingRepos = true
+                    launch {
+                        try {
+                            val list = git.ghRepos()
+                            repoError = list == null
+                            if (list != null) {
+                                repos = list
+                                RepoCache.repos = list
+                            }
+                        } catch (e: Exception) {
+                            if (e is CancellationException) throw e
+                            repoError = true
+                        } finally {
+                            fetchingRepos = false
+                        }
+                    }
+                } else {
+                    repos = null
+                    RepoCache.repos = null
+                }
+                for (p in projects) {
+                    statuses[p.path] = git.status(p)
+                    git.originSlug(p)?.let { origins[p.path] = it } ?: origins.remove(p.path)
+                }
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            android.util.Log.w("ProjectsScreen", "Refresh failed", e)
+            refreshError = "Couldn't refresh projects. Check the Linux runtime and pull down to retry."
+            loaded = true
+        } finally {
+            loading = false
+            refreshing = false
+            fetchingRepos = false
         }
     }
 
@@ -180,67 +218,87 @@ fun ProjectsScreen(
                 }
             }
         }
-        LazyColumn(
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.fillMaxSize(),
+        PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = { if (!loading) { refreshing = true; reload++ } },
+            state = pullState,
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            indicator = {
+                PullToRefreshDefaults.IndicatorBox(
+                    state = pullState,
+                    isRefreshing = refreshing,
+                    modifier = Modifier.align(Alignment.TopCenter),
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ) {
+                    if (refreshing) WaveDots(Modifier.align(Alignment.Center), dotSize = 4.dp)
+                    else PhIcon(Ph.ArrowClockwise, "Pull to refresh", Modifier.align(Alignment.Center), size = 18.dp)
+                }
+            },
         ) {
-            item {
-                SearchField(query, { query = it })
-            }
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
-                    for (f in Filter.entries) Chip(f.label, selected = filter == f, onClick = { filter = f })
-                }
-            }
-            if (gh != null && gh?.signedIn != true) item { GitHubCard(gh, runInTerminal) }
-
-            if (filter != Filter.Remote) {
-                item { SectionLabel("On this phone · ${localShown.size}") }
-                if (!loaded) items(3) { SkeletonCard(lines = 2) }
-                else if (localShown.isEmpty()) item {
-                    EmptyNote(if (q.isNotEmpty()) "No local project matches “$q”." else "No projects yet. Create one, or clone a repository.")
-                }
-                items(localShown, key = { it.path }) { dir ->
-                    LocalProjectRow(dir, statuses[dir.path], origins[dir.path], repos, Modifier.animateItem()) { onOpenProject(dir) }
-                }
-            }
-
-            if (filter != Filter.Local && gh?.signedIn == true) {
+            LazyColumn(
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
                 item {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        SectionLabel("On GitHub · not cloned" + (repos?.let { " · ${remoteShown.size}" } ?: ""), Modifier.weight(1f))
-                        if (fetchingRepos) WaveDots(dotSize = 4.dp)
+                    SearchField(query, { query = it })
+                }
+                refreshError?.let { error -> item { Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) } }
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                        for (f in Filter.entries) Chip(f.label, selected = filter == f, onClick = { filter = f })
                     }
                 }
-                when {
-                    repos == null && fetchingRepos -> items(3) { SkeletonCard(lines = 2) }
-                    repos == null && repoError -> item {
-                        EmptyNote("Couldn't load your GitHub repositories. Check the connection and that gh is signed in.")
+                if (gh != null && gh?.signedIn != true) item { GitHubCard(gh, runInTerminal) }
+
+                if (filter != Filter.Remote) {
+                    item { SectionLabel("On this phone · ${localShown.size}") }
+                    if (!loaded) items(3) { SkeletonCard(lines = 2) }
+                    else if (localShown.isEmpty()) item {
+                        EmptyNote(if (q.isNotEmpty()) "No local project matches “$q”." else "No projects yet. Create one, or clone a repository.")
                     }
-                    remoteShown.isEmpty() -> item {
-                        EmptyNote(if (q.isNotEmpty()) "No repository matches “$q”." else "Every repository is already on this phone.")
+                    items(localShown, key = { it.path }) { dir ->
+                        LocalProjectRow(dir, statuses[dir.path], origins[dir.path], repos, Modifier.animateItem()) { onOpenProject(dir) }
                     }
                 }
-                // One grouped list per owner: your account first, then each organization.
-                val groups = remoteShown.groupBy { it.owner }.entries
-                    .sortedWith(compareBy({ it.value.first().isOrg }, { it.key.lowercase() }))
-                for ((owner, list) in groups) {
-                    item(key = "owner:$owner") {
-                        val open = owner !in collapsed
-                        OwnerGroup(
-                            owner = owner,
-                            isOrg = list.first().isOrg,
-                            repos = list,
-                            open = open,
-                            modifier = Modifier.animateItem(),
-                            onToggle = { if (open) collapsed += owner else collapsed -= owner },
-                        ) { repo ->
-                            val folder = if (File(paths.projects, repo.name).exists()) repo.slug.replace('/', '-') else repo.name
-                            runInTerminal(
-                                "mkdir -p ~/projects && cd ~/projects && gh repo clone ${shellQuote(repo.slug)} ${shellQuote(folder)}",
-                                "Clone ${repo.name}",
-                            )
+
+                if (filter != Filter.Local && gh?.signedIn == true) {
+                    if (repoError) item {
+                        Text("Couldn't refresh GitHub repositories. Pull down to retry." + if (repos != null) " Showing the saved list." else "",
+                            color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                    item {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            SectionLabel("On GitHub · not cloned" + (repos?.let { " · ${remoteShown.size}" } ?: ""), Modifier.weight(1f))
+                            if (fetchingRepos) WaveDots(dotSize = 4.dp)
+                        }
+                    }
+                    when {
+                        repos == null && fetchingRepos -> items(3) { SkeletonCard(lines = 2) }
+                        remoteShown.isEmpty() && !repoError -> item {
+                            EmptyNote(if (q.isNotEmpty()) "No repository matches “$q”." else "Every repository is already on this phone.")
+                        }
+                    }
+                    // One grouped list per owner: your account first, then each organization.
+                    val groups = remoteShown.groupBy { it.owner }.entries
+                        .sortedWith(compareBy({ it.value.first().isOrg }, { it.key.lowercase() }))
+                    for ((owner, list) in groups) {
+                        item(key = "owner:$owner") {
+                            val open = owner !in collapsed
+                            OwnerGroup(
+                                owner = owner,
+                                isOrg = list.first().isOrg,
+                                repos = list,
+                                open = open,
+                                modifier = Modifier.animateItem(),
+                                onToggle = { if (open) collapsed += owner else collapsed -= owner },
+                            ) { repo ->
+                                val folder = if (File(paths.projects, repo.name).exists()) repo.slug.replace('/', '-') else repo.name
+                                runInTerminal(
+                                    "mkdir -p ~/projects && cd ~/projects && gh repo clone ${shellQuote(repo.slug)} ${shellQuote(folder)}",
+                                    "Clone ${repo.name}",
+                                )
+                            }
                         }
                     }
                 }

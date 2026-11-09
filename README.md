@@ -135,6 +135,8 @@ Then, on the phone:
   details with changed files and diffs.
 - **All projects** lists folders on the phone and, when `gh` is signed in, your GitHub repositories and
   those of your organisations (grouped by owner), marked Cloned, Local or not cloned, with search.
+- Pull down to refresh project folders, Git status and GitHub repositories without clearing search
+  or filters.
 - **Run locally** appears for detected Vite apps and static HTML sites, alongside Android's Build action
   when both are present. Run setup lets you select an app folder, package manager, Vite script, port,
   dependency installation and optional custom command. Workspace packages install dependencies at the
