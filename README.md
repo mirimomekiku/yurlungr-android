@@ -247,7 +247,8 @@ credential-file presence; Antigravity's is not documented, so it shows as *Insta
   Yurlungr cannot be installed next to a real Termux. Building our own bootstrap is future work.
 - **targetSdk 28.** Android forbids running binaries from app data at targetSdk 29+, so this is a
   sideloaded app, not a Play Store one.
-- `libtermux.so` (JitPack v0.118.3) is not 16 KB page-aligned; fine on current test devices.
+- The terminal JNI library is rebuilt from matching Termux sources with 16 KB alignment.
+  APK alignment checks do not replace testing the embedded runtime and agents on a 16 KB device.
 - Sign-in detection is a credential-file heuristic; API-key setups show as not signed in.
 - Local web runs have been verified with Vite 8.3.6 on arm64. Other frameworks are detected as
   candidates, and project-specific native dependencies or other ABIs still need compatibility testing.

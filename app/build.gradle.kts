@@ -8,9 +8,31 @@ plugins {
 
 val runtimeAppId: String = providers.gradleProperty("yurlungr.applicationId").getOrElse("com.termux")
 
+// Keep the matching upstream Java classes, but replace JitPack's 4 KB JNI binaries
+// with libtermux built below. A generated AAR avoids duplicate-library pickFirst rules.
+val termuxEmulatorArchive by configurations.creating {
+    isCanBeConsumed = false
+    isTransitive = false
+}
+val prepareTermuxEmulator by tasks.registering(Zip::class) {
+    from(termuxEmulatorArchive.elements.map { zipTree(it.single().asFile) }) { exclude("jni/**") }
+    destinationDirectory.set(layout.buildDirectory.dir("termux-emulator"))
+    archiveFileName.set("terminal-emulator-java.aar")
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
 android {
     namespace = "dev.yurlungr.app"
     compileSdk = 36
+    ndkVersion = "28.2.13676358"
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
 
     defaultConfig {
         applicationId = runtimeAppId
@@ -76,9 +98,14 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)
+    implementation(libs.androidx.graphics.path)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
-    implementation(libs.termux.terminal.view)
+    implementation(libs.termux.terminal.view) {
+        exclude(group = "com.github.termux.termux-app", module = "terminal-emulator")
+    }
+    termuxEmulatorArchive(libs.termux.terminal.emulator)
+    implementation(files(prepareTermuxEmulator.flatMap { it.archiveFile }))
     implementation(libs.java.websocket)
 
     testImplementation(libs.junit)

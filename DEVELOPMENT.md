@@ -5,6 +5,12 @@
 Requires JDK 17+ (Android Studio's bundled JBR works; very new system JDKs can be too new for Gradle 8.14)
 and the Android SDK.
 
+The terminal JNI library is compiled locally with Android NDK `28.2.13676358` and
+CMake `3.22.1` (install these through Android Studio's SDK Manager). Its source is
+in `app/src/main/cpp`; keep it matched to the Termux version in the version catalog.
+The build retains the upstream emulator's Java classes and replaces its prebuilt
+native libraries, so changing only the NDK setting is not enough.
+
 ```sh
 ./gradlew assembleDebug                      # app/build/outputs/apk/debug/
 adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
@@ -42,6 +48,28 @@ Termux, set `YURLUNGR_TEST_NODE`, `YURLUNGR_TEST_BASH` and `YURLUNGR_TEST_FALSE`
 `$PREFIX/bin` executables; these avoid platform-specific executable-path assumptions in the test harness.
 
 Use the matching ABI debug APK for your device, or `app-universal-debug.apk` when unsure.
+
+### Native library alignment and smoke check
+
+Check ELF LOAD/RELRO alignment and uncompressed ZIP offsets for every bundled
+64-bit library using Python (no extra packages):
+
+```sh
+python tools/check-native-alignment.py app/build/outputs/apk/debug/app-arm64-v8a-debug.apk app/build/outputs/apk/debug/app-x86_64-debug.apk app/build/outputs/apk/debug/app-universal-debug.apk
+```
+
+The existing instrumentation runner also offers a bootstrap-independent native
+check. After installing the app and test APKs built above, run:
+
+```sh
+adb shell am instrument -w -e nativeOnly true com.termux.test/dev.yurlungr.app.web.WebRunSmokeInstrumentation
+```
+
+This creates and resizes a PTY, executes `/system/bin/sh`, checks the output and
+exit status, then closes it. It runs before the full web smoke suite as well.
+For actual 16 KB runtime validation, `adb shell getconf PAGE_SIZE` must report
+`16384`; on that device also test bootstrap installation, terminals and agents.
+The checker covers packaged native libraries, not downloaded runtime binaries.
 
 ## Open a screen directly
 

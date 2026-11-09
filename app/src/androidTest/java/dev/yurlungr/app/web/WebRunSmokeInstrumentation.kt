@@ -10,7 +10,12 @@ import java.util.UUID
 
 /** Explicit device-only smoke runner. No screen interaction and no changes to user projects. */
 class WebRunSmokeInstrumentation : Instrumentation() {
-    override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
+    private var nativeOnly = false
+    override fun onCreate(arguments: Bundle?) {
+        super.onCreate(arguments)
+        nativeOnly = arguments?.getString("nativeOnly") == "true"
+        start()
+    }
 
     override fun onStart() {
         val output = Bundle()
@@ -18,6 +23,13 @@ class WebRunSmokeInstrumentation : Instrumentation() {
         val roots = mutableListOf<File>()
         var resultCode = RESULT_OK
         try {
+            com.termux.terminal.NativeSmokeChecks.run(targetContext)
+            if (nativeOnly) {
+                output.putString("stream", "PASS: native PTY create, resize, subprocess execution, wait and close\n")
+                output.putString("result", "PASS")
+                finish(RESULT_OK, output)
+                return
+            }
             fixture.mkdirs()
             File(fixture,"index.html").writeText("<h1>Yurlungr instrumentation preview</h1>")
             roots += fixture
