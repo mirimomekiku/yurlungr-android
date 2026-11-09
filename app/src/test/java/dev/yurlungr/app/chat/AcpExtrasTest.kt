@@ -89,7 +89,8 @@ class AcpExtrasTest {
         assertEquals(listOf("resource", "resource_link", "resource_link"), blocks.map { it.type() })
         val resource = blocks[0]["resource"]!!.jsonObject
         assertEquals("# hi", (resource["text"] as JsonPrimitive).content)
-        assertTrue((resource["uri"] as JsonPrimitive).content.startsWith("file://${cwd.path}/.yurlungr/attachments/"))
+        val attachmentDir = java.io.File(cwd, ".yurlungr/attachments")
+        assertTrue((resource["uri"] as JsonPrimitive).content.startsWith("file://${attachmentDir.path}${java.io.File.separator}"))
         assertEquals("*\n", java.io.File(cwd, ".yurlungr/.gitignore").readText())
         assertEquals(3, java.io.File(cwd, ".yurlungr/attachments").listFiles()!!.size)
     }
