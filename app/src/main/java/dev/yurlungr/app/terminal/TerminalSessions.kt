@@ -82,7 +82,8 @@ object TerminalSessions {
             val login = if (paths.login.canExecute()) paths.login else paths.bash
             login to arrayOf("-${login.name}")
         } else {
-            paths.bash to arrayOf("-bash", "-c", if (keepShell) "$command\n$welcome\nexec bash -l" else command)
+            val status = "_yurlungr_exit=\$?; if [ \"\$_yurlungr_exit\" -ne 0 ]; then printf '\\nCommand failed (exit %s). Review the output above before retrying.\\n' \"\$_yurlungr_exit\"; fi"
+            paths.bash to arrayOf("-bash", "-c", if (keepShell) "$command\n$status\n$welcome\nexec bash -l" else command)
         }
         val session = TerminalSession(
             shell.path,

@@ -8,6 +8,8 @@
 #   bash android-sdk-setup.sh --test   also build and install a tiny test app
 # Safe to re-run.
 set -u
+source "${PREFIX:?Install the Linux environment first}/libexec/yurlungr/setup-common.sh" || exit $?
+setup_init "$HOME/android-sdk-setup.log"
 
 SDK="$HOME/android-sdk"
 PLATFORM="android-36"
@@ -17,32 +19,11 @@ BUILD_TOOLS="36.0.0"
 CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip"
 # Wrapper version for new projects. Termux's own `gradle` is 9.x, which AGP 8 can't run on.
 WRAPPER_GRADLE="8.14"
-LOG="$HOME/android-sdk-setup.log"
 # Sessions started before the SDK existed don't have these yet.
 export ANDROID_HOME="$SDK" ANDROID_SDK_ROOT="$SDK"
-APT_OPTS=(-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confnew)
-export DEBIAN_FRONTEND=noninteractive
-FAILED=()
-
-COLS=$(stty size 2>/dev/null | cut -d' ' -f2)
-COLS=${COLS:-80}
-step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
-ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$*"; }
-bad()  { printf '\033[31m  ✗ %s\033[0m\n' "$*"; FAILED+=("$1"); }
-run_logged() {
-  "$@" 2>&1 | tee -a "$LOG" | while IFS= read -r line; do
-    line=${line##*$'\r'}
-    [ -n "$line" ] && printf '\r\033[K\033[2m  %s\033[0m' "${line:0:$((COLS - 3))}"
-  done
-  local status=${PIPESTATUS[0]}
-  printf '\r\033[K'
-  return "$status"
-}
-
-: > "$LOG"
 
 step "Packages (JDK, native build tools)"
-run_logged apt-get update || true
+run_logged apt-get update || bad "package index update"
 for p in openjdk-17 aapt aapt2 aidl apksigner d8 unzip curl; do
   run_logged apt-get install "${APT_OPTS[@]}" "$p" && ok "$p" || bad "$p"
 done
@@ -70,26 +51,30 @@ fi
 step "SDK platform $PLATFORM and build-tools $BUILD_TOOLS"
 if [ -x "$SDKMANAGER" ]; then
   yes 2>/dev/null | "$SDKMANAGER" --sdk_root="$SDK" --licenses >>"$LOG" 2>&1
+  license_status=${PIPESTATUS[1]}
+  if [ "$license_status" -ne 0 ]; then bad "SDK license acceptance (exit $license_status)"; fi
   run_logged "$SDKMANAGER" --sdk_root="$SDK" "platforms;$PLATFORM" "build-tools;$BUILD_TOOLS" \
     && ok "installed" || bad "sdkmanager"
+else
+  bad "sdkmanager missing; command-line tools did not install"
 fi
 
 step "Swap x86-64 build tools for native ones"
 BT="$SDK/build-tools/$BUILD_TOOLS"
 if [ -d "$BT" ]; then
   for tool in aapt aapt2 aidl zipalign; do
-    native=$(command -v "$tool" 2>/dev/null) || continue
-    case "$native" in "$BT"/*) continue ;; esac
-    ln -sf "$native" "$BT/$tool" && ok "$tool → $native"
+    native=$(command -v "$tool" 2>/dev/null) || { bad "native $tool missing"; continue; }
+    case "$native" in "$BT"/*) bad "native $tool resolves to the SDK desktop binary"; continue ;; esac
+    ln -sf "$native" "$BT/$tool" && ok "$tool → $native" || bad "native $tool link"
   done
 else
   bad "build-tools dir missing"
 fi
 
 step "Gradle settings (~/.gradle/gradle.properties)"
-mkdir -p "$HOME/.gradle"
+mkdir -p "$HOME/.gradle" || exit 73
 PROPS="$HOME/.gradle/gradle.properties"
-touch "$PROPS"
+touch "$PROPS" || exit 73
 set_prop() { # key value
   if grep -q "^$1=" "$PROPS"; then
     sed -i "s|^$1=.*|$1=$2|" "$PROPS"
@@ -97,14 +82,17 @@ set_prop() { # key value
     printf '%s=%s\n' "$1" "$2" >> "$PROPS"
   fi
 }
-set_prop android.aapt2FromMavenOverride "$PREFIX/bin/aapt2"
+set_prop android.aapt2FromMavenOverride "$PREFIX/bin/aapt2" || bad "Gradle aapt2 setting"
 grep -q '^org.gradle.jvmargs=' "$PROPS" || set_prop org.gradle.jvmargs "-Xmx2g -Dfile.encoding=UTF-8"
 ok "aapt2 override → $PREFIX/bin/aapt2"
 
 if [ "${1:-}" = "--test" ]; then
-  step "Test build: ~/projects/hello-android"
-  APP="$HOME/projects/hello-android"
-  mkdir -p "$APP/app/src/main/java/dev/yurlungr/hello"
+  if [ "${#FAILED[@]}" -ne 0 ]; then setup_finish ""; fi
+  # Never overwrite a project the user may have edited after an earlier setup.
+  mkdir -p "$HOME/projects" || exit 73
+  APP=$(mktemp -d "$HOME/projects/hello-android-XXXXXX") || exit 73
+  step "Test build: $APP"
+  mkdir -p "$APP/app/src/main/java/dev/yurlungr/hello" || exit 73
   cat > "$APP/settings.gradle" <<'EOF'
 pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
 dependencyResolutionManagement { repositories { google(); mavenCentral() } }
@@ -178,9 +166,4 @@ EOF
   fi
 fi
 
-echo
-if [ ${#FAILED[@]} -eq 0 ]; then
-  printf '\033[1;32mAndroid SDK ready\033[0m at %s. Build with ./gradlew assembleDebug, install with yurlungr-install <apk>.\n' "$SDK"
-else
-  printf '\033[1;31mFailed: %s\033[0m (details: %s)\n' "${FAILED[*]}" "$LOG"
-fi
+setup_finish "Android SDK ready at $SDK. Build with ./gradlew assembleDebug, install with yurlungr-install <apk>."

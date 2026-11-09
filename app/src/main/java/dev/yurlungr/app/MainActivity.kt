@@ -219,7 +219,7 @@ class MainActivity : ComponentActivity() {
                 onOpenTerminal = { nav.push(Route.Terminal) },
                 onInstallAgents = { openAgentSetup(context, nav) },
                 onInstallAndroidSdk = {
-                    runInTerminal(context, nav, "bash \"\$PREFIX/libexec/yurlungr/android-sdk-setup.sh\" --test", "Android SDK")
+                    runInTerminal(context, nav, dev.yurlungr.app.runtime.setupScriptCommand("android-sdk-setup.sh", test = true), "Android SDK")
                 },
                 // Opened from Settings → back there; as the first-run screen → home.
                 onHome = { if (nav.isTopLevel) nav.reset(Route.NewChat) else nav.pop() },
@@ -348,11 +348,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openAgentSetup(context: Context, nav: Navigator) =
-        runInTerminal(context, nav, "bash \"\$PREFIX/libexec/yurlungr/agents-setup.sh\"", "Agent setup")
+        runInTerminal(context, nav, dev.yurlungr.app.runtime.setupScriptCommand("agents-setup.sh"), "Agent setup")
 
     private fun runInTerminal(context: Context, nav: Navigator, command: String, name: String) {
-        TerminalSessions.create(context, command = command, name = name)
-        nav.push(Route.Terminal)
+        runCatching {
+            val paths = RuntimePaths(context)
+            check(paths.isBootstrapInstalled) { "Install the Linux environment in System checks first." }
+            // Also repairs scripts left by an older APK; wait for the launch-time refresh if needed.
+            dev.yurlungr.app.runtime.RuntimeAssets.install(context, paths)
+            TerminalSessions.create(context, command = command, name = name)
+        }.onSuccess {
+            nav.push(Route.Terminal)
+        }.onFailure {
+            android.util.Log.e("MainActivity", "Cannot start $name", it)
+            android.widget.Toast.makeText(context, "Couldn't start $name: ${it.message}", android.widget.Toast.LENGTH_LONG).show()
+        }
     }
 
     companion object {

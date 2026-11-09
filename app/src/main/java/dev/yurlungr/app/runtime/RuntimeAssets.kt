@@ -3,7 +3,6 @@ package dev.yurlungr.app.runtime
 import android.content.Context
 import android.system.Os
 import java.io.File
-import java.io.FileOutputStream
 
 /**
  * Files the app keeps inside the runtime. Rewritten on every launch so they track the
@@ -13,6 +12,7 @@ object RuntimeAssets {
     private val EXEC = "700".toInt(8)
 
     private fun scripts(paths: RuntimePaths) = mapOf(
+        "setup-common.sh" to File(paths.libexec, "setup-common.sh"),
         "spike-test.sh" to File(paths.home, "spike-test.sh"),
         "agents-setup.sh" to File(paths.libexec, "agents-setup.sh"),
         "android-sdk-setup.sh" to File(paths.libexec, "android-sdk-setup.sh"),
@@ -22,6 +22,7 @@ object RuntimeAssets {
     /** Commands tools use to open a browser. All route to `yurlungr-open`. */
     private val OPEN_ALIASES = listOf("xdg-open", "termux-open-url", "termux-open", "sensible-browser")
 
+    @Synchronized
     fun install(context: Context, paths: RuntimePaths) {
         if (!paths.isBootstrapInstalled) return
         paths.home.mkdirs()
@@ -29,9 +30,8 @@ object RuntimeAssets {
         paths.inbox.mkdirs()
 
         for ((asset, dest) in scripts(paths)) {
-            dest.parentFile?.mkdirs()
-            context.assets.open(asset).use { input -> FileOutputStream(dest).use { input.copyTo(it) } }
-            Os.chmod(dest.path, EXEC)
+            val text = context.assets.open(asset).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            writeExecutable(dest, text)
         }
 
         val motdLauncher = "#!${paths.bin}/sh\n# Yurlungr dynamic MOTD\nexec '${paths.bash}' '${paths.libexec}/motd.sh'\n"
@@ -40,8 +40,7 @@ object RuntimeAssets {
         val hook = File(paths.home, ".termux/motd.sh")
         if (!hook.exists() && runCatching { Os.lstat(hook.path); false }.getOrDefault(true)) {
             hook.parentFile?.mkdirs()
-            hook.writeText(motdLauncher)
-            Os.chmod(hook.path, EXEC)
+            writeExecutable(hook, motdLauncher)
         }
 
         writeShim(paths, "yurlungr-open", openShim(paths))
@@ -59,9 +58,23 @@ object RuntimeAssets {
     }
 
     private fun writeShim(paths: RuntimePaths, name: String, body: String) {
-        val file = File(paths.shimBin, name)
-        file.writeText(body)
-        Os.chmod(file.path, EXEC)
+        writeExecutable(File(paths.shimBin, name), body)
+    }
+
+    /** Publish complete LF-only files; an interrupted refresh must not truncate a running script. */
+    private fun writeExecutable(file: File, source: String) {
+        val text = normalizeRuntimeScript(source)
+        if (file.isFile && file.readText() == text && file.canExecute()) return
+        val parent = requireNotNull(file.parentFile)
+        check(parent.isDirectory || parent.mkdirs()) { "Cannot create runtime directory: $parent" }
+        val tmp = File.createTempFile(".${file.name}.", ".tmp", parent)
+        try {
+            tmp.writeText(text, Charsets.UTF_8)
+            Os.chmod(tmp.path, EXEC)
+            Os.rename(tmp.path, file.path)
+        } finally {
+            tmp.delete()
+        }
     }
 
     // Android's `am` refuses calls from app UIDs, so shims hand requests to the app through

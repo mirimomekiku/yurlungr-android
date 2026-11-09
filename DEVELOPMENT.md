@@ -71,6 +71,26 @@ For actual 16 KB runtime validation, `adb shell getconf PAGE_SIZE` must report
 `16384`; on that device also test bootstrap installation, terminals and agents.
 The checker covers packaged native libraries, not downloaded runtime binaries.
 
+### Setup scripts
+
+Shell assets use LF in Git. `RuntimeAssets` also removes a leading UTF-8 BOM and
+normalizes CRLF/lone CR when installing them, including scripts from older APKs.
+Executable files are published by atomic rename so a refresh cannot leave a
+partially written script. Setup launchers parse with `bash -n` before executing.
+
+Agent and SDK installers share an exclusive kernel lock, preserve one previous
+log (`*.log.previous`), and return nonzero on a failed step. The terminal shows
+the exit code before returning to its shell. Retry setup after fixing the reported
+failure; it will update or repair the existing installation.
+
+After installing the app and instrumentation APKs, this device check validates
+installed scripts and exercises command/log failures, retries and lock contention
+inside a temporary cache fixture, without downloading or installing packages:
+
+```sh
+adb shell am instrument -w -e scriptsOnly true com.termux.test/dev.yurlungr.app.web.WebRunSmokeInstrumentation
+```
+
 ## Open a screen directly
 
 Debug builds accept a `screen` extra, handy for checking layouts without tapping through the app:

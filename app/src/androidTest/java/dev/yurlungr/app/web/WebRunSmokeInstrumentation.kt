@@ -11,9 +11,11 @@ import java.util.UUID
 /** Explicit device-only smoke runner. No screen interaction and no changes to user projects. */
 class WebRunSmokeInstrumentation : Instrumentation() {
     private var nativeOnly = false
+    private var scriptsOnly = false
     override fun onCreate(arguments: Bundle?) {
         super.onCreate(arguments)
         nativeOnly = arguments?.getString("nativeOnly") == "true"
+        scriptsOnly = arguments?.getString("scriptsOnly") == "true"
         start()
     }
 
@@ -23,6 +25,13 @@ class WebRunSmokeInstrumentation : Instrumentation() {
         val roots = mutableListOf<File>()
         var resultCode = RESULT_OK
         try {
+            if (scriptsOnly) {
+                dev.yurlungr.app.runtime.RuntimeScriptSmokeChecks.run(this)
+                output.putString("stream", "PASS: installed script encoding, syntax, failures, logs, retries and setup lock\n")
+                output.putString("result", "PASS")
+                finish(RESULT_OK, output)
+                return
+            }
             com.termux.terminal.NativeSmokeChecks.run(targetContext)
             if (nativeOnly) {
                 output.putString("stream", "PASS: native PTY create, resize, subprocess execution, wait and close\n")
