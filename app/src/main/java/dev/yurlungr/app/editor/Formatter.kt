@@ -22,7 +22,14 @@ object Formatter {
 
     fun supports(lang: Language) = lang.prettier
 
-    suspend fun prettier(paths: RuntimePaths, file: File, text: String): Result = withContext(Dispatchers.IO) {
+    /** Never throws: any failure (no Node, unwritable cache, broken shell) is a [Result.Failed]. */
+    suspend fun prettier(paths: RuntimePaths, file: File, text: String): Result = try {
+        runPrettier(paths, file, text)
+    } catch (e: java.io.IOException) {
+        Result.Failed("Couldn't run Prettier: ${e.message ?: e}")
+    }
+
+    private suspend fun runPrettier(paths: RuntimePaths, file: File, text: String): Result = withContext(Dispatchers.IO) {
         if (!File(paths.bin, "npx").exists()) {
             return@withContext Result.Failed("Node.js isn't installed. Install the agents (they bring Node), or run: pkg install nodejs-lts")
         }
@@ -44,6 +51,7 @@ object Formatter {
         try {
             when {
                 r.timedOut -> Result.Failed("Prettier took too long (is the network up for the first download?)")
+                r.toolMissing -> Result.Failed(r.describe("Prettier") + "\nCheck Node.js in System checks.")
                 !r.ok -> Result.Failed(r.output.trim().lines().filter { it.isNotBlank() }.take(6).joinToString("\n").ifBlank { "Prettier failed (exit ${r.exitCode})" })
                 !output.isFile -> Result.Failed("Prettier produced no output")
                 else -> Result.Formatted(output.readText())

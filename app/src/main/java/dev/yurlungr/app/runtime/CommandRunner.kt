@@ -7,6 +7,17 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import kotlin.concurrent.thread
 
+/** Why a command didn't succeed. */
+enum class CommandFailure {
+    /** The program doesn't exist (spawn error ENOENT, or the shell's exit 127). */
+    NotFound,
+    /** It exists but can't be executed (EACCES, a broken binary or library; the shell's exit 126). */
+    NotExecutable,
+    TimedOut,
+    /** It ran and exited non-zero. */
+    Exited,
+}
+
 data class CommandResult(
     val exitCode: Int,
     val output: String,
@@ -15,9 +26,54 @@ data class CommandResult(
     val truncated: Boolean = false,
     /** Stderr, when it was kept separate from [output] (see [CommandRunner.run]'s `forParsing`). */
     val errorOutput: String = "",
+    /** Set when the process couldn't be started at all (the OS error, e.g. "error=2, No such file"). */
+    val launchError: String? = null,
+    /** The limit that [timedOut] refers to. */
+    val timeoutMs: Long = 0,
 ) {
-    val ok: Boolean get() = exitCode == 0 && !timedOut
+    val ok: Boolean get() = exitCode == 0 && !timedOut && launchError == null
     val firstLine: String get() = output.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+
+    val failure: CommandFailure?
+        get() = when {
+            ok -> null
+            timedOut -> CommandFailure.TimedOut
+            exitCode == EXIT_NOT_FOUND -> CommandFailure.NotFound
+            exitCode == EXIT_NOT_EXECUTABLE -> CommandFailure.NotExecutable
+            else -> CommandFailure.Exited
+        }
+
+    /** Whether reinstalling the tool is the likely fix (it's missing or can't run). */
+    val toolMissing: Boolean get() = failure == CommandFailure.NotFound || failure == CommandFailure.NotExecutable
+
+    /**
+     * One message for the user: what went wrong with [what] (e.g. "git push"), in plain words,
+     * followed by the command's last lines of error output when there are any.
+     */
+    fun describe(what: String): String {
+        val detail = errorOutput.ifBlank { output }.trim().lines().filter { it.isNotBlank() }.takeLast(4).joinToString("\n")
+        val headline = when (failure) {
+            null -> "$what: done"
+            CommandFailure.TimedOut -> "$what timed out after ${timeoutMs / 1000} s"
+            CommandFailure.NotFound -> "$what: the program isn't installed" + (launchError?.let { " ($it)" } ?: "")
+            CommandFailure.NotExecutable -> "$what: the program can't run" + (launchError?.let { " ($it)" } ?: "")
+            CommandFailure.Exited -> "$what failed (exit $exitCode)"
+        }
+        return if (detail.isEmpty() || launchError != null) headline else "$headline\n$detail"
+    }
+
+    companion object {
+        const val EXIT_NOT_FOUND = 127
+        const val EXIT_NOT_EXECUTABLE = 126
+
+        /** A result for a program that couldn't be started; never throws to the caller. */
+        fun launchFailed(e: java.io.IOException): CommandResult {
+            val message = e.cause?.message ?: e.message ?: e.toString()
+            // Java reports the errno as "error=N": 2 = ENOENT. Anything else (EACCES, ENOEXEC…) can't run.
+            val code = if (Regex("""error=2\b""").containsMatchIn(e.message.orEmpty() + " " + message)) EXIT_NOT_FOUND else EXIT_NOT_EXECUTABLE
+            return CommandResult(code, "", launchError = message.removePrefix("error=2, ").removePrefix("error=13, "))
+        }
+    }
 }
 
 /** Runs non-interactive commands inside the runtime (no PTY). Interactive work goes through terminal sessions. */
@@ -41,17 +97,22 @@ object CommandRunner {
         onLine: ((String) -> Unit)? = null,
         forParsing: Boolean = false,
     ): CommandResult = withContext(Dispatchers.IO) {
-        val process = ProcessBuilder(command)
-            .directory(cwd.takeIf { it.isDirectory } ?: paths.filesDir)
-            .redirectErrorStream(!forParsing)
-            .apply {
-                environment().run {
-                    clear()
-                    putAll(RuntimeEnv.map(paths, cwd))
-                    putAll(extraEnv)
+        // A missing or unrunnable program is a result, not an exception: callers run in UI coroutines.
+        val process = try {
+            ProcessBuilder(command)
+                .directory(cwd.takeIf { it.isDirectory } ?: paths.filesDir)
+                .redirectErrorStream(!forParsing)
+                .apply {
+                    environment().run {
+                        clear()
+                        putAll(RuntimeEnv.map(paths, cwd))
+                        putAll(extraEnv)
+                    }
                 }
-            }
-            .start()
+                .start()
+        } catch (e: java.io.IOException) {
+            return@withContext CommandResult.launchFailed(e)
+        }
         process.outputStream.close()
 
         val output = Capture(if (forParsing) MAX_PARSED_OUTPUT_CHARS else MAX_OUTPUT_CHARS)
@@ -85,6 +146,7 @@ object CommandRunner {
             timedOut = !exited,
             truncated = output.truncated,
             errorOutput = errors.text(),
+            timeoutMs = timeoutMs,
         )
     }
 
