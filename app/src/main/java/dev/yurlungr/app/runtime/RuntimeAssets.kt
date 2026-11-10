@@ -16,6 +16,7 @@ object RuntimeAssets {
         "spike-test.sh" to File(paths.home, "spike-test.sh"),
         "agents-setup.sh" to File(paths.libexec, "agents-setup.sh"),
         "dev-tools-setup.sh" to File(paths.libexec, "dev-tools-setup.sh"),
+        "agent-install.sh" to File(paths.libexec, "agent-install.sh"),
         "android-sdk-setup.sh" to File(paths.libexec, "android-sdk-setup.sh"),
         "motd.sh" to File(paths.libexec, "motd.sh"),
     )

@@ -14,3 +14,10 @@ internal fun setupScriptCommand(name: String, test: Boolean = false): String {
     // Parse the entire script before executing even its first command.
     return "bash -n $path && bash $path" + if (test) " --test" else ""
 }
+
+/** The command that installs or updates one native-binary agent with `agent-install.sh`. */
+internal fun agentInstallCommand(recipe: String): String {
+    require(recipe in setOf("copilot", "goose", "opencode")) { "Unknown agent recipe: $recipe" }
+    val path = "\"\$PREFIX/libexec/yurlungr/agent-install.sh\""
+    return "bash -n $path && bash $path $recipe"
+}

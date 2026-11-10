@@ -45,6 +45,13 @@ fi
 run_logged with_timeout 1800 npm install -g --loglevel=http --os=linux --cpu=arm64 --libc=glibc @anthropic-ai/claude-code@latest \
   && ok "@anthropic-ai/claude-code" || bad "@anthropic-ai/claude-code"
 
+# Optional agents are installed one by one from the app; update the ones that are here.
+for p in "${YURLUNGR_OPTIONAL_AGENT_PACKAGES[@]}"; do
+  if npm ls -g --depth=0 "$p" >/dev/null 2>&1; then
+    run_logged with_timeout 1800 npm install -g --loglevel=http "$p@latest" && ok "$p (updated)" || bad "$p"
+  fi
+done
+
 step "Antigravity CLI (agy)"
 # Google's installer picks the native android_arm64 (Bionic) build on Termux and verifies its
 # SHA-512. Once installed, agy updates itself in the background, so it's skipped here.

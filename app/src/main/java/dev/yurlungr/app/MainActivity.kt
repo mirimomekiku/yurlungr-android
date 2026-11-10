@@ -228,6 +228,9 @@ class MainActivity : ComponentActivity() {
                 onOpenChat = { nav.reset(Route.Chat(it.id)) },
                 onLogin = { openLogin(context, it, nav) },
                 onInstallAgents = { openAgentSetup(context, nav) },
+                onInstallAgent = { agent ->
+                    agent.installCommand()?.let { runInTerminal(context, nav, it, "Install ${agent.displayName}") }
+                },
             )
             Route.Setup -> SetupScreen(
                 setupViewModel,

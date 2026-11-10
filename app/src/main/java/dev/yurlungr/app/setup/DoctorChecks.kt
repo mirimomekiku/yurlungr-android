@@ -313,8 +313,10 @@ object DoctorChecks {
     private fun agents(paths: RuntimePaths): Check {
         // Claude Code (glibc build) and Antigravity only exist for 64-bit ARM: don't expect them elsewhere.
         val arm64 = RuntimePaths.termuxArch() == "aarch64"
+        // Optional agents (installed one by one) aren't expected: only the core ones the setup installs.
         val statuses = agentStatuses(paths).filter {
-            arm64 || it.agent !in setOf(dev.yurlungr.app.agents.Agent.Claude, dev.yurlungr.app.agents.Agent.Antigravity)
+            !it.agent.isOptional &&
+                (arm64 || it.agent !in setOf(dev.yurlungr.app.agents.Agent.Claude, dev.yurlungr.app.agents.Agent.Antigravity))
         }
         val missing = statuses.filter { !it.installed }.map { it.agent.displayName }
         return if (missing.isEmpty()) {

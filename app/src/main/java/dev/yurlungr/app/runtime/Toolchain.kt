@@ -58,6 +58,13 @@ object Toolchain {
         Tool("claude", "Claude Code", "claude --version", ToolSetup.Agents, onlyIf = "libexec/yurlungr/claude-glibc"),
         Tool("claude-agent-acp", "Claude ACP adapter", "test -x \"\$(command -v claude-agent-acp)\" && echo \"\$(command -v claude-agent-acp)\"", ToolSetup.Agents, onlyIf = "bin/claude-agent-acp"),
         Tool("agy", "Antigravity", "agy --version", ToolSetup.Agents, onlyIf = "bin/agy"),
+        Tool("qwen", "Qwen Code", "qwen --version", ToolSetup.Agents, onlyIf = "bin/qwen"),
+        Tool("kimi", "Kimi Code", "kimi --version", ToolSetup.Agents, onlyIf = "bin/kimi"),
+        Tool("auggie", "Auggie", "auggie --version", ToolSetup.Agents, onlyIf = "bin/auggie"),
+        Tool("commandcode", "Command Code", "commandcode --version", ToolSetup.Agents, onlyIf = "bin/commandcode"),
+        Tool("copilot", "Copilot", "copilot --version", ToolSetup.Agents, onlyIf = "bin/copilot"),
+        Tool("goose", "Goose", "goose --version", ToolSetup.Agents, onlyIf = "libexec/yurlungr/bin/goose"),
+        Tool("opencode", "OpenCode", "opencode --version", ToolSetup.Agents, onlyIf = "bin/opencode"),
         Tool("java", "Java (JDK)", "java -version 2>&1 | sed -n 1p", ToolSetup.AndroidSdk, onlyIf = "bin/java"),
         Tool("aapt2", "aapt2", "aapt2 version", ToolSetup.AndroidSdk, onlyIf = "bin/aapt2"),
     )
@@ -113,6 +120,8 @@ object Toolchain {
         appendLine("YURLUNGR_AGENT_PACKAGES=(${AGENT_PACKAGES.joinToString(" ")})")
         appendLine("YURLUNGR_AGENT_GLIBC_PACKAGES=(${AGENT_GLIBC_PACKAGES.joinToString(" ")})")
         appendLine("YURLUNGR_SDK_PACKAGES=(${SDK_PACKAGES.joinToString(" ")})")
+        // Optional agents (installed one by one from the app); the agents setup updates those present.
+        appendLine("YURLUNGR_OPTIONAL_AGENT_PACKAGES=(${dev.yurlungr.app.agents.Agent.entries.mapNotNull { it.npmPackage }.joinToString(" ")})")
         appendLine("YURLUNGR_SDK_PLATFORM=$SDK_PLATFORM")
         appendLine("YURLUNGR_SDK_BUILD_TOOLS=$SDK_BUILD_TOOLS")
         // "name<TAB>command" per tool and setup, for the scripts' final version checks.

@@ -70,6 +70,8 @@ fun AgentsScreen(
     onOpenChat: (ChatSession) -> Unit,
     onLogin: (Agent) -> Unit,
     onInstallAgents: () -> Unit,
+    /** Installs one optional agent (its npm package) in a terminal. */
+    onInstallAgent: (Agent) -> Unit,
 ) {
     val context = LocalContext.current
     val paths = remember { RuntimePaths(context) }
@@ -91,7 +93,8 @@ fun AgentsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
-            items(statuses, key = { it.agent.name }) { status ->
+            val (core, optional) = statuses.partition { !it.agent.isOptional }
+            items(core, key = { it.agent.name }) { status ->
                 AgentCard(
                     status,
                     onNewChat = { newChatFor = status.agent },
@@ -99,13 +102,33 @@ fun AgentsScreen(
                     onInstall = onInstallAgents,
                 )
             }
-            if (statuses.any { !it.installed }) {
+            if (core.any { !it.installed }) {
                 item {
                     Text(
-                        "Install sets up all the agents in the built-in Linux runtime (~1.2 GB, a few minutes).",
+                        "Install sets up these agents in the built-in Linux runtime (~1.2 GB, a few minutes).",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 6.dp),
+                    )
+                }
+            }
+            if (optional.isNotEmpty()) {
+                item(key = "more") { dev.yurlungr.app.ui.SectionLabel("More agents") }
+                item(key = "more-note") {
+                    Text(
+                        "Installed one by one. The npm-based ones need the developer tools (Node.js); Copilot, Goose and " +
+                            "OpenCode download a Linux build (~60–200 MB) that runs on the phone's glibc runtime (64-bit ARM).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 6.dp),
+                    )
+                }
+                items(optional, key = { it.agent.name }) { status ->
+                    AgentCard(
+                        status,
+                        onNewChat = { newChatFor = status.agent },
+                        onLogin = { onLogin(status.agent) },
+                        onInstall = { onInstallAgent(status.agent) },
                     )
                 }
             }
@@ -170,6 +193,13 @@ private fun signInLabel(agent: Agent) = when (agent) {
     Agent.Claude -> "Sign in with Claude"
     Agent.Codex -> "Sign in with ChatGPT"
     Agent.Gemini, Agent.Antigravity -> "Sign in with Google"
+    Agent.Qwen -> "Sign in"
+    Agent.Kimi -> "Sign in with Kimi"
+    Agent.Auggie -> "Sign in with Augment"
+    Agent.CommandCode -> "Sign in"
+    Agent.Copilot -> "Sign in with GitHub"
+    Agent.Goose -> "Set up a provider"
+    Agent.OpenCode -> "Sign in"
 }
 
 private fun relativeTime(millis: Long): String =

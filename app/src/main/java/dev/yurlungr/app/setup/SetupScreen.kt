@@ -87,6 +87,7 @@ private val AREAS = listOf(
     "Developer tools" to listOf("tools", "tool-git", "tool-gh", "tool-node", "tool-npm", "tool-rg", "setup-dev-tools-setup"),
     "Tools" to listOf(
         "agents", "tool-gemini", "tool-codex", "tool-codex-acp", "tool-claude", "tool-claude-agent-acp", "tool-agy", "setup-agents-setup",
+        "tool-qwen", "tool-kimi", "tool-auggie", "tool-commandcode", "tool-copilot", "tool-goose", "tool-opencode",
         "android-sdk", "tool-java", "tool-aapt2", "setup-android-sdk-setup", "cli-report",
     ),
     "Background" to listOf("notifications", "battery", "phantom"),

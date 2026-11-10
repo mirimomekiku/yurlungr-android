@@ -120,19 +120,32 @@ Then, on the phone:
 - **Workspace** per project: the name (tap to switch projects or open *All projects*), Branch / Changes /
   To push stat tiles, and Files · Changes · History · Chats tabs. Bottom actions include Chat, Terminal,
   Android Build and web Run when applicable. The sidebar's *Projects* reopens the last workspace.
-- **Files** is a tree with change marks. **Git details** adds explicit ignored/not-ignored labels and
-  filters for All, Not ignored, Ignored and Uncommitted. Uncommitted lists every changed path, including
-  deletions; ignored paths come from Git itself (nested rules, exceptions and global exclusions apply).
-  Refresh re-reads the tree and Git state. Tapping a Markdown file (`.md`, case-insensitive, also
+- **Files** is a tree. In a repository:
+  - Every changed file shows a coloured pill (Modified, New, Deleted, Renamed, Conflict), plus "staged" when it's in the next commit.
+  - Ignored files are dimmed and tagged, and folders with changes inside get a dot.
+  - A filter row with counts (All, Uncommitted, Ignored, Not ignored) and a one-line summary is always shown. Uncommitted lists every changed path, including deletions.
+  - Ignored paths come from Git itself, so nested rules, exceptions and global exclusions apply.
+
+  Pull down to re-read the tree and Git's state. Tapping a Markdown file (`.md`, case-insensitive, also
   `.markdown` / `.mdown`) opens a rendered viewer with **Edit** to open the text editor; Back from the
   editor returns to the preview. Other files open in the editor.
-- **Changes**: per-file diffs, *Commit all*, Pull (`--ff-only`), Push (sets the upstream on first push),
-  a standard `.gitignore` when build output shows up, and *Publish to GitHub* (`gh repo create`).
+- **Changes**: per-file diffs, *Commit all*, a standard `.gitignore` when build output shows up, and
+  *Publish to GitHub* (`gh repo create`). **Pull** (`--ff-only`) and **Push**, which sets the upstream on
+  the first push, run in a live terminal in a bottom sheet, showing git's progress and any prompts.
+  The terminal session ends when git exits. The sheet stays open with the result until you close it.
 - **Branches** (tap the Branch tile): pull, create, switch (remote branches become tracking branches;
   uncommitted changes can be stashed first or brought along), and stash pop / apply / drop.
 - **History** is a commit graph like `git log --graph`, grouped under Today / Yesterday / dates, with
-  branch, remote and tag labels, "not pushed" marks, a This branch / All branches filter, and commit
-  details with changed files and diffs.
+  branch, remote and tag labels, "not pushed" marks, and a This branch / All branches filter.
+  - **Filters:** author, date (today, 7 days, 30 days, a year) and search (message, or a commit hash).
+    Git applies them, so they cover the whole history, not just the commits shown.
+  - **Commit details:** the changed files and a proper diff viewer, with:
+    - +/− counts and line numbers for both sides;
+    - added and removed lines tinted, with the changed words highlighted;
+    - hunk headers, a wrap toggle and paging for long diffs;
+    - a full-screen view.
+
+    The Changes tab uses the same viewer.
 - **All projects** lists folders on the phone and, when `gh` is signed in, your GitHub repositories and
   those of your organisations (grouped by owner), marked Cloned, Local or not cloned, with search.
 - Pull down to refresh project folders, Git status and GitHub repositories without clearing search
@@ -219,6 +232,17 @@ Then, on the phone:
 | Codex | Termux package `codex` (npm's build does not run on Android) | `codex-acp` with `CODEX_PATH` |
 | Gemini CLI | `npm i -g @google/gemini-cli` | `gemini --acp` |
 | Antigravity (`agy`) | Google's installer, which installs the native `android_arm64` build | `agy acp` (sign in with `agy acp --login`) |
+| Qwen Code *(optional)* | `npm i -g @qwen-code/qwen-code` | `qwen --acp` (sign in with `qwen`, then `/auth`) |
+| Kimi Code *(optional)* | `npm i -g @moonshot-ai/kimi-code` | `kimi acp` (sign in with `kimi login`) |
+| Auggie *(optional)* | `npm i -g @augmentcode/auggie` | `auggie --acp` (sign in with `auggie login`) |
+| Command Code *(optional)* | `npm i -g command-code` | `commandcode acp` (sign in with `commandcode login`; its short name `cmd` clashes with Android's own `cmd`) |
+| Copilot *(optional)* | `agent-install.sh copilot`: the `@github/copilot-linux-arm64` glibc build, started through Termux's glibc loader | `copilot --acp` (sign in with `copilot login`) |
+| Goose *(optional)* | `agent-install.sh goose`: the `aarch64-linux-gnu` release, started through the glibc loader | `goose acp` (set up with `goose configure`) |
+| OpenCode *(optional)* | `agent-install.sh opencode`: the `linux-arm64` glibc release, interpreter patched like Claude Code | `opencode acp` (sign in with `opencode auth login`) |
+
+The optional agents are pure Node packages, installed one by one from Agents → More agents. Re-running
+the agents setup updates the ones you have. Their sign-in state isn't tracked from files: the chat asks
+you to sign in when the agent reports it.
 
 All of it is scripted in `app/src/main/assets/agents-setup.sh`; re-running it updates the agents. Each
 agent also gets a managed "you're on an Android phone" note in its own instructions file
