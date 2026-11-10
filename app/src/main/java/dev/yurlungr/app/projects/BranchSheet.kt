@@ -104,11 +104,21 @@ fun BranchSheet(dir: File, git: Git, status: GitStatus, onDismiss: () -> Unit, o
     }
 
     fun switch(branch: GitBranch, stashFirst: Boolean) = op("Switch") {
-        if (stashFirst) {
-            val s = git.stash(dir, "Before switching to ${branch.name}")
-            if (!s.ok) return@op s
+        if (!stashFirst) return@op git.switchTo(dir, branch)
+        val stashesBefore = git.stashes(dir).size
+        val s = git.stash(dir, "Before switching to ${branch.name}")
+        if (!s.ok) return@op s
+        val switched = git.switchTo(dir, branch)
+        // Nothing stashed (e.g. only ignored files changed), or the switch worked: done.
+        if (switched.ok || git.stashes(dir).size <= stashesBefore) return@op switched
+        // The switch failed: bring the changes back rather than leaving them hidden in a stash.
+        val restored = git.stashPop(dir, GitStash("stash@{0}", "", ""))
+        val note = if (restored.ok) {
+            "Your changes were restored."
+        } else {
+            "Your changes are saved in stash@{0} (Stashes below); restoring them failed:\n${restored.output.trim().lines().takeLast(2).joinToString("\n")}"
         }
-        git.switchTo(dir, branch)
+        CommandResult(switched.exitCode, switched.output.trim() + "\n" + note, switched.timedOut)
     }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
