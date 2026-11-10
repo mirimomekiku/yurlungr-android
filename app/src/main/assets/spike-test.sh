@@ -17,10 +17,14 @@ if [ ! -r "$MANIFEST" ] || ! source "$MANIFEST"; then
   exit 69
 fi
 
-: > "$REPORT" || { printf 'Cannot write %s. Check free storage.\n' "$REPORT" >&2; exit 73; }
+# Built in a temp file and moved into place at the end: the app never reads half a report, and an
+# interrupted run keeps the previous one.
+TMP_REPORT="$REPORT.tmp"
+: > "$TMP_REPORT" || { printf 'Cannot write %s. Check free storage.\n' "$TMP_REPORT" >&2; exit 73; }
+trap 'rm -f "$TMP_REPORT"' EXIT
 
 record() { # STATUS NAME DETAIL
-  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$REPORT"
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$TMP_REPORT"
   case "$1" in
     PASS) color=32 ;; FAIL) color=31 ;; *) color=36 ;;
   esac
@@ -30,7 +34,7 @@ record() { # STATUS NAME DETAIL
 # check NAME 'shell command' -> PASS with its first output line, or FAIL with exit code and last line.
 check() {
   local out status
-  out=$(timeout 120 bash -o pipefail -c "$2" 2>&1 </dev/null)
+  out=$(timeout -k 10 120 bash -o pipefail -c "$2" 2>&1 </dev/null)
   status=$?
   if [ $status -eq 0 ] && [ -n "$out" ]; then
     record PASS "$1" "$(printf '%s\n' "$out" | grep -m1 .)"
@@ -53,7 +57,8 @@ for entry in "${YURLUNGR_CHECKS_DEVTOOLS[@]}" "${YURLUNGR_CHECKS_AGENTS[@]}" "${
 done
 check grun 'command -v grun'
 
-pass=$(grep -c '^PASS' "$REPORT")
-fail=$(grep -c '^FAIL' "$REPORT")
+pass=$(grep -c '^PASS' "$TMP_REPORT")
+fail=$(grep -c '^FAIL' "$TMP_REPORT")
+mv -f "$TMP_REPORT" "$REPORT" || { printf 'Cannot save %s. Check free storage.\n' "$REPORT" >&2; exit 73; }
 printf '\n%s passed, %s failed. Report: %s\n' "$pass" "$fail" "$REPORT"
 echo "Open the app: Settings → System runtime, tap ⟳ to re-run the checks, then Report under Tools."

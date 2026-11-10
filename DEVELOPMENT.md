@@ -93,6 +93,28 @@ log path, time and failed steps. System checks shows a failed run with a **Log**
 Setups wait up to two minutes for an apt lock held by a terminal, repair an interrupted dpkg
 run first, and stop with a mirror hint when the package index can't be downloaded.
 
+A setup records `exit -1` with its pid as soon as it holds the lock, so a run killed outright reads
+as interrupted, never as passed. It records 129 when its terminal is closed, 130 for Ctrl-C and
+143 when stopped. Steps run with stdin from `/dev/null`, so a prompt fails at once instead of
+waiting unseen. Long steps run under `with_timeout`: `timeout --foreground -k`, so Ctrl-C still
+reaches them. Anything started in the background must close the lock fd (`9>&-`), as
+`run_logged` and `check` do, or it keeps holding the setup lock after its setup is gone.
+
+Processes are always stopped as a tree (`runtime/ProcessTree.kt`): descendants are collected
+from `/proc` *before* anything is killed, then sent SIGHUP and SIGTERM, then SIGKILL. This applies
+to terminal End/Close/Restart, `CommandRunner` timeouts and cancelled commands. Never call
+`TerminalSession.finishIfRunning()`: for a session whose process never started, its pid is 0, and
+`kill(0, SIGKILL)` kills the app's own process group. The app process ignores SIGHUP, and ignored
+signals survive exec, so `termux.c` resets every signal to its default in the terminal child.
+Processes started by `CommandRunner` still inherit SIGHUP ignored; the tree stop relies on
+SIGTERM/SIGKILL for them. The terminal child exits 127 when the program is missing and 126 when
+it can't run or its working folder is gone, instead of continuing in `/`.
+
+A base-system install marks itself incomplete for its whole duration, which blocks new terminals,
+chats and setups. It extracts into staging and only then swaps the result in, so a failed
+download or extract leaves the old system untouched. It runs in an app-wide job, so leaving the
+screen doesn't cancel it.
+
 `CommandRunner` never throws: a program that's missing or can't run comes back as exit
 127 or 126 with `launchError` set, and `CommandResult.describe()` turns any failure into one
 message for the user. Code that parses git output gets `GitStatus.error` or a failed `Result`,

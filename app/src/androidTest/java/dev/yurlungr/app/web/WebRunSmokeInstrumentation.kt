@@ -26,8 +26,9 @@ class WebRunSmokeInstrumentation : Instrumentation() {
         var resultCode = RESULT_OK
         try {
             if (scriptsOnly) {
-                dev.yurlungr.app.runtime.RuntimeScriptSmokeChecks.run(this)
-                output.putString("stream", "PASS: installed script encoding, syntax, failures, logs, retries and setup lock\n")
+                val skipped = dev.yurlungr.app.runtime.RuntimeScriptSmokeChecks.run(this)
+                output.putString("stream", "PASS: installed script encoding, syntax, failures, logs, retries, setup lock and status\n" +
+                    (if (skipped.isEmpty()) "" else "$skipped\n"))
                 output.putString("result", "PASS")
                 finish(RESULT_OK, output)
                 return

@@ -6,7 +6,8 @@ import java.util.UUID
 import kotlinx.coroutines.runBlocking
 
 internal object RuntimeScriptSmokeChecks {
-    fun run(instrumentation: Instrumentation) {
+    /** Returns notes about skipped cases (empty when everything ran). */
+    fun run(instrumentation: Instrumentation): String {
         val context = instrumentation.targetContext
         val paths = RuntimePaths(context)
         check(paths.isBootstrapInstalled) { "Install the Linux runtime before the script smoke check" }
@@ -31,6 +32,7 @@ internal object RuntimeScriptSmokeChecks {
                     File(paths.libexec, "setup-common.sh").path, fixture.path), timeoutMs = 30_000)
             }
             check(result.ok) { "Setup smoke (exit ${result.exitCode}): ${result.output}" }
+            return result.output.lines().filter { it.startsWith("SKIP:") }.joinToString("\n")
         } finally {
             fixture.deleteRecursively()
         }

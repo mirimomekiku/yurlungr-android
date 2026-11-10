@@ -39,7 +39,9 @@ if [ -x "$SDKMANAGER" ]; then
 else
   mkdir -p "$SDK/cmdline-tools"
   tmp="$PREFIX/tmp/cmdline-tools.zip"
-  if run_logged curl -fL --retry 3 -o "$tmp" "$CMDLINE_TOOLS_URL" \
+  step "  downloading the command-line tools (~150 MB)…"
+  # No progress meter (it redraws with \r, which shows nothing here); give up on a stalled download.
+  if run_logged curl -fsSL --retry 3 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -o "$tmp" "$CMDLINE_TOOLS_URL" \
     && rm -rf "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest" \
     && run_logged unzip -q -o "$tmp" -d "$SDK/cmdline-tools" \
     && mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"; then
@@ -52,11 +54,12 @@ fi
 
 step "SDK platform $PLATFORM and build-tools $BUILD_TOOLS"
 if [ -x "$SDKMANAGER" ]; then
-  yes 2>/dev/null | timeout 600 "$SDKMANAGER" --sdk_root="$SDK" --licenses >>"$LOG" 2>&1
+  # 9>&-: a stray sdkmanager must not keep holding the setup lock after this run ends.
+  yes 2>/dev/null | with_timeout 600 "$SDKMANAGER" --sdk_root="$SDK" --licenses 9>&- >>"$LOG" 2>&1
   license_status=${PIPESTATUS[1]}
   if [ "$license_status" -ne 0 ]; then bad "SDK license acceptance (exit $license_status)"; fi
   # A stalled download would otherwise hang the setup forever (exit 124 = timed out).
-  run_logged timeout 1800 "$SDKMANAGER" --sdk_root="$SDK" "platforms;$PLATFORM" "build-tools;$BUILD_TOOLS" \
+  run_logged with_timeout 1800 "$SDKMANAGER" --sdk_root="$SDK" "platforms;$PLATFORM" "build-tools;$BUILD_TOOLS" \
     && ok "installed" || bad "sdkmanager (exit $?; 124 = timed out)"
 else
   bad "sdkmanager missing; command-line tools did not install"
@@ -78,16 +81,21 @@ step "Gradle settings (~/.gradle/gradle.properties)"
 mkdir -p "$HOME/.gradle" || exit 73
 PROPS="$HOME/.gradle/gradle.properties"
 touch "$PROPS" || exit 73
-set_prop() { # key value
-  if grep -q "^$1=" "$PROPS"; then
-    sed -i "s|^$1=.*|$1=$2|" "$PROPS"
+set_prop() { # key value (keys are plain names with dots: escape them for the patterns)
+  local key=${1//./\\.}
+  if grep -q "^$key=" "$PROPS"; then
+    sed -i "s|^$key=.*|$1=$2|" "$PROPS"
   else
     printf '%s=%s\n' "$1" "$2" >> "$PROPS"
   fi
 }
-set_prop android.aapt2FromMavenOverride "$PREFIX/bin/aapt2" || bad "Gradle aapt2 setting"
-grep -q '^org.gradle.jvmargs=' "$PROPS" || set_prop org.gradle.jvmargs "-Xmx2g -Dfile.encoding=UTF-8"
-ok "aapt2 override → $PREFIX/bin/aapt2"
+if set_prop android.aapt2FromMavenOverride "$PREFIX/bin/aapt2" \
+  && grep -q "^android\.aapt2FromMavenOverride=$PREFIX/bin/aapt2\$" "$PROPS"; then
+  ok "aapt2 override → $PREFIX/bin/aapt2"
+else
+  bad "Gradle aapt2 setting"
+fi
+grep -q '^org\.gradle\.jvmargs=' "$PROPS" || set_prop org.gradle.jvmargs "-Xmx2g -Dfile.encoding=UTF-8" || bad "Gradle memory setting"
 
 step "Versions"
 hash -r
@@ -160,15 +168,17 @@ EOF
   if [ ! -x gradlew ]; then
     # Generate the wrapper in an empty build: running Termux's Gradle 9 inside the project
     # would apply AGP 8, which fails there.
-    tmp=$(mktemp -d)
+    # Never fall back to the project folder: Gradle 9 there is exactly what this avoids.
+    tmp=$(mktemp -d "$PREFIX/tmp/gradle-wrapper.XXXXXX") || { bad "temporary folder for the Gradle wrapper"; setup_finish ""; }
     touch "$tmp/settings.gradle"
-    (cd "$tmp" && run_logged gradle wrapper --gradle-version "$WRAPPER_GRADLE" --distribution-type bin) \
+    (cd "$tmp" && run_logged with_timeout 900 gradle wrapper --gradle-version "$WRAPPER_GRADLE" --distribution-type bin) \
       && cp -r "$tmp/gradlew" "$tmp/gradle" "$APP/" && ok "Gradle $WRAPPER_GRADLE wrapper" || bad "gradle wrapper"
     rm -rf "$tmp"
   fi
-  if run_logged ./gradlew --no-daemon assembleDebug; then
+  # The first build downloads Gradle and AGP: generous, but not unbounded.
+  if run_logged with_timeout 3600 ./gradlew --no-daemon assembleDebug; then
     ok "built app/build/outputs/apk/debug/app-debug.apk"
-    yurlungr-install app/build/outputs/apk/debug/app-debug.apk
+    yurlungr-install app/build/outputs/apk/debug/app-debug.apk || bad "install prompt for the test app"
   else
     bad "test build (see $LOG)"
   fi

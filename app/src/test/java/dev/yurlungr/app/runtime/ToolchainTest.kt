@@ -45,7 +45,7 @@ class ToolchainTest {
     @Test fun `the probe script runs every tool with a timeout`() {
         val script = Toolchain.probeScript(Toolchain.tools)
         for (t in Toolchain.tools) assertTrue("${t.id} probed", script.contains("'${t.id}'"))
-        assertTrue(script.contains("timeout ${Toolchain.PROBE_TIMEOUT_S} bash -o pipefail -c"))
+        assertTrue(script.contains("timeout -k 5 ${Toolchain.PROBE_TIMEOUT_S} bash -o pipefail -c"))
         assertTrue(script.trimEnd().endsWith("rm -rf \"\$d\""))
     }
 

@@ -31,11 +31,18 @@ if apt_prepare; then
 fi
 
 step "Agent CLIs and ACP adapters (npm)"
+# Bounded: a stalled registry download would otherwise hang the setup with no output.
 for p in @google/gemini-cli @agentclientprotocol/codex-acp @agentclientprotocol/claude-agent-acp; do
-  run_logged npm install -g --loglevel=http "$p@latest" && ok "$p" || bad "$p"
+  run_logged with_timeout 1800 npm install -g --loglevel=http "$p@latest" && ok "$p" || bad "$p"
 done
+# $PREFIX/bin/claude is our wrapper (below), not npm's link: npm refuses to replace a bin link
+# that points outside its package (EEXIST), which would fail every rerun. Let npm put its own
+# link back; the wrapper replaces it again after patching.
+if [ -L "$PREFIX/bin/claude" ] && [ "$(readlink "$PREFIX/bin/claude")" = "$LIB/claude" ]; then
+  rm -f "$PREFIX/bin/claude"
+fi
 # Claude Code's Android build isn't published; force the linux-arm64 glibc package.
-run_logged npm install -g --loglevel=http --os=linux --cpu=arm64 --libc=glibc @anthropic-ai/claude-code@latest \
+run_logged with_timeout 1800 npm install -g --loglevel=http --os=linux --cpu=arm64 --libc=glibc @anthropic-ai/claude-code@latest \
   && ok "@anthropic-ai/claude-code" || bad "@anthropic-ai/claude-code"
 
 step "Antigravity CLI (agy)"
@@ -47,8 +54,10 @@ elif [ "$(uname -m)" != "aarch64" ]; then
   bad "agy: only published for 64-bit ARM Android"
 else
   installer=$(mktemp "$PREFIX/tmp/agy-install.XXXXXX") || exit 73
-  if run_logged curl -fL --retry 3 --connect-timeout 20 -o "$installer" https://antigravity.google/cli/install.sh \
-    && bash -n "$installer" && run_logged bash "$installer" --dir "$PREFIX/bin" \
+  # -sS: no progress meter (it only redraws with \r, which shows nothing here); the speed limit
+  # gives up on a stalled download instead of waiting forever.
+  if run_logged curl -fsSL --retry 3 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -o "$installer" https://antigravity.google/cli/install.sh \
+    && bash -n "$installer" && run_logged with_timeout 1800 bash "$installer" --dir "$PREFIX/bin" \
     && [ -x "$PREFIX/bin/agy" ]; then ok "installed"; else bad "agy"; fi
   rm -f "$installer"
 fi
@@ -66,7 +75,8 @@ fi
 # Only expose `claude` once there's a patched binary behind it; a wrapper to nothing would
 # make Claude look installed while every chat fails to start.
 if [ -x "$LIB/claude-glibc" ]; then
-  cat > "$LIB/claude" <<WRAP
+  # Written to a temp file and renamed: a full disk must not leave a truncated wrapper in place.
+  cat > "$LIB/claude.new" <<WRAP
 #!$PREFIX/bin/sh
 # Claude Code ships a glibc build. Run it via Termux's glibc loader without the bionic
 # termux-exec preload; exec through /system/bin/env so no preload hook intercepts it.
@@ -75,7 +85,8 @@ unset LD_PRELOAD
 export DISABLE_AUTOUPDATER=1
 exec /system/bin/env "$LIB/claude-glibc" "\$@"
 WRAP
-  chmod 700 "$LIB/claude" && ln -sf "$LIB/claude" "$PREFIX/bin/claude" || bad "claude wrapper"
+  [ $? -eq 0 ] && chmod 700 "$LIB/claude.new" && mv -f "$LIB/claude.new" "$LIB/claude" \
+    && ln -sf "$LIB/claude" "$PREFIX/bin/claude" || { rm -f "$LIB/claude.new"; bad "claude wrapper"; }
 fi
 
 step "Versions"
