@@ -35,11 +35,16 @@ object Attachments {
     fun toPromptBlocks(cwd: File, attachments: List<Attachment>, caps: PromptCaps): List<JsonObject> {
         if (attachments.isEmpty()) return emptyList()
         val dir = File(cwd, ".yurlungr/attachments").apply { mkdirs() }
+        // A cloned repo could ship .yurlungr (or attachments/) as a symlink to somewhere else.
+        if (dir.canonicalFile != File(cwd.canonicalFile, ".yurlungr/attachments")) {
+            throw java.io.IOException("${dir.path} is a link to another folder; not saving attachments there")
+        }
         // Keep attachments out of the user's repo without touching their .gitignore.
         File(cwd, ".yurlungr/.gitignore").takeIf { !it.exists() }?.writeText("*\n")
         val stamp = System.currentTimeMillis()
-        return attachments.map { a ->
-            val file = File(dir, "$stamp-${safeName(a.name)}")
+        return attachments.mapIndexed { i, a ->
+            // The index keeps two files with the same name in one message apart.
+            val file = File(dir, "$stamp-$i-${safeName(a.name)}")
             file.writeBytes(a.bytes)
             val uri = "file://${file.path}"
             when {

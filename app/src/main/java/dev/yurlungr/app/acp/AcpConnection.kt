@@ -4,6 +4,7 @@ import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -77,13 +78,16 @@ class AcpConnection(
             val code = runCatching { process.waitFor() }.getOrDefault(-1)
             incoming.trySend(Incoming.Exited(code))
         }
+        // One consumer for all stderr lines; a chatty agent drops its oldest lines instead of
+        // flooding the main thread with a coroutine per line.
+        val stderrLines = Channel<String>(capacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST)
         thread(isDaemon = true, name = "acp-stderr") {
             runCatching {
-                process.errorStream.bufferedReader().forEachLine { line ->
-                    scope.launch { handler.onStderr(line) }
-                }
+                process.errorStream.bufferedReader().forEachLine { line -> stderrLines.trySend(line) }
             }
+            stderrLines.close()
         }
+        scope.launch { for (line in stderrLines) handler.onStderr(line) }
         scope.launch {
             for (msg in incoming) {
                 when (msg) {

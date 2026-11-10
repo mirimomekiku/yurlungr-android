@@ -154,6 +154,8 @@ class ChatSession(
     /** Called with the finished turn's summary / what needs approval (for notifications). */
     var onTurnFinished: ((ChatSession, String) -> Unit)? = null
     var onNeedsAttention: ((ChatSession, String) -> Unit)? = null
+    /** No permission prompt is waiting any more (clears the "needs you" notification). */
+    var onAttentionResolved: ((ChatSession) -> Unit)? = null
 
     /** An agent process is (or should be) running for this chat. */
     val isActive: Boolean get() = connection?.exited == false
@@ -254,11 +256,13 @@ class ChatSession(
 
     /** Open permission prompts can no longer be answered: mark them cancelled. */
     private fun resolvePendingPermissions() {
-        items.filterIsInstance<ChatItem.Permission>().filter { it.resolved == null }.forEach {
+        val open = items.filterIsInstance<ChatItem.Permission>().filter { it.resolved == null }
+        open.forEach {
             it.resolved = "Cancelled"
             it.decision.complete(null)
             updated(it)
         }
+        if (open.isNotEmpty()) onAttentionResolved?.invoke(this)
     }
 
     private suspend fun applySkipPermissions(conn: AcpConnection) {
@@ -372,12 +376,14 @@ class ChatSession(
         updatedAt = updatedAt,
         items = items.toList(),
         skipPermissions = skipPermissions,
+        pendingText = pendingPrompt?.first,
     )
 
     // ---- user actions ------------------------------------------------------------------
 
     /** First message of a new chat: shown now, sent as soon as the agent is ready (even after sign-in). */
-    private var pendingPrompt: Pair<String, List<Attachment>>? = null
+    // Restored without attachments: those lived only in memory.
+    private var pendingPrompt: Pair<String, List<Attachment>>? = restored?.pendingText?.let { it to emptyList() }
 
     fun queue(text: String, attachments: List<Attachment>) {
         if (text.isBlank() && attachments.isEmpty()) return
@@ -527,6 +533,7 @@ class ChatSession(
         item.decision.complete(option.optionId)
         updated(item)
         changed()
+        if (items.none { it is ChatItem.Permission && it.resolved == null }) onAttentionResolved?.invoke(this)
     }
 
     /** Answers a permission prompt identified by its item key (from a remote device). */
@@ -699,6 +706,10 @@ class ChatSession(
         val line = params["line"]?.jsonPrimitive?.intOrNull
         val limit = params["limit"]?.jsonPrimitive?.intOrNull
         val text = if (line == null && limit == null) {
+            // A multi-GB file would take the app down; agents can page with line/limit instead.
+            if (file.length() > MAX_READ_BYTES) {
+                throw AcpException(-32603, "File too large to read whole (${file.length() / (1024 * 1024)} MB); pass line and limit")
+            }
             file.readText()
         } else {
             file.useLines { lines ->
@@ -737,6 +748,7 @@ class ChatSession(
 
     companion object {
         private const val TAG = "ChatSession"
+        private const val MAX_READ_BYTES = 16L * 1024 * 1024
         private val URL_REGEX = Regex("""https://\S+""")
         private val LOGIN_HINT = Regex("(?i)auth|login|log in|sign in|oauth")
     }

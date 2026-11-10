@@ -29,6 +29,8 @@ data class SavedChat(
     val updatedAt: Long,
     val items: List<ChatItem>,
     val skipPermissions: Boolean = false,
+    /** A first message shown but not yet delivered (the agent wasn't ready); sent on resume. */
+    val pendingText: String? = null,
 )
 
 /**
@@ -74,6 +76,7 @@ object ChatStore {
         put("cwd", chat.cwd)
         put("title", chat.title)
         put("skipPermissions", chat.skipPermissions)
+        chat.pendingText?.let { put("pending", it) }
         chat.acpSessionId?.let { put("acpSessionId", it) }
         put("updatedAt", chat.updatedAt)
         putJsonArray("items") { chat.items.forEach { add(encodeItem(it)) } }
@@ -151,6 +154,7 @@ object ChatStore {
         cwd = obj.str("cwd") ?: error("missing cwd"),
         title = obj.str("title") ?: "Chat",
         skipPermissions = (obj["skipPermissions"] as? JsonPrimitive)?.booleanOrNull ?: false,
+        pendingText = obj.str("pending"),
         acpSessionId = obj.str("acpSessionId"),
         updatedAt = (obj["updatedAt"] as? JsonPrimitive)?.longOrNull ?: 0L,
         items = (obj["items"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonObject)?.let(::decodeItem) },

@@ -96,6 +96,18 @@ class AcpExtrasTest {
     }
 
     @Test
+    fun `attachments with the same name don't overwrite each other`() {
+        val cwd = tmp.newFolder("same")
+        Attachments.toPromptBlocks(
+            cwd,
+            listOf(Attachment("a.png", "image/png", byteArrayOf(1)), Attachment("a.png", "image/png", byteArrayOf(2))),
+            PromptCaps(),
+        )
+        val saved = java.io.File(cwd, ".yurlungr/attachments").listFiles()!!.map { it.readBytes().single() }.sorted()
+        assertEquals(listOf<Byte>(1, 2), saved)
+    }
+
+    @Test
     fun `without embedded context support, text files are links too`() {
         val cwd = tmp.newFolder("p2")
         val blocks = Attachments.toPromptBlocks(cwd, listOf(Attachment("a.kt", "text/plain", "x".toByteArray())), PromptCaps())

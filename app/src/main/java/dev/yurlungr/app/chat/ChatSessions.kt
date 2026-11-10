@@ -85,9 +85,23 @@ object ChatSessions {
             }
         }
         onActiveChanged = { RuntimeService.refresh(appContext) }
-        onTurnFinished = { c, summary -> notify(c, "${c.agent.displayName} finished", summary.ifBlank { "Turn complete" }) }
-        onNeedsAttention = { c, what -> notify(c, "${c.agent.displayName} needs you", what) }
+        onTurnFinished = { c, summary ->
+            awaitingApproval -= c.id // replaced by this notification (same id)
+            notify(c, "${c.agent.displayName} finished", summary.ifBlank { "Turn complete" })
+        }
+        onNeedsAttention = { c, what ->
+            awaitingApproval += c.id
+            notify(c, "${c.agent.displayName} needs you", what)
+        }
+        onAttentionResolved = { c ->
+            if (awaitingApproval.remove(c.id)) {
+                runCatching { NotificationManagerCompat.from(appContext).cancel(c.id.hashCode()) }
+            }
+        }
     }
+
+    /** Chats whose current notification asks for an approval (cleared once it's answered). */
+    private val awaitingApproval = mutableSetOf<String>()
 
     @SuppressLint("MissingPermission") // targetSdk 28: notification permission isn't a runtime grant
     private fun notify(chat: ChatSession, title: String, text: String) {
