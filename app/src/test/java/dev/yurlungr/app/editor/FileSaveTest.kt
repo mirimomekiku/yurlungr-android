@@ -50,6 +50,20 @@ class FileSaveTest {
         assertNotEquals(before, DiskStamp.of(file))
     }
 
+    @Test fun `strict UTF-8 decoding rejects Latin-1 instead of replacing it`() {
+        assertEquals("café ✓", FileSave.decodeUtf8("café ✓".toByteArray(Charsets.UTF_8)))
+        assertEquals(null, FileSave.decodeUtf8("café".toByteArray(Charsets.ISO_8859_1)))
+        assertEquals("﻿bom", FileSave.decodeUtf8(byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte(), 'b'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte())))
+    }
+
+    @Test fun `line endings use the majority and flag mixed files`() {
+        assertEquals(LineEndings(crlf = false, mixed = false), LineEndings.detect("a\nb\n"))
+        assertEquals(LineEndings(crlf = true, mixed = false), LineEndings.detect("a\r\nb\r\n"))
+        assertEquals(LineEndings(crlf = false, mixed = true), LineEndings.detect("a\r\nb\nc\n"))
+        assertEquals(LineEndings(crlf = true, mixed = true), LineEndings.detect("a\r\nb\r\nc\n"))
+        assertEquals(LineEndings(crlf = false, mixed = false), LineEndings.detect("no newline"))
+    }
+
     @Test fun `stamp of a missing file`() {
         val stamp = DiskStamp.of(File(tmp.root, "missing"))
         assertFalse(stamp.exists)

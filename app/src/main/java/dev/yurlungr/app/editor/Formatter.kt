@@ -27,8 +27,9 @@ object Formatter {
             return@withContext Result.Failed("Node.js isn't installed. Install the agents (they bring Node), or run: pkg install nodejs-lts")
         }
         val tmp = File(paths.home, ".cache/yurlungr-format").apply { mkdirs() }
-        val input = File(tmp, "in")
-        val output = File(tmp, "out")
+        // Per call: two overlapping formats (e.g. one still downloading Prettier) must not swap files.
+        val input = File.createTempFile("in-", ".txt", tmp)
+        val output = File(tmp, input.name.replace("in-", "out-"))
         input.writeText(text)
         output.delete()
         val script = "npx --yes $PRETTIER --stdin-filepath ${shellQuote(file.path)} " +

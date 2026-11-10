@@ -15,7 +15,33 @@ data class DiskStamp(val exists: Boolean, val length: Long, val modified: Long) 
     }
 }
 
+/** How a file ends its lines. [mixed]: both styles occur; saving uses the majority ([crlf]). */
+data class LineEndings(val crlf: Boolean, val mixed: Boolean) {
+    companion object {
+        fun detect(text: String): LineEndings {
+            var crlf = 0
+            var lf = 0
+            for (i in text.indices) {
+                if (text[i] == '\n') if (i > 0 && text[i - 1] == '\r') crlf++ else lf++
+            }
+            return LineEndings(crlf = crlf > lf, mixed = crlf > 0 && lf > 0)
+        }
+    }
+}
+
 object FileSave {
+    /**
+     * Strict UTF-8: null if [bytes] aren't valid UTF-8 (e.g. Latin-1), instead of replacing the
+     * bad bytes with U+FFFD, which a save would then write back for good.
+     */
+    fun decodeUtf8(bytes: ByteArray): String? = runCatching {
+        Charsets.UTF_8.newDecoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+            .decode(java.nio.ByteBuffer.wrap(bytes))
+            .toString()
+    }.getOrNull()
+
     /**
      * Writes [text] to [file] without ever leaving it empty or half-written: the bytes go to a
      * temporary file in the same folder, are synced, then renamed over the target. Symlinks are

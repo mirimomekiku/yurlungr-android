@@ -107,7 +107,13 @@ private const val MAX_HIGHLIGHT_CHARS = 300_000
 
 private sealed interface Load {
     data object Loading : Load
-    data class Ready(val text: String, val crlf: Boolean, val stamp: DiskStamp = DiskStamp(false, 0, 0)) : Load
+    /** [mixedEol]: the file had both CRLF and LF; saving will use [crlf] (the majority) throughout. */
+    data class Ready(
+        val text: String,
+        val crlf: Boolean,
+        val stamp: DiskStamp = DiskStamp(false, 0, 0),
+        val mixedEol: Boolean = false,
+    ) : Load
     data class Unavailable(val reason: String) : Load
 }
 
@@ -119,9 +125,14 @@ private fun readForEdit(file: File): Load = when {
     Git.isBinary(file) -> Load.Unavailable("Binary file (${humanSize(file.length())})")
     else -> {
         val stamp = DiskStamp.of(file)
-        val raw = file.readText()
-        val crlf = raw.contains("\r\n")
-        Load.Ready(if (crlf) raw.replace("\r\n", "\n") else raw, crlf, stamp)
+        val raw = FileSave.decodeUtf8(file.readBytes())
+        if (raw == null) {
+            // Editing would replace every non-UTF-8 byte (e.g. Latin-1 "é") with U+FFFD on save.
+            Load.Unavailable("Not UTF-8 text (${humanSize(file.length())}); open it in the terminal to keep its encoding")
+        } else {
+            val eol = LineEndings.detect(raw)
+            Load.Ready(raw.replace("\r\n", "\n"), eol.crlf, stamp, eol.mixed)
+        }
     }
 }
 
@@ -193,6 +204,13 @@ private fun Editor(file: File, initial: Load.Ready, lang: Language, paths: Runti
     var value by remember { mutableStateOf(TextFieldValue(initial.text)) }
     var saved by remember { mutableStateOf(initial.text) }
     var crlf by remember { mutableStateOf(initial.crlf) }
+    // Both CRLF and LF on disk: a save normalizes to [crlf]; say so rather than surprise with a big diff.
+    var mixedEol by remember { mutableStateOf(initial.mixedEol) }
+    LaunchedEffect(Unit) {
+        if (initial.mixedEol) {
+            Toast.makeText(context, "Mixed line endings: saving converts them all to ${if (initial.crlf) "CRLF" else "LF"}", Toast.LENGTH_LONG).show()
+        }
+    }
     // What the file looked like when we last read or wrote it.
     var diskStamp by remember { mutableStateOf(initial.stamp) }
     // Save found the file changed on disk; holds what to do after a successful save.
@@ -250,6 +268,7 @@ private fun Editor(file: File, initial: Load.Ready, lang: Language, paths: Runti
             SaveOutcome.Saved -> {
                 saved = text
                 diskStamp = written
+                mixedEol = false
                 history.breakGroup()
                 Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
                 then()
@@ -267,6 +286,7 @@ private fun Editor(file: File, initial: Load.Ready, lang: Language, paths: Runti
                 set(TextFieldValue(fresh.text, TextRange(value.selection.start.coerceAtMost(fresh.text.length))))
                 saved = fresh.text
                 crlf = fresh.crlf
+                mixedEol = fresh.mixedEol
                 diskStamp = fresh.stamp
                 history.breakGroup()
                 Toast.makeText(context, "Reloaded ${file.name}", Toast.LENGTH_SHORT).show()
@@ -523,7 +543,7 @@ private fun Editor(file: File, initial: Load.Ready, lang: Language, paths: Runti
             lines = lineStarts.size,
             lang = lang.name,
             indent = if (indentUnit == "\t") "Tabs" else "Spaces: ${indentUnit.length}",
-            eol = if (crlf) "CRLF" else "LF",
+            eol = (if (crlf) "CRLF" else "LF").let { if (mixedEol) "Mixed→$it" else it },
             readOnly = readOnly,
             highlightOff = value.text.length > MAX_HIGHLIGHT_CHARS,
         )
