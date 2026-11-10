@@ -142,11 +142,16 @@ fun ProjectScreen(
     var showWebRun by remember(dir.path) { mutableStateOf(false) }
     var showBranches by remember { mutableStateOf(false) }
     var showGitActions by remember { mutableStateOf(false) }
+    /** Tech stacks found in the project (for dependency installation); null while detecting. */
+    var stacks by remember(dir.path) { mutableStateOf<List<DetectedStack>?>(null) }
+    var showSetup by remember { mutableStateOf(false) }
+    var setupBannerDismissed by remember(dir.path) { mutableStateOf(SetupBannerPrefs.dismissed(context, dir)) }
     /** A git command running in the terminal sheet: its title and arguments. */
     var gitTerminal by remember { mutableStateOf<Pair<String, List<String>>?>(null) }
 
     LaunchedEffect(dir, refreshTick, reload) {
         launch { status = git.status(dir) }
+        launch { stacks = withContext(Dispatchers.IO) { runCatching { StackDetector.detect(dir) }.getOrDefault(emptyList()) } }
         launch { capabilities = withContext(Dispatchers.IO) {
             runCatching { dev.yurlungr.app.web.ProjectDetector.detect(dir) }.getOrElse {
                 dev.yurlungr.app.web.ProjectCapabilities(File(dir,"gradlew").isFile,emptyList())
@@ -203,6 +208,16 @@ fun ProjectScreen(
                 }
             }
         }
+        // Right after cloning (or creating) a project: offer to install what it needs.
+        val missing = stacks.orEmpty().filter { it.canInstall && it.installed == false }
+        if (missing.isNotEmpty() && !setupBannerDismissed) {
+            SetupBanner(
+                missing,
+                onInstall = { runInTerminal(installCommand(dir, missing), "Install dependencies · ${dir.name}") },
+                onDetails = { showSetup = true },
+                onDismiss = { setupBannerDismissed = true; SetupBannerPrefs.dismiss(context, dir) },
+            )
+        }
         status?.error?.let { e ->
             GitErrorCard(
                 e,
@@ -256,7 +271,15 @@ fun ProjectScreen(
         }
         ActionBar(dir, isAndroid, onNewChat, runInTerminal, onOpenTerminal,
             hasWeb = capabilities?.web?.isNotEmpty() == true, onRunWeb = { showWebRun = true },
-            hasGit = status?.isRepo == true, onGitActions = { showGitActions = true })
+            hasGit = status?.isRepo == true, onGitActions = { showGitActions = true },
+            hasStacks = stacks.orEmpty().isNotEmpty(), onSetup = { showSetup = true })
+    }
+
+    if (showSetup) {
+        ProjectSetupSheet(dir, stacks.orEmpty(), onDismiss = { showSetup = false }) { command, name ->
+            showSetup = false
+            runInTerminal(command, name)
+        }
     }
 
     gitTerminal?.let { (title, args) ->
@@ -429,7 +452,8 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
 /** Chat (pick an agent) · Build & install (Android projects) · Terminal. */
 @Composable
 private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit, runInTerminal: (String, String) -> Unit,
-    onOpenTerminal: () -> Unit, hasWeb: Boolean, onRunWeb: () -> Unit, hasGit: Boolean, onGitActions: () -> Unit) {
+    onOpenTerminal: () -> Unit, hasWeb: Boolean, onRunWeb: () -> Unit, hasGit: Boolean, onGitActions: () -> Unit,
+    hasStacks: Boolean, onSetup: () -> Unit) {
     val context = LocalContext.current
     val installed by androidx.compose.runtime.produceState(emptyList<Agent>()) {
         value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -466,6 +490,10 @@ private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit,
         }
         if (hasWeb) {
             ActionTile("Run", Ph.Globe, Modifier.weight(1f), tile = AppColors.tiles.lime, onClick = onRunWeb)
+        }
+        if (hasStacks) {
+            // Detected tech stacks: install their dependencies (npm, Gradle, pub, pip…).
+            ActionTile("Setup", Ph.Wrench, Modifier.weight(1f), tile = AppColors.tiles.lime, onClick = onSetup)
         }
         if (hasGit) {
             // Next to Terminal: one-tap routines (get latest, sync, push…) and AI-assisted ones.

@@ -168,6 +168,15 @@ Then, on the phone:
   must use `127.0.0.1` and the supplied `$PORT`; project-specific native dependencies can still fail on
   Android and their errors remain in Logs. Static serving blocks dotfiles and paths outside the app folder.
 - **Terminal** from a project offers the terminals already open there, or a new one.
+- **Setup** detects the project's tech stacks from their manifest files, in the root and common app
+  folders (`app/`, `frontend/`, `apps/*`…), and installs their dependencies in a terminal with a log
+  (`~/project-setup.log`). Each stack card shows the Termux packages and commands it will run:
+  - Node.js with npm, yarn or pnpm (Expo, React Native, Vite, Next.js… are named); workspaces install once at the root;
+  - Android/Kotlin and Jetpack Compose (Gradle wrapper: downloads Gradle, plugins and dependencies without building);
+  - Dart (`dart pub get`), Python (a project `.venv`), Rust, Go, Ruby, PHP, Java (Maven) and Swift.
+  Flutter is detected but can't be installed: its SDK isn't available for Android's Linux environment.
+  Notes explain what else won't work on the phone (Expo native builds, Bun, native add-ons).
+  Right after cloning, a banner offers **Install** when dependencies are missing; **Not now** hides it for that project.
 - **Git** (next to Terminal) opens one-tap routines:
   - **Get latest changes:** saves your uncommitted work, pulls (merging if the branches diverged), then puts your work back (stash → pull → stash pop).
   - **Sync:** the same, then pushes.
