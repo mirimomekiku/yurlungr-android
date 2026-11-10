@@ -28,6 +28,7 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -280,20 +281,37 @@ private fun ChatItemView(chat: ChatModel, item: ChatItem) {
 
 @Composable
 private fun UserBubble(item: ChatItem.User) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    var menu by remember { mutableStateOf(false) }
+    fun copy() {
+        val cm = context.getSystemService(android.content.ClipboardManager::class.java)
+        cm?.setPrimaryClip(android.content.ClipData.newPlainText("Message", item.text))
+        android.widget.Toast.makeText(context, "Copied", android.widget.Toast.LENGTH_SHORT).show()
+    }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-        Column(
-            Modifier
-                .widthIn(max = 320.dp)
-                .clip(RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp))
-                .background(MaterialTheme.colorScheme.primaryContainer)
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-        ) {
-            if (item.text.isNotBlank()) {
-                SelectionContainer {
+        Box {
+            // Long-press copies the whole message (a text selection inside a bubble was swallowed by the list).
+            Column(
+                Modifier
+                    .widthIn(max = 320.dp)
+                    .clip(RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer)
+                    .combinedClickable(
+                        enabled = item.text.isNotBlank(),
+                        onClick = {},
+                        onLongClick = { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); menu = true },
+                    )
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+            ) {
+                if (item.text.isNotBlank()) {
                     Text(item.text, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onPrimaryContainer)
                 }
+                if (item.attachments.isNotEmpty()) AttachmentLabels(item.attachments)
             }
-            if (item.attachments.isNotEmpty()) AttachmentLabels(item.attachments)
+            androidx.compose.material3.DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                androidx.compose.material3.DropdownMenuItem(text = { Text("Copy") }, onClick = { menu = false; copy() })
+            }
         }
     }
 }
