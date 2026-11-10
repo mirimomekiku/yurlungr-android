@@ -11,6 +11,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -86,7 +87,13 @@ class AcpConnection(
         scope.launch {
             for (msg in incoming) {
                 when (msg) {
-                    is Incoming.Message -> dispatch(msg.json)
+                    // A malformed message (or a handler bug) must not end the read loop or crash the app.
+                    is Incoming.Message -> try {
+                        dispatch(msg.json)
+                    } catch (e: Exception) {
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        Log.w(TAG, "Ignoring ACP message that couldn't be handled", e)
+                    }
                     is Incoming.Exited -> {
                         exited = true
                         val error = AcpException(AcpException.PROCESS_EXITED, "Agent process exited (code ${msg.code})")
@@ -101,18 +108,19 @@ class AcpConnection(
     }
 
     private fun dispatch(msg: JsonObject) {
-        val method = msg["method"]?.jsonPrimitive?.contentOrNull
-        val id = msg["id"]
+        val method = (msg["method"] as? JsonPrimitive)?.contentOrNull
+        // JSON-RPC ids are strings or numbers; anything else (or null) can't be answered.
+        val id = (msg["id"] as? JsonPrimitive)?.takeIf { it !is JsonNull }
         val params = (msg["params"] as? JsonObject) ?: JsonObject(emptyMap())
         when {
             method == null && id != null -> {
-                val deferred = id.jsonPrimitive.longOrNull?.let { pending.remove(it) } ?: return
+                val deferred = id.longOrNull?.let { pending.remove(it) } ?: return
                 val error = msg["error"] as? JsonObject
                 if (error != null) {
                     deferred.completeExceptionally(
                         AcpException(
-                            error["code"]?.jsonPrimitive?.intOrNull ?: AcpException.INTERNAL,
-                            error["message"]?.jsonPrimitive?.contentOrNull ?: "Unknown error",
+                            (error["code"] as? JsonPrimitive)?.intOrNull ?: AcpException.INTERNAL,
+                            (error["message"] as? JsonPrimitive)?.contentOrNull ?: "Unknown error",
                             error["data"],
                         ),
                     )
@@ -138,7 +146,13 @@ class AcpConnection(
                         })
                     }
                 }
-                send(response)
+                // The agent may have exited (or been stopped) while we waited, e.g. on a
+                // permission prompt answered later: there's nobody left to answer.
+                try {
+                    send(response)
+                } catch (e: AcpException) {
+                    Log.d(TAG, "Dropped response to $method: ${e.message}")
+                }
             }
             method != null -> handler.onNotification(method, params)
         }

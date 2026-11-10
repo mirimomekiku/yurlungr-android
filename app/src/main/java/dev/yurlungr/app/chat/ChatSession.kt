@@ -11,9 +11,12 @@ import dev.yurlungr.app.acp.AcpException
 import dev.yurlungr.app.agents.Agent
 import dev.yurlungr.app.runtime.RuntimeEnv
 import dev.yurlungr.app.runtime.RuntimePaths
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -33,6 +36,7 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * One conversation with one agent on this phone: owns the agent process and turns ACP
@@ -52,7 +56,11 @@ class ChatSession(
     private val clientVersion = runCatching {
         appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName
     }.getOrNull() ?: "unknown"
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    // The handler is a backstop: an unexpected exception in agent traffic is logged, not fatal.
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Main.immediate +
+            CoroutineExceptionHandler { _, e -> Log.e(TAG, "Unhandled error in chat", e) },
+    )
 
     val listeners = mutableSetOf<ChatListener>()
 
@@ -156,11 +164,25 @@ class ChatSession(
     private var sessionId: String? = null
     private val toolCalls = HashMap<String, ChatItem.ToolCall>()
 
+    /**
+     * Bumped whenever the agent process is torn down on purpose (stop, restart, delete), so
+     * failures from the old process can't overwrite the state of what replaced it.
+     */
+    private var generation = 0
+    private var startJob: Job? = null
+    private var promptJob: Job? = null
+
     // ---- lifecycle ---------------------------------------------------------------------
 
     fun start() {
+        val gen = ++generation
         state = ChatState.Starting
-        scope.launch {
+        toolCalls.clear()
+        stderrTail.clear()
+        startJob = scope.launch {
+            // Set as soon as the process exists, so a cancel before the connection owns it can't leak it.
+            val spawned = AtomicReference<Process?>(null)
+            var conn: AcpConnection? = null
             try {
                 cwd.mkdirs()
                 val process = withContext(Dispatchers.IO) {
@@ -174,8 +196,9 @@ class ChatSession(
                             }
                         }
                         .start()
+                        .also { spawned.set(it) }
                 }
-                val conn = AcpConnection(process, scope, this@ChatSession)
+                conn = AcpConnection(process, scope, this@ChatSession)
                 connection = conn
                 onActiveChanged?.invoke(this@ChatSession)
                 val init = conn.request("initialize", buildJsonObject {
@@ -204,12 +227,37 @@ class ChatSession(
                 state = ChatState.Ready
                 changed()
                 flushPending()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: AcpException) {
+                if (gen != generation) return@launch
                 state = if (e.code == AcpException.AUTH_REQUIRED) ChatState.AuthRequired else ChatState.Failed(failureText(e))
             } catch (e: Exception) {
+                if (gen != generation) return@launch
                 Log.e(TAG, "start failed", e)
                 state = ChatState.Failed(failureText(e))
+            } finally {
+                // Cancelled (stop/delete) between spawning and handing the process to a connection.
+                if (conn == null) spawned.get()?.destroy()
             }
+        }
+    }
+
+    /** Ends the running start/prompt work and makes any late failures from it stale. */
+    private fun abandonWork() {
+        generation++
+        startJob?.cancel()
+        startJob = null
+        promptJob?.cancel()
+        promptJob = null
+    }
+
+    /** Open permission prompts can no longer be answered: mark them cancelled. */
+    private fun resolvePendingPermissions() {
+        items.filterIsInstance<ChatItem.Permission>().filter { it.resolved == null }.forEach {
+            it.resolved = "Cancelled"
+            it.decision.complete(null)
+            updated(it)
         }
     }
 
@@ -276,6 +324,8 @@ class ChatSession(
 
     /** Tears down the agent and starts again (e.g. after signing in). Keeps the saved session id. */
     override fun restart() {
+        abandonWork()
+        resolvePendingPermissions()
         connection?.close()
         connection = null
         sessionId = null
@@ -286,6 +336,8 @@ class ChatSession(
     /** Ends the agent process but keeps the chat (it can be resumed later). */
     fun stop() {
         cancel()
+        abandonWork()
+        resolvePendingPermissions() // also when there was no session to cancel yet
         connection?.close()
         connection = null
         sessionId = null
@@ -301,6 +353,8 @@ class ChatSession(
     /** Ends the process for good (chat deleted). */
     fun close() {
         cancel()
+        abandonWork()
+        resolvePendingPermissions()
         connection?.close()
         connection = null
         scope.cancel()
@@ -359,9 +413,10 @@ class ChatSession(
     private fun prompt(text: String, attachments: List<Attachment>) {
         val conn = connection ?: return
         val sid = sessionId ?: return
+        val gen = generation
         state = ChatState.Running
         changed()
-        scope.launch {
+        promptJob = scope.launch {
             try {
                 val blocks = withContext(Dispatchers.IO) { Attachments.toPromptBlocks(cwd, attachments, caps) }
                 val result = conn.request("session/prompt", buildJsonObject {
@@ -374,7 +429,8 @@ class ChatSession(
                         })
                         blocks.forEach { add(it) }
                     })
-                }).jsonObject
+                }) as? JsonObject ?: JsonObject(emptyMap())
+                if (gen != generation) return@launch
                 when (val reason = result.string("stopReason")) {
                     "end_turn", null -> Unit
                     "cancelled" -> add(ChatItem.Notice("Stopped"))
@@ -382,7 +438,11 @@ class ChatSession(
                 }
                 state = ChatState.Ready
                 onTurnFinished?.invoke(this@ChatSession, lastAgentText())
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: AcpException) {
+                // Ended or restarted on purpose: the old process's failure isn't this chat's state.
+                if (gen != generation) return@launch
                 state = when {
                     // The sign-in card explains this; no need for an error notice (or the agent's debug log).
                     e.code == AcpException.AUTH_REQUIRED -> ChatState.AuthRequired
@@ -394,6 +454,12 @@ class ChatSession(
                 }
                 // Not delivered: resend automatically once the user has signed in and the agent restarts.
                 if (state == ChatState.AuthRequired) pendingPrompt = text to attachments
+            } catch (e: Exception) {
+                // E.g. attachments couldn't be written (disk full, read-only folder).
+                if (gen != generation) return@launch
+                Log.e(TAG, "prompt failed", e)
+                add(ChatItem.Notice("Couldn't send: ${e.message ?: e.toString()}", isError = true))
+                state = ChatState.Ready
             }
             changed()
         }
@@ -403,11 +469,7 @@ class ChatSession(
         val conn = connection ?: return
         val sid = sessionId ?: return
         // Pending permission prompts are answered "cancelled" as the protocol requires.
-        items.filterIsInstance<ChatItem.Permission>().filter { it.resolved == null }.forEach {
-            it.resolved = "Cancelled"
-            it.decision.complete(null)
-            updated(it)
-        }
+        resolvePendingPermissions()
         scope.launch {
             runCatching { conn.notify("session/cancel", buildJsonObject { put("sessionId", sid) }) }
         }
@@ -515,6 +577,7 @@ class ChatSession(
     override fun onExit(code: Int) {
         // Only react if the *current* connection died (not one replaced by restart()).
         if (connection?.exited != true) return
+        resolvePendingPermissions()
         if (state != ChatState.AuthRequired) state = ChatState.Failed("Agent exited (code $code)${stderrSuffix()}")
         onActiveChanged?.invoke(this)
     }
@@ -567,7 +630,7 @@ class ChatSession(
             item.locations = arr.mapNotNull { loc ->
                 val obj = loc as? JsonObject ?: return@mapNotNull null
                 val path = obj.string("path") ?: return@mapNotNull null
-                obj["line"]?.jsonPrimitive?.intOrNull?.let { "$path:$it" } ?: path
+                (obj["line"] as? JsonPrimitive)?.intOrNull?.let { "$path:$it" } ?: path
             }
         }
         if (existing == null) add(item) else updated(item)
