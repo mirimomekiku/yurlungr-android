@@ -78,7 +78,7 @@ import androidx.compose.ui.unit.sp
 /** Check ids by area, in display order. Unknown ids land in "Other". */
 private val AREAS = listOf(
     "Phone" to listOf("device", "storage"),
-    "Linux runtime" to listOf("identity", "exec", "bootstrap", "shell", "apt", "termux-exec", "runtime-scripts", "checks"),
+    "Linux runtime" to listOf("identity", "exec", "bootstrap", "shell", "apt", "termux-exec", "runtime-scripts", "runtime-notes", "checks"),
     "Developer tools" to listOf("tools", "tool-git", "tool-gh", "tool-node", "tool-npm", "tool-rg", "setup-dev-tools-setup"),
     "Tools" to listOf(
         "agents", "tool-gemini", "tool-codex", "tool-codex-acp", "tool-claude", "tool-claude-agent-acp", "tool-agy", "setup-agents-setup",
@@ -110,7 +110,7 @@ fun SetupScreen(
     onDevices: () -> Unit,
 ) {
     val context = LocalContext.current
-    val openFile = dev.yurlungr.app.ui.LocalOpenFile.current
+    var logPath by remember { mutableStateOf<String?>(null) }
     var showPhantomHelp by remember { mutableStateOf(false) }
     var confirmReinstall by remember { mutableStateOf(false) }
     // Opening the screen runs the full checks, tools included (resumes elsewhere only run the quick ones).
@@ -145,7 +145,7 @@ fun SetupScreen(
             .systemBarsPadding(),
     ) {
         ScreenHeader(if (firstRun && !vm.bootstrapInstalled) "Set up" else "System checks", onHome) {
-            IconButton(onClick = { vm.refresh(deep = true) }, enabled = !vm.checking && !installing) {
+            IconButton(onClick = { vm.refresh(deep = true, force = true) }, enabled = !vm.checking && !installing) {
                 if (vm.checking) WaveDots(dotSize = 4.dp) else PhIcon(Ph.ArrowClockwise, "Run checks again", size = 20.dp)
             }
         }
@@ -201,8 +201,8 @@ fun SetupScreen(
                                         check.id == "cli-report" && vm.report.isNotEmpty() -> {
                                             { TextButton(onClick = { showReport = !showReport }) { Text(if (showReport) "Hide" else "Report") } }
                                         }
-                                        check.log != null && openFile != null -> {
-                                            { TextButton(onClick = { openFile(java.io.File(check.log)) }) { Text("Log") } }
+                                        check.log != null -> {
+                                            { TextButton(onClick = { logPath = check.log }) { Text("Log") } }
                                         }
                                         else -> null
                                     },
@@ -237,6 +237,8 @@ fun SetupScreen(
         }
     }
 
+    logPath?.let { path -> LogDialog(path, onDismiss = { logPath = null }) }
+
     if (confirmReinstall) {
         AlertDialog(
             onDismissRequest = { confirmReinstall = false },
@@ -262,6 +264,30 @@ fun SetupScreen(
             },
         )
     }
+}
+
+/** The end of a setup log, read-only (logs are often too big for the editor, and shouldn't be edited). */
+@Composable
+private fun LogDialog(path: String, onDismiss: () -> Unit) {
+    val file = java.io.File(path)
+    val text by androidx.compose.runtime.produceState<String?>(null, path) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { dev.yurlungr.app.runtime.SetupStatus.readLogTail(file) }.getOrElse { "Couldn't read the log: ${it.message}" }
+        }
+    }
+    val scroll = androidx.compose.foundation.rememberScrollState()
+    // Open at the end: the failure is at the bottom.
+    LaunchedEffect(text) { scroll.scrollTo(scroll.maxValue) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(file.name) },
+        text = {
+            Box(Modifier.heightIn(max = 460.dp).verticalScroll(scroll)) {
+                Text(text ?: "Loading…", fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
 }
 
 /** First run, before the Linux environment exists. */

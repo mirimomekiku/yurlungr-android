@@ -64,6 +64,9 @@ object DoctorChecks {
                 add(apt(paths))
                 add(termuxExec(paths))
                 RuntimeAssets.lastError?.let { add(runtimeScripts(it)) }
+                RuntimeAssets.lastWarning?.let {
+                    add(Check("runtime-notes", "App notes in your home folder", CheckStatus.Warn, "Couldn't update: $it. Agents still work.", required = false))
+                }
                 add(agents(paths))
                 add(androidSdk(paths))
                 addAll(setupRuns(paths))
@@ -143,6 +146,13 @@ object DoctorChecks {
     private fun bootstrap(paths: RuntimePaths): Check =
         if (paths.isBootstrapInstalled) {
             Check("bootstrap", "Base system", CheckStatus.Pass, "Installed at ${paths.prefix}")
+        } else if (paths.hasBaseSystem && !dev.yurlungr.app.setup.BootstrapJob.isRunning) {
+            // Files are there but the install never finished: it must be redone, not used.
+            Check(
+                "bootstrap", "Base system", CheckStatus.Fail,
+                "The last install didn't finish, so the base system may be incomplete. Reinstall it (your home folder is kept).",
+                fix = Fix.ReinstallBootstrap,
+            )
         } else {
             Check(
                 "bootstrap", "Base system", CheckStatus.Fail,
@@ -200,9 +210,10 @@ object DoctorChecks {
     suspend fun tools(paths: RuntimePaths): List<Check> {
         if (!paths.isBootstrapInstalled) return emptyList()
         val wanted = Toolchain.tools.filter { t -> t.onlyIf == null || File(paths.prefix, t.onlyIf).exists() }
-        val r = CommandRunner.shell(paths, Toolchain.probeScript(wanted), timeoutMs = (Toolchain.PROBE_TIMEOUT_S + 20) * 1000L)
+        val r = CommandRunner.shell(paths, Toolchain.probeScript(wanted), timeoutMs = Toolchain.probeBudgetMs(wanted.size))
         if (!r.ok && r.output.isBlank()) {
-            return listOf(Check("tools", "Tools", CheckStatus.Fail, "Couldn't check the tools: " + r.describe("probe"), fix = Fix.ReinstallBootstrap))
+            // Not by itself a sign of a broken base system (the shell check says if it is): no reinstall offered.
+            return listOf(Check("tools", "Tools", CheckStatus.Warn, "Couldn't check the tools: " + r.describe("probe") + ". Tap refresh to retry.", required = false))
         }
         return Toolchain.parseProbe(r.output, wanted).map(::toolCheck)
     }
@@ -243,9 +254,12 @@ object DoctorChecks {
         val name = setup.script?.removeSuffix(".sh") ?: return@mapNotNull null
         val status = SetupStatus.read(File(paths.setupStatusDir, "$name.status")) ?: return@mapNotNull null
         if (status.exitCode == 0) return@mapNotNull null
+        val running = status.unfinished && SetupStatus.isAlive(status.pid)
         Check(
-            "setup-$name", "Last ${setup.title.lowercase()} setup", CheckStatus.Warn,
-            SetupStatus.summary(status), fix = fixFor(setup), required = false, log = status.log,
+            "setup-$name", "Last ${setup.title.lowercase()} setup",
+            if (running) CheckStatus.Info else CheckStatus.Warn,
+            SetupStatus.summary(status, running),
+            fix = if (running) null else fixFor(setup), required = false, log = status.log,
         )
     }
 
@@ -297,7 +311,11 @@ object DoctorChecks {
     }
 
     private fun agents(paths: RuntimePaths): Check {
-        val statuses = agentStatuses(paths)
+        // Claude Code (glibc build) and Antigravity only exist for 64-bit ARM: don't expect them elsewhere.
+        val arm64 = RuntimePaths.termuxArch() == "aarch64"
+        val statuses = agentStatuses(paths).filter {
+            arm64 || it.agent !in setOf(dev.yurlungr.app.agents.Agent.Claude, dev.yurlungr.app.agents.Agent.Antigravity)
+        }
         val missing = statuses.filter { !it.installed }.map { it.agent.displayName }
         return if (missing.isEmpty()) {
             val signedOut = statuses.filter { it.signedIn == false }.map { it.agent.displayName }

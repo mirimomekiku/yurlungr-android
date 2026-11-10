@@ -186,6 +186,8 @@ class ChatSession(
             val spawned = AtomicReference<Process?>(null)
             var conn: AcpConnection? = null
             try {
+                // Also during a reinstall, which is about to replace everything the agent would run from.
+                check(paths.isBootstrapInstalled) { "The Linux environment isn't installed (or is being reinstalled). Open System checks." }
                 val hasHistory = items.isNotEmpty() || acpSessionId != null
                 if (!cwd.isDirectory) {
                     // An existing chat whose project was deleted or moved: recreating an empty folder

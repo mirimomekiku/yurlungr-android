@@ -58,6 +58,8 @@ import dev.yurlungr.app.ui.AppTheme
 import dev.yurlungr.app.ui.LocalOpenDrawer
 import dev.yurlungr.app.ui.LocalTopLevel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import androidx.lifecycle.lifecycleScope
 import java.io.File
 
 sealed interface Route {
@@ -357,17 +359,21 @@ class MainActivity : ComponentActivity() {
         runInTerminal(context, nav, dev.yurlungr.app.runtime.setupScriptCommand("dev-tools-setup.sh"), "Developer tools")
 
     private fun runInTerminal(context: Context, nav: Navigator, command: String, name: String) {
-        runCatching {
-            val paths = RuntimePaths(context)
-            check(paths.isBootstrapInstalled) { "Install the Linux environment in System checks first." }
-            // Also repairs scripts left by an older APK; wait for the launch-time refresh if needed.
-            dev.yurlungr.app.runtime.RuntimeAssets.install(context, paths)
-            TerminalSessions.create(context, command = command, name = name)
-        }.onSuccess {
-            nav.push(Route.Terminal)
-        }.onFailure {
-            android.util.Log.e("MainActivity", "Cannot start $name", it)
-            android.widget.Toast.makeText(context, "Couldn't start $name: ${it.message}", android.widget.Toast.LENGTH_LONG).show()
+        lifecycleScope.launch {
+            runCatching {
+                val paths = RuntimePaths(context)
+                check(paths.isBootstrapInstalled) { "Install the Linux environment in System checks first." }
+                // Also repairs scripts left by an older APK. Off the main thread: it's synchronized
+                // with the launch-time refresh and may have to wait for it.
+                withContext(kotlinx.coroutines.Dispatchers.IO) { dev.yurlungr.app.runtime.RuntimeAssets.install(context, paths) }
+                TerminalSessions.create(context, command = command, name = name)
+            }.onSuccess {
+                nav.push(Route.Terminal)
+            }.onFailure {
+                if (it is kotlinx.coroutines.CancellationException) throw it
+                android.util.Log.e("MainActivity", "Cannot start $name", it)
+                android.widget.Toast.makeText(context, "Couldn't start $name: ${it.message}", android.widget.Toast.LENGTH_LONG).show()
+            }
         }
     }
 
