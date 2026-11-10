@@ -87,6 +87,14 @@ and reordering). Unpaired connections get 10 s and 4 KB messages; frames are cap
 per-item updates and text deltas from `ChatListener` events. The client (`RemoteClient.kt`) mirrors chats
 as `ChatModel`s and reconnects with backoff unless the host disconnected it.
 
+## Optional toolchains
+
+`ToolSetup` entries marked `optional` (Python, Build tools, Utilities, Editors, Go, Rust, Ruby) are separate packs.
+Each has its own script (`assets/<pack>-setup.sh`, generic: it reads `YURLUNGR_PACKAGES_<PACK>`, the space need and
+`YURLUNGR_CHECKS_<PACK>` from the generated `toolchain.sh`), its own Install button in System checks (one "(optional)" group
+each; a missing tool is Info, not a warning) and its own `Fix`. To add a pack: a `ToolSetup` entry, its `Tool` probes, a
+`Fix` entry, and a copy of a pack script. The managed agent notes list the packs that are installed, refreshed on app launch.
+
 ## Navigation
 
 `MainActivity.kt` defines the `Route`s and a small `Navigator`: sidebar places replace the stack (☰
@@ -111,5 +119,5 @@ Transitions come from `ui/Motion.kt`.
 | `ui/` | Theme, shared components, motion, loaders, icons, sidebar |
 | `MainActivity.kt` | Routes and navigation |
 
-`app/src/main/assets/` holds the runtime scripts (`agents-setup.sh`, `android-sdk-setup.sh`,
+`app/src/main/assets/` holds the runtime scripts (`agents-setup.sh`, `android-sdk-setup.sh`, the `*-setup.sh` optional packs,
 `spike-test.sh`, `motd.sh`, `web-runner.cjs`) and the bundled licences.

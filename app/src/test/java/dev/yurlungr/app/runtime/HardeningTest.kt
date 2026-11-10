@@ -66,6 +66,32 @@ class HardeningTest {
         assertFalse(BootstrapInstaller.isContainedRelativePath(""))
     }
 
+    @Test fun `every optional pack has its own script, packages, tools and fix`() {
+        val packs = ToolSetup.entries.filter { it.optional }
+        assertEquals(7, packs.size)
+        assertEquals(packs.size, packs.mapNotNull { it.script }.toSet().size)
+        assertEquals(Toolchain.tools.map { it.id }.toSet().size, Toolchain.tools.size)
+        val manifest = Toolchain.shellManifest()
+        for (p in packs) {
+            assertTrue("${p.name} packages", p.packages.isNotEmpty())
+            assertTrue("${p.name} tools", Toolchain.tools.any { it.setup == p })
+            assertTrue(manifest.contains("YURLUNGR_PACKAGES_${p.name.uppercase()}=("))
+            assertTrue(manifest.contains("YURLUNGR_CHECKS_${p.name.uppercase()}=("))
+            assertEquals(p, Fix.entries.first { it.setup == p }.setup)
+            assertTrue(setupScriptCommand(p.script!!).contains(p.script!!))
+        }
+    }
+
+    @Test fun `a missing optional tool is info with an Install fix, not a warning`() {
+        val py = Toolchain.tools.first { it.id == "python" }
+        DoctorChecks.toolCheck(ToolState(py, 127, "")).let {
+            assertEquals(CheckStatus.Info, it.status)
+            assertEquals(Fix.InstallPython, it.fix)
+            assertFalse(it.required)
+        }
+        assertEquals(CheckStatus.Pass, DoctorChecks.toolCheck(ToolState(py, 0, "Python 3.12.0")).status)
+    }
+
     @Test fun `tool states map to checks with the right fix`() {
         val git = Toolchain.tools.first { it.id == "git" }
         val claude = Toolchain.tools.first { it.id == "claude" }

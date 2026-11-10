@@ -22,7 +22,9 @@ import java.util.Locale
 enum class CheckStatus { Pass, Warn, Fail, Info }
 
 /** Fixes the UI knows how to offer; kept as data so checks stay free of UI/Activity code. */
-enum class Fix {
+enum class Fix(val setup: ToolSetup? = null) {
+    InstallPython(ToolSetup.Python), InstallBuildTools(ToolSetup.BuildTools), InstallUtils(ToolSetup.Utils),
+    InstallEditors(ToolSetup.Editors), InstallGo(ToolSetup.Go), InstallRust(ToolSetup.Rust), InstallRuby(ToolSetup.Ruby),
     InstallBootstrap, Notifications, BatteryOptimization, PhantomProcesses, OpenTerminal, InstallAgents, InstallAndroidSdk,
     /** Git, gh, Node.js, termux-exec… (dev-tools-setup.sh). */
     InstallDevTools,
@@ -224,6 +226,9 @@ object DoctorChecks {
         val id = "tool-${t.id}"
         return when {
             state.ok -> Check(id, t.name, CheckStatus.Pass, state.firstLine, required = t.essential)
+            state.missing && t.setup.optional -> Check(
+                id, t.name, CheckStatus.Info, "Not installed. Tap Install for ${t.setup.title}.", fix = fix, required = false,
+            )
             state.missing && t.onlyIf == null -> Check(
                 id, t.name, if (t.essential) CheckStatus.Fail else CheckStatus.Warn,
                 "Not installed. ${t.setup.title} setup installs it.", fix = fix, required = t.essential,
@@ -247,6 +252,7 @@ object DoctorChecks {
         ToolSetup.DevTools -> Fix.InstallDevTools
         ToolSetup.Agents -> Fix.InstallAgents
         ToolSetup.AndroidSdk -> Fix.InstallAndroidSdk
+        else -> Fix.entries.first { it.setup == setup }
     }
 
     /** The last run of each setup script that failed, from the status file the script writes on exit. */

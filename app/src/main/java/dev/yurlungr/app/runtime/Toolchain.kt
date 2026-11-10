@@ -1,10 +1,30 @@
 package dev.yurlungr.app.runtime
 
 /** Which setup provides a tool, i.e. what to run when it's missing or broken. */
-enum class ToolSetup(val script: String?, val title: String) {
+enum class ToolSetup(
+    val script: String?,
+    val title: String,
+    /** Optional packs: always listed in System checks with their own Install button; missing is just info. */
+    val optional: Boolean = false,
+    /** Termux packages the pack installs (exported to the script as `YURLUNGR_PACKAGES_<NAME>`). */
+    val packages: List<String> = emptyList(),
+    /** Disk space the script requires, in MB. */
+    val spaceMb: Int = 0,
+    /** File under the prefix that exists once installed; used for the agent notes. */
+    val marker: String? = null,
+    /** One line for the agent notes. */
+    val blurb: String = "",
+) {
     DevTools("dev-tools-setup.sh", "Developer tools"),
     Agents("agents-setup.sh", "Agents"),
     AndroidSdk("android-sdk-setup.sh", "Android SDK"),
+    Python("python-setup.sh", "Python", true, listOf("python", "python-pip"), 400, "bin/python", "Python 3 with pip"),
+    BuildTools("build-tools-setup.sh", "Build tools", true, listOf("clang", "make", "cmake", "pkg-config", "binutils"), 900, "bin/clang", "clang, make, cmake, pkg-config"),
+    Utils("utils-setup.sh", "Utilities", true, listOf("jq", "openssh", "zip", "unzip", "wget", "tar", "rsync"), 150, "bin/jq", "jq, ssh, zip, wget, rsync"),
+    Editors("editors-setup.sh", "Editors", true, listOf("nano", "vim"), 150, "bin/vim", "nano, vim"),
+    Go("go-setup.sh", "Go", true, listOf("golang"), 700, "bin/go", "Go"),
+    Rust("rust-setup.sh", "Rust", true, listOf("rust"), 1500, "bin/cargo", "Rust (rustc, cargo)"),
+    Ruby("ruby-setup.sh", "Ruby", true, listOf("ruby"), 400, "bin/ruby", "Ruby with gem"),
 }
 
 /**
@@ -65,6 +85,24 @@ object Toolchain {
         Tool("copilot", "Copilot", "copilot --version", ToolSetup.Agents, onlyIf = "bin/copilot"),
         Tool("goose", "Goose", "goose --version", ToolSetup.Agents, onlyIf = "libexec/yurlungr/bin/goose"),
         Tool("opencode", "OpenCode", "opencode --version", ToolSetup.Agents, onlyIf = "bin/opencode"),
+        Tool("python", "Python", "python --version", ToolSetup.Python),
+        Tool("pip", "pip", "pip --version", ToolSetup.Python),
+        Tool("clang", "Clang", "clang --version", ToolSetup.BuildTools),
+        Tool("make", "make", "make --version", ToolSetup.BuildTools),
+        Tool("cmake", "CMake", "cmake --version", ToolSetup.BuildTools),
+        Tool("pkg-config", "pkg-config", "pkg-config --version", ToolSetup.BuildTools),
+        Tool("jq", "jq", "jq --version", ToolSetup.Utils),
+        Tool("ssh", "OpenSSH", "ssh -V", ToolSetup.Utils),
+        Tool("zip", "zip", "zip --version | sed -n 2p", ToolSetup.Utils),
+        Tool("wget", "wget", "wget --version | sed -n 1p", ToolSetup.Utils),
+        Tool("rsync", "rsync", "rsync --version | sed -n 1p", ToolSetup.Utils),
+        Tool("nano", "nano", "nano --version | sed -n 1p", ToolSetup.Editors),
+        Tool("vim", "Vim", "vim --version | sed -n 1p", ToolSetup.Editors),
+        Tool("go", "Go", "go version", ToolSetup.Go),
+        Tool("rustc", "Rust", "rustc --version", ToolSetup.Rust),
+        Tool("cargo", "Cargo", "cargo --version", ToolSetup.Rust),
+        Tool("ruby", "Ruby", "ruby --version", ToolSetup.Ruby),
+        Tool("gem", "RubyGems", "gem --version", ToolSetup.Ruby),
         Tool("java", "Java (JDK)", "java -version 2>&1 | sed -n 1p", ToolSetup.AndroidSdk, onlyIf = "bin/java"),
         Tool("aapt2", "aapt2", "aapt2 version", ToolSetup.AndroidSdk, onlyIf = "bin/aapt2"),
     )
@@ -122,6 +160,10 @@ object Toolchain {
         appendLine("YURLUNGR_SDK_PACKAGES=(${SDK_PACKAGES.joinToString(" ")})")
         // Optional agents (installed one by one from the app); the agents setup updates those present.
         appendLine("YURLUNGR_OPTIONAL_AGENT_PACKAGES=(${dev.yurlungr.app.agents.Agent.entries.mapNotNull { it.npmPackage }.joinToString(" ")})")
+        for (setup in ToolSetup.entries.filter { it.optional }) {
+            appendLine("YURLUNGR_PACKAGES_${setup.name.uppercase()}=(${setup.packages.joinToString(" ")})")
+            appendLine("YURLUNGR_SPACE_MB_${setup.name.uppercase()}=${setup.spaceMb}")
+        }
         appendLine("YURLUNGR_SDK_PLATFORM=$SDK_PLATFORM")
         appendLine("YURLUNGR_SDK_BUILD_TOOLS=$SDK_BUILD_TOOLS")
         // "name<TAB>command" per tool and setup, for the scripts' final version checks.

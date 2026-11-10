@@ -11,7 +11,8 @@ import java.io.File
 object RuntimeAssets {
     private val EXEC = "700".toInt(8)
 
-    private fun scripts(paths: RuntimePaths) = mapOf(
+    private fun scripts(paths: RuntimePaths) = ToolSetup.entries.filter { it.optional }.mapNotNull { it.script }
+        .associateWith { File(paths.libexec, it) } + mapOf(
         "setup-common.sh" to File(paths.libexec, "setup-common.sh"),
         "spike-test.sh" to File(paths.home, "spike-test.sh"),
         "agents-setup.sh" to File(paths.libexec, "agents-setup.sh"),
@@ -89,7 +90,7 @@ object RuntimeAssets {
 
         // Global instruction files each CLI reads at startup. Best effort: they're the user's files.
         for (file in listOf(".claude/CLAUDE.md", ".codex/AGENTS.md", ".gemini/GEMINI.md")) {
-            runCatching { upsertManagedBlock(File(paths.home, file), agentGuide()) }
+            runCatching { upsertManagedBlock(File(paths.home, file), agentGuide(paths)) }
                 .onFailure { warnings += "~/$file (${it.message})" }
         }
         lastWarning = warnings.takeIf { it.isNotEmpty() }?.joinToString("; ")
@@ -146,7 +147,14 @@ object RuntimeAssets {
     private const val BEGIN = "<!-- yurlungr:begin (managed by the Yurlungr app; edits inside are overwritten) -->"
     private const val END = "<!-- yurlungr:end -->"
 
-    private fun agentGuide() = """
+    /** The optional packs already installed, so agents know what's on the phone without probing. */
+    private fun installedPacks(paths: RuntimePaths): String {
+        val have = ToolSetup.entries.filter { it.optional && it.marker != null && File(paths.prefix, it.marker).exists() }
+        return if (have.isEmpty()) "none yet (the user can add Python, build tools, Go, Rust and more in System checks)"
+        else have.joinToString("; ") { it.blurb }
+    }
+
+    private fun agentGuide(paths: RuntimePaths) = """
         |$BEGIN
         |## Environment: Android phone (Yurlungr)
         |- You run in a Termux-compatible Linux userland on the user's Android phone (aarch64, Bionic libc).
@@ -162,6 +170,7 @@ object RuntimeAssets {
         |- Open a URL in the phone's browser with `xdg-open <url>`.
         |- GitHub: use `git` and `gh`. The user signs in from the app's Projects screen (gh auth + git credential
         |  helper), so pushes work once they have. Don't ask for tokens or passwords.
+        |- Optional toolchains installed from System checks: ${installedPacks(paths)}. Anything else: `pkg install <name>`.
         |- The user reads your replies on a phone screen: keep them short.
         |$END
         |""".trimMargin()

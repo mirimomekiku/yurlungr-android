@@ -2,6 +2,8 @@
 
 package dev.yurlungr.app.setup
 
+import dev.yurlungr.app.runtime.ToolSetup
+import dev.yurlungr.app.runtime.Toolchain
 import dev.yurlungr.app.ui.FlowBar
 import dev.yurlungr.app.ui.SmoothProgressBar
 import dev.yurlungr.app.ui.WaveDots
@@ -90,6 +92,10 @@ private val AREAS = listOf(
         "tool-qwen", "tool-kimi", "tool-auggie", "tool-commandcode", "tool-copilot", "tool-goose", "tool-opencode",
         "android-sdk", "tool-java", "tool-aapt2", "setup-android-sdk-setup", "cli-report",
     ),
+    // One group per optional pack, each with its own Install button.
+    *ToolSetup.entries.filter { it.optional }.map { pack ->
+        "${pack.title} (optional)" to Toolchain.tools.filter { it.setup == pack }.map { "tool-${it.id}" } + "setup-${pack.script!!.removeSuffix(".sh")}"
+    }.toTypedArray(),
     "Background" to listOf("notifications", "battery", "phantom"),
 )
 
@@ -112,6 +118,7 @@ fun SetupScreen(
     onInstallAgents: () -> Unit,
     onInstallAndroidSdk: () -> Unit,
     onInstallDevTools: () -> Unit,
+    onInstallSetup: (ToolSetup) -> Unit,
     onHome: () -> Unit,
     onDevices: () -> Unit,
 ) {
@@ -134,6 +141,8 @@ fun SetupScreen(
         Fix.InstallAgents -> onInstallAgents()
         Fix.InstallAndroidSdk -> onInstallAndroidSdk()
         Fix.InstallDevTools -> onInstallDevTools()
+        Fix.InstallPython, Fix.InstallBuildTools, Fix.InstallUtils, Fix.InstallEditors,
+        Fix.InstallGo, Fix.InstallRust, Fix.InstallRuby -> onInstallSetup(requireNotNull(fix.setup))
         Fix.ReinstallBootstrap -> confirmReinstall = true
         Fix.RepairRuntime -> vm.repairRuntime()
     }
@@ -390,6 +399,8 @@ private fun shortFixLabel(fix: Fix) = when (fix) {
     Fix.InstallAgents -> "Install"
     Fix.InstallAndroidSdk -> "Set up"
     Fix.InstallDevTools -> "Install"
+    Fix.InstallPython, Fix.InstallBuildTools, Fix.InstallUtils, Fix.InstallEditors,
+    Fix.InstallGo, Fix.InstallRust, Fix.InstallRuby -> "Install"
     Fix.ReinstallBootstrap -> "Reinstall"
     Fix.RepairRuntime -> "Repair"
 }
