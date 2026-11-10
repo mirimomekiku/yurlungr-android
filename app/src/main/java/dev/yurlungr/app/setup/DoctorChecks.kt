@@ -9,8 +9,14 @@ import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
 import dev.yurlungr.app.agents.agentStatuses
 import dev.yurlungr.app.runtime.CommandRunner
+import dev.yurlungr.app.runtime.RuntimeAssets
 import dev.yurlungr.app.runtime.RuntimeEnv
 import dev.yurlungr.app.runtime.RuntimePaths
+import dev.yurlungr.app.runtime.SetupStatus
+import dev.yurlungr.app.runtime.ToolSetup
+import dev.yurlungr.app.runtime.ToolState
+import dev.yurlungr.app.runtime.Toolchain
+import java.io.File
 import java.util.Locale
 
 enum class CheckStatus { Pass, Warn, Fail, Info }
@@ -18,6 +24,12 @@ enum class CheckStatus { Pass, Warn, Fail, Info }
 /** Fixes the UI knows how to offer; kept as data so checks stay free of UI/Activity code. */
 enum class Fix {
     InstallBootstrap, Notifications, BatteryOptimization, PhantomProcesses, OpenTerminal, InstallAgents, InstallAndroidSdk,
+    /** Git, gh, Node.js, termux-exec… (dev-tools-setup.sh). */
+    InstallDevTools,
+    /** Wipe and reinstall the base system (the shell or package manager is broken). Home is kept. */
+    ReinstallBootstrap,
+    /** Rewrite the app's scripts and shims in the runtime. */
+    RepairRuntime,
 }
 
 data class Check(
@@ -27,6 +39,8 @@ data class Check(
     val detail: String,
     val fix: Fix? = null,
     val required: Boolean = true,
+    /** A log file worth opening next to this check (e.g. the last failed setup run). */
+    val log: String? = null,
 )
 
 data class ReportLine(val status: String, val name: String, val detail: String)
@@ -49,8 +63,10 @@ object DoctorChecks {
                 add(shell(paths))
                 add(apt(paths))
                 add(termuxExec(paths))
+                RuntimeAssets.lastError?.let { add(runtimeScripts(it)) }
                 add(agents(paths))
                 add(androidSdk(paths))
+                addAll(setupRuns(paths))
             }
             add(notifications(context))
             add(battery(context))
@@ -139,7 +155,8 @@ object DoctorChecks {
         val r = CommandRunner.shell(paths, "echo \"\$(uname -m) · bash \$BASH_VERSION\"", timeoutMs = 15_000)
         return Check(
             "shell", "Shell runs", if (r.ok) CheckStatus.Pass else CheckStatus.Fail,
-            if (r.ok) r.firstLine else "exit ${r.exitCode}: ${r.output.takeLast(300)}",
+            if (r.ok) r.firstLine else r.describe("bash") + "\n" + REINSTALL_NOTE,
+            fix = if (r.ok) null else Fix.ReinstallBootstrap,
         )
     }
 
@@ -147,21 +164,89 @@ object DoctorChecks {
         val r = CommandRunner.shell(paths, "apt --version", timeoutMs = 15_000)
         return Check(
             "apt", "Package manager", if (r.ok) CheckStatus.Pass else CheckStatus.Fail,
-            if (r.ok) r.firstLine else "exit ${r.exitCode}: ${r.output.takeLast(300)}",
+            if (r.ok) r.firstLine else r.describe("apt") + "\n" + REINSTALL_NOTE,
+            fix = if (r.ok) null else Fix.ReinstallBootstrap,
         )
     }
+
+    private const val REINSTALL_NOTE =
+        "Reinstalling the base system keeps your home folder and projects; installed packages and agents need setting up again."
 
     private fun termuxExec(paths: RuntimePaths): Check {
         val lib = RuntimeEnv.termuxExecLib(paths)
         return if (lib != null) {
             Check("termux-exec", "Shebang fixups (termux-exec)", CheckStatus.Pass, lib.name)
         } else {
+            // Every npm CLI (the agents' ACP adapters included) starts with #!/usr/bin/env node.
             Check(
-                "termux-exec", "Shebang fixups (termux-exec)", CheckStatus.Warn,
-                "Not found — scripts using #!/usr/bin/env may fail. Run: pkg install termux-exec",
-                required = false,
+                "termux-exec", "Shebang fixups (termux-exec)", CheckStatus.Fail,
+                "Missing: agents and other scripts starting with #!/usr/bin/env won't start. Installs with the developer tools.",
+                fix = Fix.InstallDevTools,
             )
         }
+    }
+
+    private fun runtimeScripts(error: String): Check = Check(
+        "runtime-scripts", "App scripts in the runtime", CheckStatus.Fail,
+        "Couldn't update them at launch: $error",
+        fix = Fix.RepairRuntime,
+    )
+
+    /**
+     * Tools from [Toolchain], probed by actually running them. Slower than the other checks, so
+     * the screen asks for it explicitly rather than on every resume. Agent and SDK tools are only
+     * probed once their setup has installed them.
+     */
+    suspend fun tools(paths: RuntimePaths): List<Check> {
+        if (!paths.isBootstrapInstalled) return emptyList()
+        val wanted = Toolchain.tools.filter { t -> t.onlyIf == null || File(paths.prefix, t.onlyIf).exists() }
+        val r = CommandRunner.shell(paths, Toolchain.probeScript(wanted), timeoutMs = (Toolchain.PROBE_TIMEOUT_S + 20) * 1000L)
+        if (!r.ok && r.output.isBlank()) {
+            return listOf(Check("tools", "Tools", CheckStatus.Fail, "Couldn't check the tools: " + r.describe("probe"), fix = Fix.ReinstallBootstrap))
+        }
+        return Toolchain.parseProbe(r.output, wanted).map(::toolCheck)
+    }
+
+    internal fun toolCheck(state: ToolState): Check {
+        val t = state.tool
+        val fix = fixFor(t.setup)
+        val id = "tool-${t.id}"
+        return when {
+            state.ok -> Check(id, t.name, CheckStatus.Pass, state.firstLine, required = t.essential)
+            state.missing && t.onlyIf == null -> Check(
+                id, t.name, if (t.essential) CheckStatus.Fail else CheckStatus.Warn,
+                "Not installed. ${t.setup.title} setup installs it.", fix = fix, required = t.essential,
+            )
+            state.timedOut -> Check(
+                id, t.name, CheckStatus.Warn,
+                "Didn't answer within ${Toolchain.PROBE_TIMEOUT_S} s. Check again; if it persists, rerun ${t.setup.title} setup.",
+                fix = fix, required = false,
+            )
+            else -> Check(
+                id, t.name, CheckStatus.Fail,
+                // 126/127 from an installed tool: a broken binary, or a library missing after an upgrade.
+                (if (state.exitCode == 126 || state.exitCode == 127) "Installed but can't run" else "Fails (exit ${state.exitCode})") +
+                    (state.firstLine.takeIf { it.isNotBlank() }?.let { ": $it" } ?: "") + ". Rerun ${t.setup.title} setup to repair it.",
+                fix = fix, required = t.essential,
+            )
+        }
+    }
+
+    private fun fixFor(setup: ToolSetup) = when (setup) {
+        ToolSetup.DevTools -> Fix.InstallDevTools
+        ToolSetup.Agents -> Fix.InstallAgents
+        ToolSetup.AndroidSdk -> Fix.InstallAndroidSdk
+    }
+
+    /** The last run of each setup script that failed, from the status file the script writes on exit. */
+    private fun setupRuns(paths: RuntimePaths): List<Check> = ToolSetup.entries.mapNotNull { setup ->
+        val name = setup.script?.removeSuffix(".sh") ?: return@mapNotNull null
+        val status = SetupStatus.read(File(paths.setupStatusDir, "$name.status")) ?: return@mapNotNull null
+        if (status.exitCode == 0) return@mapNotNull null
+        Check(
+            "setup-$name", "Last ${setup.title.lowercase()} setup", CheckStatus.Warn,
+            SetupStatus.summary(status), fix = fixFor(setup), required = false, log = status.log,
+        )
     }
 
     private fun notifications(context: Context): Check {

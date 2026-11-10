@@ -7,6 +7,9 @@ RUNTIME_BASH=$(command -v bash)
 mkdir -p "$ROOT/prefix/bin" "$ROOT/home"
 ln -s "$RUNTIME_BASH" "$ROOT/prefix/bin/bash"
 export PREFIX="$ROOT/prefix" HOME="$ROOT/home"
+# setup_init requires the app-generated manifest; a minimal one is enough here.
+mkdir -p "$ROOT/prefix/libexec/yurlungr"
+printf 'YURLUNGR_DEV_PACKAGES=(git)\nYURLUNGR_CHECKS_DEVTOOLS=()\n' > "$ROOT/prefix/libexec/yurlungr/toolchain.sh"
 source "$COMMON"
 setup_init "$HOME/setup.log"
 LOG_PATH="$LOG"
@@ -43,6 +46,12 @@ LOG="$LOG_PATH"
 # A retry keeps the previous log, and the lock has no stale PID-file recovery path.
 flock -u 9
 exec 9>&-
+
+# A failed run leaves a status file (exit code and failed steps) for System checks.
+if bash -c 'source "$1"; setup_init "$2"; bad "demo step"; setup_finish unused' -- "$COMMON" "$HOME/demo-setup.log" >/dev/null 2>&1; then exit 15; fi
+grep -q "$(printf '^exit\t1$')" "$PREFIX/var/lib/yurlungr/setup/demo-setup.status"
+grep -q "$(printf '^failed\tdemo step$')" "$PREFIX/var/lib/yurlungr/setup/demo-setup.status"
+
 setup_init "$LOG"
 [ "$(cat "$LOG.previous")" = "$before" ]
 [ ! -s "$LOG" ]

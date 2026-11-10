@@ -38,12 +38,27 @@ class RuntimePaths(context: Context) {
     val projects = File(home, "projects")
     val androidSdk = File(home, "android-sdk")
 
-    val isAndroidSdkInstalled: Boolean
-        get() = File(androidSdk, "platforms/android-36/android.jar").isFile &&
-            File(androidSdk, "build-tools/36.0.0/aapt2").exists()
+    /** Setup scripts write `<name>.status` here when they exit (see [SetupStatus]). */
+    val setupStatusDir = File(prefix, "var/lib/yurlungr/setup")
 
-    val isBootstrapInstalled: Boolean
+    /**
+     * Exists from the start of a bootstrap install until it fully completes (extract, second
+     * stage, app scripts). Outside the prefix, which the install replaces. Its presence means an
+     * install was interrupted, even though bash and apt may already be in place.
+     */
+    val bootstrapIncomplete = File(filesDir, ".yurlungr-bootstrap-incomplete")
+
+    val isAndroidSdkInstalled: Boolean
+        get() = File(androidSdk, "platforms/${Toolchain.SDK_PLATFORM}/android.jar").isFile &&
+            File(androidSdk, "build-tools/${Toolchain.SDK_BUILD_TOOLS}/aapt2").exists()
+
+    /** The base system's core files exist (it may still be mid-install; see [isBootstrapInstalled]). */
+    val hasBaseSystem: Boolean
         get() = bash.isFile && File(bin, "apt").isFile
+
+    /** Installed and the install finished: an interrupted one must be redone, not used. */
+    val isBootstrapInstalled: Boolean
+        get() = hasBaseSystem && !bootstrapIncomplete.exists()
 
     /**
      * False when the hardcoded path isn't this app's real data dir (e.g. a work profile or secondary user).

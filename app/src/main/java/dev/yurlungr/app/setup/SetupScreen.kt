@@ -51,6 +51,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -77,8 +78,12 @@ import androidx.compose.ui.unit.sp
 /** Check ids by area, in display order. Unknown ids land in "Other". */
 private val AREAS = listOf(
     "Phone" to listOf("device", "storage"),
-    "Linux runtime" to listOf("identity", "exec", "bootstrap", "shell", "apt", "termux-exec"),
-    "Tools" to listOf("agents", "android-sdk", "cli-report"),
+    "Linux runtime" to listOf("identity", "exec", "bootstrap", "shell", "apt", "termux-exec", "runtime-scripts", "checks"),
+    "Developer tools" to listOf("tools", "tool-git", "tool-gh", "tool-node", "tool-npm", "tool-rg", "setup-dev-tools-setup"),
+    "Tools" to listOf(
+        "agents", "tool-gemini", "tool-codex", "tool-codex-acp", "tool-claude", "tool-claude-agent-acp", "tool-agy", "setup-agents-setup",
+        "android-sdk", "tool-java", "tool-aapt2", "setup-android-sdk-setup", "cli-report",
+    ),
     "Background" to listOf("notifications", "battery", "phantom"),
 )
 
@@ -100,11 +105,16 @@ fun SetupScreen(
     onOpenTerminal: () -> Unit,
     onInstallAgents: () -> Unit,
     onInstallAndroidSdk: () -> Unit,
+    onInstallDevTools: () -> Unit,
     onHome: () -> Unit,
     onDevices: () -> Unit,
 ) {
     val context = LocalContext.current
+    val openFile = dev.yurlungr.app.ui.LocalOpenFile.current
     var showPhantomHelp by remember { mutableStateOf(false) }
+    var confirmReinstall by remember { mutableStateOf(false) }
+    // Opening the screen runs the full checks, tools included (resumes elsewhere only run the quick ones).
+    LaunchedEffect(Unit) { vm.refresh(deep = true) }
     var showReport by remember { mutableStateOf(false) }
     val expanded = remember { mutableStateListOf<String>() } // areas unfolded by the user
     val installing = vm.install is InstallState.Running
@@ -117,6 +127,9 @@ fun SetupScreen(
         Fix.OpenTerminal -> onOpenTerminal()
         Fix.InstallAgents -> onInstallAgents()
         Fix.InstallAndroidSdk -> onInstallAndroidSdk()
+        Fix.InstallDevTools -> onInstallDevTools()
+        Fix.ReinstallBootstrap -> confirmReinstall = true
+        Fix.RepairRuntime -> vm.repairRuntime()
     }
 
     val byId = vm.checks.associateBy { it.id }
@@ -132,7 +145,7 @@ fun SetupScreen(
             .systemBarsPadding(),
     ) {
         ScreenHeader(if (firstRun && !vm.bootstrapInstalled) "Set up" else "System checks", onHome) {
-            IconButton(onClick = vm::refresh, enabled = !vm.checking && !installing) {
+            IconButton(onClick = { vm.refresh(deep = true) }, enabled = !vm.checking && !installing) {
                 if (vm.checking) WaveDots(dotSize = 4.dp) else PhIcon(Ph.ArrowClockwise, "Run checks again", size = 20.dp)
             }
         }
@@ -184,9 +197,15 @@ fun SetupScreen(
                                     check,
                                     fixEnabled = !installing,
                                     onFix = { check.fix?.let(::runFix) },
-                                    extra = if (check.id == "cli-report" && vm.report.isNotEmpty()) {
-                                        { TextButton(onClick = { showReport = !showReport }) { Text(if (showReport) "Hide" else "Report") } }
-                                    } else null,
+                                    extra = when {
+                                        check.id == "cli-report" && vm.report.isNotEmpty() -> {
+                                            { TextButton(onClick = { showReport = !showReport }) { Text(if (showReport) "Hide" else "Report") } }
+                                        }
+                                        check.log != null && openFile != null -> {
+                                            { TextButton(onClick = { openFile(java.io.File(check.log)) }) { Text("Log") } }
+                                        }
+                                        else -> null
+                                    },
                                 )
                             }
                             if (allPass && checks.size >= 3) {
@@ -216,6 +235,22 @@ fun SetupScreen(
                 FilledTonalButton(onClick = onOpenTerminal, enabled = vm.bootstrapInstalled && !installing, modifier = Modifier.height(48.dp)) { Text("Terminal") }
             }
         }
+    }
+
+    if (confirmReinstall) {
+        AlertDialog(
+            onDismissRequest = { confirmReinstall = false },
+            title = { Text("Reinstall the base system?") },
+            text = {
+                Text(
+                    "Downloads the Termux base system again (~30 MB) and replaces the broken one. Running chats, " +
+                        "terminals and web servers are stopped. Your home folder, projects and chats are kept; installed " +
+                        "packages and agents need their setup run again afterwards.",
+                )
+            },
+            confirmButton = { Button(onClick = { confirmReinstall = false; vm.reinstallBootstrap() }) { Text("Reinstall") } },
+            dismissButton = { TextButton(onClick = { confirmReinstall = false }) { Text("Cancel") } },
+        )
     }
 
     if (showPhantomHelp) {
@@ -287,6 +322,9 @@ private fun shortFixLabel(fix: Fix) = when (fix) {
     Fix.OpenTerminal -> "Run"
     Fix.InstallAgents -> "Install"
     Fix.InstallAndroidSdk -> "Set up"
+    Fix.InstallDevTools -> "Install"
+    Fix.ReinstallBootstrap -> "Reinstall"
+    Fix.RepairRuntime -> "Repair"
 }
 
 @Composable

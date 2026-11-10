@@ -232,8 +232,13 @@ credential-file presence; Antigravity's is not documented, so it shows as *Insta
 
 - Settings is a grouped list: System runtime (opens System checks), Coding agents, Keep agents running
   (notifications, battery, background process limit), Editor, GitHub and About (version, licences).
-- System checks (also the first-run screen) groups Phone · Linux runtime · Tools · Background; areas that
-  pass fold away and problems show their fix.
+- System checks (also the first-run screen) groups Phone · Linux runtime · Developer tools · Tools ·
+  Background; areas that pass fold away and problems show their fix. Opening it runs every tool (git,
+  gh, Node, the agents, the JDK) to check that it works. If the shell or package manager is broken it
+  offers to reinstall the base system, keeping your home folder. A failed setup run shows its failed
+  steps and a link to its log.
+- *Developer tools* setup installs only git, gh, Node.js, ripgrep and termux-exec, without the ~1 GB
+  of agents.
 - Code: `setup/`.
 
 </details>

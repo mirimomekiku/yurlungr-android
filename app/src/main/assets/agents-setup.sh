@@ -13,18 +13,22 @@ setup_init "$HOME/agents-setup.log"
 
 LIB="$PREFIX/libexec/yurlungr"
 mkdir -p "$LIB" "$HOME/projects/scratch" || exit 73
+# Node, the agent CLIs, glibc and Claude's binary together need roughly this much.
+require_space 1500
 
 step "System packages"
-run_logged apt-get update || bad "package index update"
 # npm's codex can't run on Android; Termux's native package replaces it.
 npm uninstall -g @openai/codex >/dev/null 2>&1 || true
-for p in nodejs-lts git gh ripgrep patchelf curl glibc-repo; do
-  run_logged apt-get install "${APT_OPTS[@]}" "$p" && ok "$p" || bad "$p"
-done
-run_logged apt-get update || bad "glibc package index update"
-for p in glibc-runner codex; do
-  run_logged apt-get install "${APT_OPTS[@]}" "$p" && ok "$p" || bad "$p"
-done
+if apt_prepare; then
+  # The developer tools (git, gh, Node, termux-exec…) and the agents' own packages.
+  install_pkgs "${YURLUNGR_DEV_PACKAGES[@]}" "${YURLUNGR_AGENT_PACKAGES[@]}"
+  # glibc-repo just added a repository; its packages need a fresh index.
+  if run_logged apt-get "${APT_LOCK[@]}" update; then
+    install_pkgs "${YURLUNGR_AGENT_GLIBC_PACKAGES[@]}"
+  else
+    bad "glibc package index update"
+  fi
+fi
 
 step "Agent CLIs and ACP adapters (npm)"
 for p in @google/gemini-cli @agentclientprotocol/codex-acp @agentclientprotocol/claude-agent-acp; do
@@ -59,7 +63,10 @@ if [ -f "$SRC" ] && [ -f "$GLIBC_LD" ]; then
 else
   bad "claude binary or glibc loader missing"
 fi
-cat > "$LIB/claude" <<WRAP
+# Only expose `claude` once there's a patched binary behind it; a wrapper to nothing would
+# make Claude look installed while every chat fails to start.
+if [ -x "$LIB/claude-glibc" ]; then
+  cat > "$LIB/claude" <<WRAP
 #!$PREFIX/bin/sh
 # Claude Code ships a glibc build. Run it via Termux's glibc loader without the bionic
 # termux-exec preload; exec through /system/bin/env so no preload hook intercepts it.
@@ -68,16 +75,12 @@ unset LD_PRELOAD
 export DISABLE_AUTOUPDATER=1
 exec /system/bin/env "$LIB/claude-glibc" "\$@"
 WRAP
-chmod 700 "$LIB/claude"
-ln -sf "$LIB/claude" "$PREFIX/bin/claude"
+  chmod 700 "$LIB/claude" && ln -sf "$LIB/claude" "$PREFIX/bin/claude" || bad "claude wrapper"
+fi
 
 step "Versions"
 hash -r
-check gemini 'gemini --version'
-check codex  'codex --version'
-check claude 'claude --version'
-check agy    'agy --version 2>/dev/null'
-check codex-acp 'command -v codex-acp'
-check claude-agent-acp 'command -v claude-agent-acp'
+# The same checks System checks runs (toolchain.sh is generated from the app's list).
+run_checks "${YURLUNGR_CHECKS_DEVTOOLS[@]}" "${YURLUNGR_CHECKS_AGENTS[@]}"
 
 setup_finish "All agents ready. Sign in from the app: ☰ → Agents → Sign in."

@@ -9,7 +9,7 @@ internal fun normalizeRuntimeScript(source: String): String {
 }
 
 internal fun setupScriptCommand(name: String, test: Boolean = false): String {
-    require(name in setOf("agents-setup.sh", "android-sdk-setup.sh"))
+    require(name in setOf("agents-setup.sh", "android-sdk-setup.sh", "dev-tools-setup.sh"))
     val path = "\"\$PREFIX/libexec/yurlungr/$name\""
     // Parse the entire script before executing even its first command.
     return "bash -n $path && bash $path" + if (test) " --test" else ""

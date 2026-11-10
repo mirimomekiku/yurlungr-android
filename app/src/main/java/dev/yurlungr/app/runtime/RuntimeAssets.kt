@@ -15,6 +15,7 @@ object RuntimeAssets {
         "setup-common.sh" to File(paths.libexec, "setup-common.sh"),
         "spike-test.sh" to File(paths.home, "spike-test.sh"),
         "agents-setup.sh" to File(paths.libexec, "agents-setup.sh"),
+        "dev-tools-setup.sh" to File(paths.libexec, "dev-tools-setup.sh"),
         "android-sdk-setup.sh" to File(paths.libexec, "android-sdk-setup.sh"),
         "motd.sh" to File(paths.libexec, "motd.sh"),
     )
@@ -22,9 +23,25 @@ object RuntimeAssets {
     /** Commands tools use to open a browser. All route to `yurlungr-open`. */
     private val OPEN_ALIASES = listOf("xdg-open", "termux-open-url", "termux-open", "sensible-browser")
 
+    /** Why the last refresh failed (shown in System checks), or null after a successful one. */
+    @Volatile var lastError: String? = null
+        private set
+
+    /** Refreshes everything; records (and rethrows) a failure so System checks can offer a repair. */
     @Synchronized
     fun install(context: Context, paths: RuntimePaths) {
-        if (!paths.isBootstrapInstalled) return
+        // Also during a bootstrap install (before it's marked complete): it runs this as its last step.
+        if (!paths.hasBaseSystem) return
+        try {
+            installAll(context, paths)
+            lastError = null
+        } catch (e: Exception) {
+            lastError = e.message ?: e.toString()
+            throw e
+        }
+    }
+
+    private fun installAll(context: Context, paths: RuntimePaths) {
         paths.home.mkdirs()
         paths.shimBin.mkdirs()
         paths.inbox.mkdirs()
@@ -33,6 +50,8 @@ object RuntimeAssets {
             val text = context.assets.open(asset).bufferedReader(Charsets.UTF_8).use { it.readText() }
             writeExecutable(dest, text)
         }
+        // Package lists and version checks for the setup scripts, from the same source as System checks.
+        writeExecutable(File(paths.libexec, "toolchain.sh"), Toolchain.shellManifest())
 
         val motdLauncher = "#!${paths.bin}/sh\n# Yurlungr dynamic MOTD\nexec '${paths.bash}' '${paths.libexec}/motd.sh'\n"
         writeShim(paths, "yurlungr-status", motdLauncher)

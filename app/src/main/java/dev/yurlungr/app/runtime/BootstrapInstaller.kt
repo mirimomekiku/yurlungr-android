@@ -49,6 +49,9 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
             } else if (!release.sha256.equals(sha, ignoreCase = true)) {
                 error("Checksum mismatch for ${release.tag}: expected ${release.sha256}, got $sha")
             }
+            // From here until the end, a kill leaves a prefix that looks installed but isn't:
+            // the marker makes the app offer to install again instead of using it.
+            paths.bootstrapIncomplete.writeText(release.tag)
             extract(zip, progress)
         } finally {
             zip.delete()
@@ -56,6 +59,7 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
 
         runSecondStage(progress)
         RuntimeAssets.install(context, paths)
+        paths.bootstrapIncomplete.delete()
         progress.update("Done", 1f)
     }
 

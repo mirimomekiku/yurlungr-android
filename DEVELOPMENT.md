@@ -78,10 +78,25 @@ normalizes CRLF/lone CR when installing them, including scripts from older APKs.
 Executable files are published by atomic rename so a refresh cannot leave a
 partially written script. Setup launchers parse with `bash -n` before executing.
 
-Agent and SDK installers share an exclusive kernel lock, preserve one previous
+The developer-tools, agent and SDK installers share an exclusive kernel lock, preserve one previous
 log (`*.log.previous`), and return nonzero on a failed step. The terminal shows
 the exit code before returning to its shell. Retry setup after fixing the reported
 failure; it will update or repair the existing installation.
+
+Package lists, SDK versions and version checks live in one place, `runtime/Toolchain.kt`.
+On every launch the app writes them to `$PREFIX/libexec/yurlungr/toolchain.sh`. The setup
+scripts source that file, and System checks probes the same tools, so neither can drift
+from the other. To add a tool, add it to `Toolchain` and nothing else.
+
+Each setup writes `$PREFIX/var/lib/yurlungr/setup/<name>.status` when it exits: the exit code,
+log path, time and failed steps. System checks shows a failed run with a **Log** button.
+Setups wait up to two minutes for an apt lock held by a terminal, repair an interrupted dpkg
+run first, and stop with a mirror hint when the package index can't be downloaded.
+
+`CommandRunner` never throws: a program that's missing or can't run comes back as exit
+127 or 126 with `launchError` set, and `CommandResult.describe()` turns any failure into one
+message for the user. Code that parses git output gets `GitStatus.error` or a failed `Result`,
+never an empty list or "not a repository".
 
 After installing the app and instrumentation APKs, this device check validates
 installed scripts and exercises command/log failures, retries and lock contention

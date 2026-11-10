@@ -12,8 +12,9 @@ source "${PREFIX:?Install the Linux environment first}/libexec/yurlungr/setup-co
 setup_init "$HOME/android-sdk-setup.log"
 
 SDK="$HOME/android-sdk"
-PLATFORM="android-36"
-BUILD_TOOLS="36.0.0"
+# From toolchain.sh: the app checks for exactly these versions.
+PLATFORM="$YURLUNGR_SDK_PLATFORM"
+BUILD_TOOLS="$YURLUNGR_SDK_BUILD_TOOLS"
 # Pinned to cmdline-tools 19.0: newer releases turn `sdkmanager` into a shim for a native
 # x86-64 `android` binary that can't run on ARM. 19.0's sdkmanager is pure Java.
 CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip"
@@ -22,11 +23,12 @@ WRAPPER_GRADLE="8.14"
 # Sessions started before the SDK existed don't have these yet.
 export ANDROID_HOME="$SDK" ANDROID_SDK_ROOT="$SDK"
 
-step "Packages (JDK, native build tools)"
-run_logged apt-get update || bad "package index update"
-for p in openjdk-17 aapt aapt2 aidl apksigner d8 unzip curl; do
-  run_logged apt-get install "${APT_OPTS[@]}" "$p" && ok "$p" || bad "$p"
-done
+# JDK, SDK platform and build-tools, plus Gradle's first download.
+require_space 1500
+
+step "Packages (JDK, Gradle, native build tools)"
+# Includes Termux's gradle, used only to generate the 8.x wrapper for the test build.
+apt_prepare && install_pkgs "${YURLUNGR_SDK_PACKAGES[@]}"
 
 step "Android command-line tools"
 SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
@@ -50,11 +52,12 @@ fi
 
 step "SDK platform $PLATFORM and build-tools $BUILD_TOOLS"
 if [ -x "$SDKMANAGER" ]; then
-  yes 2>/dev/null | "$SDKMANAGER" --sdk_root="$SDK" --licenses >>"$LOG" 2>&1
+  yes 2>/dev/null | timeout 600 "$SDKMANAGER" --sdk_root="$SDK" --licenses >>"$LOG" 2>&1
   license_status=${PIPESTATUS[1]}
   if [ "$license_status" -ne 0 ]; then bad "SDK license acceptance (exit $license_status)"; fi
-  run_logged "$SDKMANAGER" --sdk_root="$SDK" "platforms;$PLATFORM" "build-tools;$BUILD_TOOLS" \
-    && ok "installed" || bad "sdkmanager"
+  # A stalled download would otherwise hang the setup forever (exit 124 = timed out).
+  run_logged timeout 1800 "$SDKMANAGER" --sdk_root="$SDK" "platforms;$PLATFORM" "build-tools;$BUILD_TOOLS" \
+    && ok "installed" || bad "sdkmanager (exit $?; 124 = timed out)"
 else
   bad "sdkmanager missing; command-line tools did not install"
 fi
@@ -85,6 +88,11 @@ set_prop() { # key value
 set_prop android.aapt2FromMavenOverride "$PREFIX/bin/aapt2" || bad "Gradle aapt2 setting"
 grep -q '^org.gradle.jvmargs=' "$PROPS" || set_prop org.gradle.jvmargs "-Xmx2g -Dfile.encoding=UTF-8"
 ok "aapt2 override → $PREFIX/bin/aapt2"
+
+step "Versions"
+hash -r
+run_checks "${YURLUNGR_CHECKS_ANDROIDSDK[@]}"
+check sdkmanager "\"$SDKMANAGER\" --sdk_root=\"$SDK\" --version"
 
 if [ "${1:-}" = "--test" ]; then
   if [ "${#FAILED[@]}" -ne 0 ]; then setup_finish ""; fi
