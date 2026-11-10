@@ -105,10 +105,15 @@ fun HistoryView(dir: java.io.File, git: Git, status: GitStatus?, refreshKey: Int
     var commits by remember { mutableStateOf<List<GitCommit>?>(null) }
     var unpushed by remember { mutableStateOf(emptySet<String>()) }
     var open by remember { mutableStateOf<GitCommit?>(null) }
+    // Why the log couldn't be read; distinct from a repository that has no commits.
+    var logError by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(dir, refreshKey, allBranches, status?.isRepo, status?.unborn) {
-        if (status?.isRepo != true || status.unborn) { commits = emptyList(); return@LaunchedEffect }
-        commits = git.log(dir, allBranches = allBranches)
+        if (status?.isRepo != true || status.unborn) { commits = emptyList(); logError = null; return@LaunchedEffect }
+        git.log(dir, allBranches = allBranches).fold(
+            onSuccess = { commits = it; logError = null },
+            onFailure = { commits = emptyList(); logError = it.message },
+        )
         unpushed = if (status.hasOrigin) git.unpushed(dir) else emptySet()
     }
 
@@ -132,7 +137,8 @@ fun HistoryView(dir: java.io.File, git: Git, status: GitStatus?, refreshKey: Int
         }
         when {
             status == null || items == null -> items(6) { SkeletonListItem() }
-            !status.isRepo -> item { Note("Not a git repository.") }
+            !status.isRepo -> item { Note(status.error?.message ?: "Not a git repository.") }
+            logError != null -> item { Note("Couldn't read the history: $logError") }
             items.isEmpty() -> item { Note("No commits yet. Commit from the Changes tab.") }
             else -> items(items, key = { it.key }) { item ->
                 when (item) {
@@ -296,11 +302,12 @@ private fun CommitSheet(dir: java.io.File, git: Git, c: GitCommit, notPushed: Bo
     val context = LocalContext.current
     var body by remember { mutableStateOf<String?>(null) }
     var files by remember { mutableStateOf<List<CommitFile>?>(null) }
+    var filesError by remember { mutableStateOf<String?>(null) }
     val diffs = remember { mutableStateMapOf<String, String?>() } // path -> diff (null = loading)
     var openFile by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(c.hash) {
         body = git.commitBody(dir, c.hash)
-        files = git.commitFiles(dir, c.hash)
+        files = git.commitFiles(dir, c.hash).getOrElse { filesError = it.message; emptyList() }
     }
     LaunchedEffect(openFile) {
         val p = openFile ?: return@LaunchedEffect
@@ -338,6 +345,7 @@ private fun CommitSheet(dir: java.io.File, git: Git, c: GitCommit, notPushed: Bo
             }
             val list = files
             if (list == null) items(3) { SkeletonListItem() }
+            else if (filesError != null) item { Note("Couldn't list the files: $filesError") }
             else items(list, key = { it.path }) { f ->
                 Column(
                     Modifier

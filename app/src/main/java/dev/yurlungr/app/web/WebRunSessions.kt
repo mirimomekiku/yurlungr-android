@@ -60,7 +60,8 @@ internal object WebRunSessions {
                 withContext(Dispatchers.IO) {
                     config.validate()
                     check(File(paths.bin,"node").canExecute()) { "Node.js isn't installed. Use Install Node.js in Run setup." }
-                    if (config.project.kind != WebKind.Static) check(File(paths.bin,config.manager.executable).exists()) {
+                    // canExecute, like node: a file that's there but can't run is just as unusable.
+                    if (config.project.kind != WebKind.Static) check(File(paths.bin,config.manager.executable).canExecute()) {
                         "${config.manager.executable} isn't installed. Use the package-manager setup action."
                     }
                     run.directory.mkdirs()

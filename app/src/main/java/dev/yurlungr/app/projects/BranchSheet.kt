@@ -81,8 +81,8 @@ fun BranchSheet(dir: File, git: Git, status: GitStatus, onDismiss: () -> Unit, o
     val dirty = status.changes.isNotEmpty()
 
     LaunchedEffect(reload) {
-        branches = git.branches(dir)
-        stashes = git.stashes(dir)
+        branches = git.branches(dir).getOrElse { result = (it.message ?: "Couldn't list branches") to true; emptyList() }
+        stashes = git.stashes(dir).getOrElse { emptyList() }
     }
     // Pick up branches others pushed, once per opening; the list refreshes when it lands.
     LaunchedEffect(Unit) {
@@ -96,7 +96,7 @@ fun BranchSheet(dir: File, git: Git, status: GitStatus, onDismiss: () -> Unit, o
         scope.launch {
             val r = block()
             if (r.ok) then()
-            result = r.output.trim().lines().takeLast(4).joinToString("\n").ifBlank { if (r.ok) "$label: done" else "$label failed" } to !r.ok
+            result = (if (r.ok) r.output.trim().lines().takeLast(4).joinToString("\n").ifBlank { "$label: done" } else r.describe(label)) to !r.ok
             busy = null
             reload++
             onChanged()
@@ -105,12 +105,12 @@ fun BranchSheet(dir: File, git: Git, status: GitStatus, onDismiss: () -> Unit, o
 
     fun switch(branch: GitBranch, stashFirst: Boolean) = op("Switch") {
         if (!stashFirst) return@op git.switchTo(dir, branch)
-        val stashesBefore = git.stashes(dir).size
+        val stashesBefore = git.stashes(dir).getOrElse { emptyList() }.size
         val s = git.stash(dir, "Before switching to ${branch.name}")
         if (!s.ok) return@op s
         val switched = git.switchTo(dir, branch)
         // Nothing stashed (e.g. only ignored files changed), or the switch worked: done.
-        if (switched.ok || git.stashes(dir).size <= stashesBefore) return@op switched
+        if (switched.ok || git.stashes(dir).getOrElse { emptyList() }.size <= stashesBefore) return@op switched
         // The switch failed: bring the changes back rather than leaving them hidden in a stash.
         val restored = git.stashPop(dir, GitStash("stash@{0}", "", ""))
         val note = if (restored.ok) {

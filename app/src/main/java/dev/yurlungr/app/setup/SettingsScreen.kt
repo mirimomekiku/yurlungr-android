@@ -224,6 +224,10 @@ fun SettingsScreen(
                             !paths.isBootstrapInstalled -> "Needs the Linux environment"
                             g == null -> null
                             !g.installed -> "GitHub CLI not installed"
+                            g.problem == dev.yurlungr.app.projects.GhProblem.Broken -> "GitHub CLI isn't working: ${g.detail ?: "unknown error"}"
+                            g.problem == dev.yurlungr.app.projects.GhProblem.Unreachable ->
+                                "Can't reach GitHub right now" + (g.account?.let { " · signed in as $it" } ?: "")
+                            g.problem == dev.yurlungr.app.projects.GhProblem.SignInExpired -> "Sign-in expired · sign in again"
                             g.signedIn -> "Signed in" + (g.account?.let { " as $it" } ?: "")
                             else -> "Not signed in · needed to push and clone private repos"
                         },
@@ -233,6 +237,7 @@ fun SettingsScreen(
                             {
                                 when {
                                     !g.installed -> runInTerminal("pkg install -y gh", "Install gh")
+                                    g.problem == dev.yurlungr.app.projects.GhProblem.Broken -> runInTerminal("pkg reinstall -y gh", "Reinstall gh")
                                     !g.signedIn -> runInTerminal(
                                         "echo 'Copy the one-time code, then press Enter: the GitHub page opens in your browser.'; " +
                                             "gh auth login --hostname github.com --git-protocol https --web && gh auth setup-git",
@@ -245,6 +250,7 @@ fun SettingsScreen(
                         trailing = {
                             when {
                                 g == null && paths.isBootstrapInstalled -> SkeletonLine(Modifier.padding(start = 8.dp), width = 0.25f, height = 10.dp)
+                                g != null && g.problem == dev.yurlungr.app.projects.GhProblem.Broken -> FixLabel("Reinstall")
                                 g != null && (!g.installed || !g.signedIn) -> FixLabel(if (!g.installed) "Install" else "Sign in")
                                 g != null -> Chevron()
                             }

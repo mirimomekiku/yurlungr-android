@@ -48,11 +48,19 @@ data class GitStatus(
     val changes: List<GitChange> = emptyList(),
     /** Has a remote named "origin" (where Push goes). */
     val hasOrigin: Boolean = false,
+    /** Git couldn't read the repository (or isn't installed): [isRepo] is false but it may well be one. */
+    val error: GitError? = null,
 ) {
     companion object {
         val NotARepo = GitStatus(isRepo = false)
     }
 }
+
+/** Why git couldn't answer; [toolMissing] means installing the developer tools is the fix. */
+data class GitError(val message: String, val toolMissing: Boolean)
+
+/** A failed git command, for the operations that return [Result]. */
+class GitException(val error: GitError) : Exception(error.message)
 
 /**
  * A commit for the history graph. [refs] are git's decorations ("HEAD -> main", "origin/main",
@@ -72,7 +80,27 @@ data class GitCommit(
 /** One changed file in a commit (git status letter + path). */
 data class CommitFile(val status: Char, val path: String)
 
-data class GhStatus(val installed: Boolean, val signedIn: Boolean, val account: String?)
+/** gh exists but can't do its job right now. */
+enum class GhProblem {
+    /** GitHub can't be reached (offline, DNS, timeout); a saved sign-in may still be fine. */
+    Unreachable,
+    /** The saved sign-in was rejected (expired or revoked token): sign in again. */
+    SignInExpired,
+    /** gh itself fails (can't run, or an unexpected error). */
+    Broken,
+}
+
+data class GhStatus(
+    val installed: Boolean,
+    val signedIn: Boolean,
+    val account: String?,
+    val problem: GhProblem? = null,
+    /** gh's own words about [problem], for showing to the user. */
+    val detail: String? = null,
+)
+
+/** The signed-in account's repositories; [orgError] says why some organisations' repos are missing. */
+data class GhRepoList(val repos: List<GhRepo>, val orgError: String? = null)
 
 /** A branch; remote ones are named "origin/x" and only listed when there's no local "x". */
 data class GitBranch(val name: String, val isRemote: Boolean, val upstream: String?, val updated: String, val isCurrent: Boolean)
@@ -113,7 +141,11 @@ class Git(private val paths: RuntimePaths) {
     suspend fun status(dir: File): GitStatus {
         if (!File(dir, ".git").exists()) return GitStatus.NotARepo
         val r = runParsed(dir, "status", "--porcelain=v1", "-b", "-z", "-uall")
-        if (!r.ok) return GitStatus.NotARepo
+        if (!r.ok) {
+            // A broken .git (not an actual repository) is still "not a repo"; anything else is an error.
+            if (!r.toolMissing && r.errorOutput.contains("not a git repository", ignoreCase = true)) return GitStatus.NotARepo
+            return GitStatus(isRepo = false, error = errorOf(r, "git status"))
+        }
         val remotes = runParsed(dir, "remote").output.lines().map { it.trim() }
         return parseStatus(r.output).copy(hasOrigin = "origin" in remotes)
     }
@@ -146,12 +178,12 @@ class Git(private val paths: RuntimePaths) {
     }
 
     /** Newest first, topologically ordered (children before parents) for the graph. */
-    suspend fun log(dir: File, count: Int = 300, allBranches: Boolean = false): List<GitCommit> {
+    suspend fun log(dir: File, count: Int = 300, allBranches: Boolean = false): Result<List<GitCommit>> {
         val args = mutableListOf("log", "-n", count.toString(), "--topo-order", "--no-color", "--pretty=format:%H%x1f%P%x1f%an%x1f%ct%x1f%D%x1f%s%x1e")
         if (allBranches) args += "--all"
         val r = runParsed(dir, *args.toTypedArray())
-        if (!r.ok) return emptyList()
-        return parseLog(r.output)
+        if (!r.ok) return failure(r, "git log")
+        return Result.success(parseLog(r.output))
     }
 
     /** Commits on HEAD that no remote has yet (empty when there's no remote). */
@@ -165,11 +197,11 @@ class Git(private val paths: RuntimePaths) {
         run(dir, "show", "-s", "--format=%b", hash).output.trim()
 
     /** Files changed by a commit, against its first parent (or everything, for the first commit). */
-    suspend fun commitFiles(dir: File, hash: String): List<CommitFile> {
+    suspend fun commitFiles(dir: File, hash: String): Result<List<CommitFile>> {
         // -z: paths verbatim (no quoting of non-ASCII, quotes or tabs), so they can be passed back to git.
         val r = runParsed(dir, "diff-tree", "--root", "--no-commit-id", "-r", "-m", "--first-parent", "--name-status", "-z", hash)
-        if (!r.ok) return emptyList()
-        return parseNameStatus(r.output)
+        if (!r.ok) return failure(r, "git diff-tree")
+        return Result.success(parseNameStatus(r.output))
     }
 
     suspend fun commitDiff(dir: File, hash: String, path: String): String =
@@ -211,14 +243,14 @@ class Git(private val paths: RuntimePaths) {
     // ---- Branches & stash --------------------------------------------------------------------
 
     /** Local branches, then remote ones without a local branch of the same name. */
-    suspend fun branches(dir: File): List<GitBranch> {
+    suspend fun branches(dir: File): Result<List<GitBranch>> {
         val r = runParsed(
             dir, "for-each-ref", "--sort=-committerdate",
             "--format=%(refname)%1f%(refname:short)%1f%(upstream:short)%1f%(committerdate:relative)%1f%(HEAD)",
             "refs/heads", "refs/remotes",
         )
-        if (!r.ok) return emptyList()
-        return parseBranches(r.output)
+        if (!r.ok) return failure(r, "git for-each-ref")
+        return Result.success(parseBranches(r.output))
     }
 
     /** Updates remote branches (for the switch list); quiet failure when offline. */
@@ -230,13 +262,13 @@ class Git(private val paths: RuntimePaths) {
 
     suspend fun createBranch(dir: File, name: String): CommandResult = run(dir, "switch", "-c", name)
 
-    suspend fun stashes(dir: File): List<GitStash> {
+    suspend fun stashes(dir: File): Result<List<GitStash>> {
         val r = runParsed(dir, "stash", "list", "--format=%gd%x1f%s%x1f%cr")
-        if (!r.ok) return emptyList()
-        return r.output.lines().mapNotNull { line ->
+        if (!r.ok) return failure(r, "git stash list")
+        return Result.success(r.output.lines().mapNotNull { line ->
             val f = line.split('\u001f')
             if (f.size == 3) GitStash(f[0], f[1], f[2]) else null
-        }
+        })
     }
 
     /** Stashes everything, untracked files included. */
@@ -255,41 +287,50 @@ class Git(private val paths: RuntimePaths) {
         return name to email
     }
 
-    suspend fun setIdentity(name: String, email: String) {
-        run(paths.home, "config", "--global", "user.name", name)
-        run(paths.home, "config", "--global", "user.email", email)
+    /** Saves the global commit identity; a failed write is returned, not ignored. */
+    suspend fun setIdentity(name: String, email: String): CommandResult {
+        val r = run(paths.home, "config", "--global", "user.name", name)
+        if (!r.ok) return r
+        return run(paths.home, "config", "--global", "user.email", email)
     }
 
+    /** Short timeout: this runs before the projects list shows GitHub, and offline it would just hang. */
     suspend fun ghStatus(): GhStatus {
         val gh = File(paths.bin, "gh")
         if (!gh.exists()) return GhStatus(installed = false, signedIn = false, account = null)
-        val r = CommandRunner.run(paths, listOf(gh.path, "auth", "status", "--hostname", "github.com"), extraEnv = env)
-        val account = ACCOUNT.find(r.output)?.groupValues?.get(1)
-        return GhStatus(installed = true, signedIn = r.ok, account = account)
+        val r = CommandRunner.run(paths, listOf(gh.path, "auth", "status", "--hostname", "github.com"), extraEnv = env + GH_VARS, timeoutMs = 20_000)
+        val hostsFile = File(paths.home, ".config/gh/hosts.yml").isFile
+        return parseGhAuth(r, hostsFile)
     }
 
     /**
      * Repositories of the signed-in account and of every organization it belongs to (each org's
      * repos marked [GhRepo.isOrg]), newest push first. Null if gh can't list the account's own.
      */
-    suspend fun ghRepos(limit: Int = 200): List<GhRepo>? = coroutineScope {
+    suspend fun ghRepos(limit: Int = 200): Result<GhRepoList> = coroutineScope {
         val gh = File(paths.bin, "gh")
-        if (!gh.exists()) return@coroutineScope null
+        if (!gh.exists()) return@coroutineScope Result.failure(IllegalStateException("The GitHub CLI isn't installed."))
+        suspend fun runGh(vararg args: String, timeoutMs: Long) =
+            CommandRunner.run(paths, listOf(gh.path, *args), extraEnv = env + GH_VARS, timeoutMs = timeoutMs, forParsing = true)
         fun list(owner: String?) = async {
-            val r = CommandRunner.shell(
-                paths,
-                "$GH_ENV ${shellQuote(gh.path)} repo list ${owner?.let(::shellQuote).orEmpty()} --limit $limit " +
-                    "--json nameWithOwner,name,description,isPrivate,isFork,pushedAt 2>/dev/null",
-                timeoutMs = 60_000,
-            )
-            if (r.ok) parseRepos(r.output) else null
+            val args = listOfNotNull("repo", "list", owner, "--limit", "$limit", "--json", "nameWithOwner,name,description,isPrivate,isFork,pushedAt")
+            val r = runGh(*args.toTypedArray(), timeoutMs = 60_000)
+            val parsed = if (r.ok) parseRepos(r.output) else null
+            if (parsed != null) Result.success(parsed) else Result.failure(IllegalStateException(ghError(r, "gh repo list")))
         }
         val own = list(null)
-        val orgs = CommandRunner.shell(paths, "$GH_ENV ${shellQuote(gh.path)} api user/orgs --jq '.[].login' 2>/dev/null", timeoutMs = 30_000)
-            .takeIf { it.ok }?.output?.lines()?.map { it.trim() }?.filter { it.isNotEmpty() && ' ' !in it }.orEmpty()
-        val orgRepos = orgs.map { list(it) }.awaitAll().filterNotNull().flatten().map { it.copy(isOrg = true) }
-        val mine = own.await() ?: return@coroutineScope null
-        (mine + orgRepos).distinctBy { it.slug.lowercase() }.sortedByDescending { it.updatedAt }
+        val orgsResult = runGh("api", "user/orgs", "--jq", ".[].login", timeoutMs = 30_000)
+        val orgs = if (orgsResult.ok) orgsResult.output.lines().map { it.trim() }.filter { it.isNotEmpty() && ' ' !in it } else emptyList()
+        val orgLists = orgs.map { list(it) }.awaitAll()
+        val mine = own.await().getOrElse { return@coroutineScope Result.failure(it) }
+        val orgRepos = orgLists.mapNotNull { it.getOrNull() }.flatten().map { it.copy(isOrg = true) }
+        val orgError = when {
+            !orgsResult.ok -> "Organisation repositories weren't loaded: " + ghError(orgsResult, "gh api user/orgs")
+            orgLists.any { it.isFailure } -> "Some organisations' repositories weren't loaded: " +
+                orgLists.first { it.isFailure }.exceptionOrNull()?.message
+            else -> null
+        }
+        Result.success(GhRepoList((mine + orgRepos).distinctBy { it.slug.lowercase() }.sortedByDescending { it.updatedAt }, orgError))
     }
 
     /** "owner/name" (lowercase) of the origin remote if it's on GitHub; null otherwise. */
@@ -299,8 +340,58 @@ class Git(private val paths: RuntimePaths) {
         return if (r.ok) githubSlug(r.firstLine) else null
     }
 
+    private fun <T> failure(r: CommandResult, what: String): Result<T> = Result.failure(GitException(errorOf(r, what)))
+
     companion object {
-        private const val GH_ENV = "GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1"
+        private val EMAIL = Regex("""^[^\s@]+@[^\s@]+\.[^\s@]+$""")
+
+        /** A plausible commit email: something@domain.tld, no spaces. */
+        fun isValidEmail(email: String): Boolean = EMAIL.matches(email.trim())
+
+        private val GH_VARS = mapOf("GH_PROMPT_DISABLED" to "1", "GH_NO_UPDATE_NOTIFIER" to "1")
+        private val NETWORK_ERROR = Regex(
+            "(?i)error connecting|dial tcp|no such host|could not resolve|i/o timeout|network is unreachable|connection refused|" +
+                "TLS handshake|timeout awaiting|context deadline exceeded|connection reset",
+        )
+
+        /** gh's last error lines, or what kind of failure it was when it printed nothing. */
+        fun ghError(r: CommandResult, what: String): String {
+            val text = (r.errorOutput + "\n" + r.output).lines().map { it.trim() }.filter { it.isNotEmpty() }.takeLast(2).joinToString(" ")
+            return when {
+                r.timedOut || NETWORK_ERROR.containsMatchIn(text) -> "GitHub can't be reached. Check the connection and pull down to retry."
+                text.isNotEmpty() && !r.toolMissing -> text
+                else -> r.describe(what)
+            }
+        }
+
+        /**
+         * Reads `gh auth status`: signed in, signed out, sign-in expired, offline or broken. Offline
+         * with a saved sign-in ([hasHostsFile]) still counts as signed in, so cached repos stay.
+         */
+        fun parseGhAuth(r: CommandResult, hasHostsFile: Boolean): GhStatus {
+            val text = r.errorOutput + "\n" + r.output
+            val account = ACCOUNT.find(text)?.groupValues?.get(1)
+            val loggedIn = r.ok || Regex("(?i)Logged in to github\\.com").containsMatchIn(text)
+            return when {
+                r.toolMissing -> GhStatus(true, false, null, GhProblem.Broken, r.describe("gh"))
+                r.timedOut || NETWORK_ERROR.containsMatchIn(text) ->
+                    GhStatus(true, hasHostsFile || loggedIn, account, GhProblem.Unreachable, "GitHub can't be reached right now.")
+                loggedIn -> GhStatus(true, true, account)
+                Regex("(?i)not logged in|You are not logged").containsMatchIn(text) -> GhStatus(true, false, null)
+                Regex("(?i)failed to log in|token .*invalid|invalid token|bad credentials|\\b401\\b").containsMatchIn(text) ->
+                    GhStatus(true, false, account, GhProblem.SignInExpired, "Your GitHub sign-in is no longer valid. Sign in again.")
+                else -> GhStatus(true, false, null, GhProblem.Broken, ghError(r, "gh auth status"))
+            }
+        }
+
+        /** A user-facing explanation of a failed git command. */
+        fun errorOf(r: CommandResult, what: String): GitError =
+            if (r.toolMissing) {
+                GitError("Git isn't installed, or can't run. Install the developer tools to use it.", toolMissing = true)
+            } else {
+                GitError(r.describe(what), toolMissing = false)
+            }
+
         private val GITHUB_URL = Regex("github\\.com[:/]+([^/\\s]+)/([^/\\s]+?)(?:\\.git)?/?$")
 
         /** Parses [log] output: records split by \u001e, fields by \u001f. */

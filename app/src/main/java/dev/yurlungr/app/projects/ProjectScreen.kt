@@ -158,7 +158,8 @@ fun ProjectScreen(
         scope.launch {
             val r = block()
             if (r.ok) onSuccess()
-            message = (r.output.trim().lines().takeLast(6).joinToString("\n").ifBlank { if (r.ok) "$label: done" else "$label failed" }) to !r.ok
+            // On failure, say why in plain words (not installed, timed out, exit code) before git's own lines.
+            message = (if (r.ok) r.output.trim().lines().takeLast(6).joinToString("\n").ifBlank { "$label: done" } else r.describe(label)) to !r.ok
             busy = null
             reload++
         }
@@ -198,6 +199,13 @@ fun ProjectScreen(
                     if (toPush > 0 && busy == null) runGit("Push") { git.push(dir, s) } else tab = ProjectTab.Changes
                 }
             }
+        }
+        status?.error?.let { e ->
+            GitErrorCard(
+                e,
+                onInstall = { runInTerminal(dev.yurlungr.app.runtime.setupScriptCommand("dev-tools-setup.sh"), "Developer tools") },
+                onRetry = { reload++ },
+            )
         }
         dev.yurlungr.app.web.WebRunCard(dir, onLogs = onOpenTerminal)
         SectionTabs(tab, changeCount = status?.changes?.size ?: 0) { tab = it }
@@ -257,8 +265,12 @@ fun ProjectScreen(
             onSave = { name, email ->
                 askIdentity = null
                 scope.launch {
-                    git.setIdentity(name, email)
-                    runGit("Commit", onSuccess = { commitMessage = "" }) { git.commitAll(dir, pending) }
+                    val saved = git.setIdentity(name, email)
+                    if (!saved.ok) {
+                        message = saved.describe("Saving your git name and email") to true
+                    } else {
+                        runGit("Commit", onSuccess = { commitMessage = "" }) { git.commitAll(dir, pending) }
+                    }
                 }
             },
         )
@@ -540,6 +552,26 @@ private fun ActionTile(
 
 // ---- Changes -------------------------------------------------------------------------
 
+/** Git is missing or failed: what happened, and the fix (install the tools, or retry). */
+@Composable
+private fun GitErrorCard(error: GitError, onInstall: () -> Unit, onRetry: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(error.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer, maxLines = 6, overflow = TextOverflow.Ellipsis)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (error.toolMissing) Button(onClick = onInstall) { Text("Install developer tools") }
+            TextButton(onClick = onRetry) { Text("Retry") }
+        }
+    }
+}
+
 @Composable
 private fun ChangesTab(
     dir: File,
@@ -566,6 +598,8 @@ private fun ChangesTab(
     ) {
         when {
             status == null -> items(5) { SkeletonListItem() }
+            // Shown in the card above; never offer "Initialize git" for a repo git just couldn't read.
+            status.error != null -> item { Text("Git couldn't read this folder; see the message above.", style = MaterialTheme.typography.bodyMedium) }
             !status.isRepo -> item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("This folder isn't a git repository.", style = MaterialTheme.typography.bodyMedium)
@@ -1009,7 +1043,7 @@ private fun IdentityDialog(onDismiss: () -> Unit, onSave: (String, String) -> Un
             }
         },
         confirmButton = {
-            Button(onClick = { onSave(name.trim(), email.trim()) }, enabled = name.isNotBlank() && email.contains('@')) { Text("Save & commit") }
+            Button(onClick = { onSave(name.trim(), email.trim()) }, enabled = name.isNotBlank() && Git.isValidEmail(email)) { Text("Save & commit") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

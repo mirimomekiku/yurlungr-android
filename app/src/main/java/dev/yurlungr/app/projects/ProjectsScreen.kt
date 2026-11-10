@@ -132,7 +132,8 @@ fun ProjectsScreen(
     var gh by remember { mutableStateOf<GhStatus?>(null) }
     var repos by remember { mutableStateOf(RepoCache.repos) }
     var fetchingRepos by remember { mutableStateOf(false) }
-    var repoError by remember { mutableStateOf(false) }
+    /** Why GitHub's list couldn't be refreshed (gh's own words), or null. */
+    var repoError by remember { mutableStateOf<String?>(null) }
     var cloning by remember { mutableStateOf(false) }
     var creating by remember { mutableStateOf(false) }
     var createBusy by remember { mutableStateOf(false) }
@@ -146,7 +147,7 @@ fun ProjectsScreen(
     LaunchedEffect(refreshTick, reload) {
         loading = true
         refreshError = null
-        repoError = false
+        repoError = null
         try {
             projects = withContext(Dispatchers.IO) {
                 check(paths.projects.isDirectory || paths.projects.mkdirs()) { "Cannot open projects folder" }
@@ -157,33 +158,47 @@ fun ProjectsScreen(
             val currentPaths = projects.map { it.path }.toSet()
             statuses.keys.toList().filter { it !in currentPaths }.forEach { statuses.remove(it) }
             origins.keys.toList().filter { it !in currentPaths }.forEach { origins.remove(it) }
-            val status = git.ghStatus()
-            gh = status
             coroutineScope {
-                if (status.signedIn) {
-                    fetchingRepos = true
-                    launch {
-                        try {
-                            val list = git.ghRepos()
-                            repoError = list == null
-                            if (list != null) {
-                                repos = list
-                                RepoCache.repos = list
+                // GitHub in parallel with the local projects: a slow or offline network must not
+                // keep the folders on this phone from showing their status.
+                launch {
+                    val status = git.ghStatus()
+                    gh = status
+                    when {
+                        status.problem == GhProblem.Unreachable -> {
+                            // Keep the saved list: being offline isn't being signed out.
+                            repoError = status.detail ?: "GitHub can't be reached."
+                        }
+                        status.signedIn -> {
+                            fetchingRepos = true
+                            try {
+                                git.ghRepos().fold(
+                                    onSuccess = { list ->
+                                        repos = list.repos
+                                        RepoCache.repos = list.repos
+                                        repoError = list.orgError
+                                    },
+                                    onFailure = { repoError = it.message ?: "Couldn't load GitHub repositories." },
+                                )
+                            } finally {
+                                fetchingRepos = false
                             }
-                        } catch (e: Exception) {
-                            if (e is CancellationException) throw e
-                            repoError = true
-                        } finally {
-                            fetchingRepos = false
+                        }
+                        else -> {
+                            repos = null
+                            RepoCache.repos = null
                         }
                     }
-                } else {
-                    repos = null
-                    RepoCache.repos = null
                 }
                 for (p in projects) {
-                    statuses[p.path] = git.status(p)
-                    git.originSlug(p)?.let { origins[p.path] = it } ?: origins.remove(p.path)
+                    // One unreadable project must not stop the others (or leave them loading forever).
+                    try {
+                        statuses[p.path] = git.status(p)
+                        git.originSlug(p)?.let { origins[p.path] = it } ?: origins.remove(p.path)
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        statuses[p.path] = GitStatus(isRepo = false, error = GitError(e.message ?: e.toString(), toolMissing = false))
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -273,9 +288,11 @@ fun ProjectsScreen(
                 }
 
                 if (filter != Filter.Local && gh?.signedIn == true) {
-                    if (repoError) item {
-                        Text("Couldn't refresh GitHub repositories. Pull down to retry." + if (repos != null) " Showing the saved list." else "",
-                            color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    repoError?.let { why ->
+                        item {
+                            Text(why + if (repos != null) " Showing the saved list." else "",
+                                color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                     item {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -285,8 +302,14 @@ fun ProjectsScreen(
                     }
                     when {
                         repos == null && fetchingRepos -> items(3) { SkeletonCard(lines = 2) }
-                        remoteShown.isEmpty() && !repoError -> item {
-                            EmptyNote(if (q.isNotEmpty()) "No repository matches “$q”." else "Every repository is already on this phone.")
+                        remoteShown.isEmpty() && repos != null -> item {
+                            EmptyNote(
+                                when {
+                                    q.isNotEmpty() -> "No repository matches “$q”."
+                                    repos.orEmpty().isEmpty() -> "No repositories on this GitHub account yet."
+                                    else -> "Every repository is already on this phone."
+                                },
+                            )
                         }
                     }
                     // One grouped list per owner: your account first, then each organization.
@@ -415,6 +438,7 @@ private fun LocalProjectRow(dir: File, status: GitStatus?, slug: String?, repos:
             } else {
                 Text(
                     when {
+                        status.error != null -> status.error.message.lineSequence().first()
                         !status.isRepo -> "Not a git repository"
                         else -> buildString {
                             append(status.branch ?: "?")
@@ -561,15 +585,20 @@ private fun GitHubCard(gh: GhStatus?, runInTerminal: (String, String) -> Unit) {
                 when {
                     gh == null -> ""
                     !gh.installed -> "Install the GitHub CLI to see your repositories here"
+                    gh.problem == GhProblem.Broken -> "The GitHub CLI isn't working: ${gh.detail ?: "unknown error"}"
+                    gh.problem == GhProblem.SignInExpired -> gh.detail ?: "Your GitHub sign-in is no longer valid."
+                    gh.problem == GhProblem.Unreachable -> "GitHub can't be reached right now. Pull down to retry."
                     else -> "Sign in to see your repositories here, push, and clone private ones"
                 },
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (gh?.problem != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         when {
             gh == null -> Unit
             !gh.installed -> FilledTonalButton(onClick = { runInTerminal("pkg install -y gh", "Install gh") }) { Text("Install") }
+            gh.problem == GhProblem.Broken -> FilledTonalButton(onClick = { runInTerminal("pkg reinstall -y gh", "Reinstall gh") }) { Text("Reinstall") }
+            gh.problem == GhProblem.Unreachable -> Unit
             !gh.signedIn -> FilledTonalButton(onClick = {
                 runInTerminal(
                     "echo 'Copy the one-time code, then press Enter: the GitHub page opens in your browser.'; " +
