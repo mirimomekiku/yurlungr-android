@@ -13,6 +13,10 @@ graphicsPath = "1.1.0"
 commonmark = { module = "org.commonmark:commonmark", version = "0.24.0" }
 commonmark-tables = { module = "org.commonmark:commonmark-ext-gfm-tables", version = "0.24.0" }
 commonmark-strikethrough = { module = "org.commonmark:commonmark-ext-gfm-strikethrough", version = "0.24.0" }
+commonmark-tasklist = { module = "org.commonmark:commonmark-ext-task-list-items", version = "0.24.0" }
+commonmark-autolink = { module = "org.commonmark:commonmark-ext-autolink", version = "0.24.0" }
+commonmark-footnotes = { module = "org.commonmark:commonmark-ext-footnotes", version = "0.24.0" }
+commonmark-frontmatter = { module = "org.commonmark:commonmark-ext-yaml-front-matter", version = "0.24.0" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-graphics-path = { module = "androidx.graphics:graphics-path", version.ref = "graphicsPath" }
