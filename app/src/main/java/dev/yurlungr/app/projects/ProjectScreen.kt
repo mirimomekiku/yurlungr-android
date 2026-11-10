@@ -72,6 +72,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -789,20 +790,27 @@ private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<
     }
     val gitState = remember(treeStatus, ignored) { FileTreeGitState(ignored.orEmpty(), treeStatus?.changes.orEmpty()) }
     val effectiveFilter = if (showGit && ignored != null && treeStatus?.isRepo == true) filter else FileTreeFilter.All
-    val rows = remember(top, open.toMap(), gitState, effectiveFilter) {
-        if (effectiveFilter == FileTreeFilter.Changed) {
-            // Include deleted paths too; a filesystem-only tree cannot show them.
-            gitState.changesByPath.keys.sorted().map { File(root, it) to 0 }
-        } else buildList {
-            fun add(files: List<File>, depth: Int) {
-                for (f in files) {
-                    val relative = f.relativeTo(root).invariantSeparatorsPath
-                    if (!gitState.includes(relative, f.isDirectory, effectiveFilter)) continue
-                    add(f to depth)
-                    open[f.path]?.let { add(it, depth + 1) }
+    // Built off the main thread: every row needs a stat() or two, and big expanded trees have thousands.
+    // Keeps showing the previous rows until the new ones are ready; null only before the first build.
+    val openNow = open.toMap()
+    val rows by produceState<List<TreeEntry>?>(null, top, openNow, gitState, effectiveFilter) {
+        val listed = top ?: return@produceState
+        value = withContext(Dispatchers.IO) {
+            if (effectiveFilter == FileTreeFilter.Changed) {
+                // Include deleted paths too; a filesystem-only tree cannot show them.
+                gitState.changesByPath.keys.sorted().map { File(root, it).let { f -> TreeEntry(f, 0, f.isDirectory, f.isFile) } }
+            } else buildList {
+                fun add(files: List<File>, depth: Int) {
+                    for (f in files) {
+                        val isDir = f.isDirectory
+                        val relative = f.relativeTo(root).invariantSeparatorsPath
+                        if (!gitState.includes(relative, isDir, effectiveFilter)) continue
+                        add(TreeEntry(f, depth, isDir, enabled = isDir || f.exists()))
+                        openNow[f.path]?.let { add(it, depth + 1) }
+                    }
                 }
+                add(listed, 0)
             }
-            add(top.orEmpty(), 0)
         }
     }
 
@@ -823,15 +831,18 @@ private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
         }
         LazyColumn(contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp), modifier = Modifier.weight(1f)) {
-            if (top == null) items(6) { SkeletonListItem() }
-            else if (rows.isEmpty()) item {
+            val loaded = rows
+            if (top == null || loaded == null) items(6) { SkeletonListItem() }
+            else if (loaded.isEmpty()) item {
                 Text(if (effectiveFilter == FileTreeFilter.All) "Empty folder" else "No ${effectiveFilter.label.lowercase()} files here.",
                     modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            items(rows, key = { it.first.path }) { (f, depth) ->
+            items(loaded.orEmpty(), key = { it.file.path }) { entry ->
+                val f = entry.file
+                val depth = entry.depth
                 val relative = f.relativeTo(root).invariantSeparatorsPath
                 val change = gitState.changesByPath[relative]
-                val changed = gitState.isChanged(relative, f.isDirectory)
+                val changed = gitState.isChanged(relative, entry.isDir)
                 val isIgnored = ignored != null && gitState.isIgnored(relative)
                 val details = if (showGit && ignored != null && treeStatus?.isRepo == true) {
                     when {
@@ -850,14 +861,14 @@ private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<
                 } else null
                 TreeRow(
                     name = if (effectiveFilter == FileTreeFilter.Changed) relative else f.name,
-                    depth = depth, isDir = f.isDirectory, expanded = open.containsKey(f.path),
-                    enabled = if (effectiveFilter == FileTreeFilter.Changed) f.isFile else f.exists(),
+                    depth = depth, isDir = entry.isDir, expanded = open.containsKey(f.path),
+                    enabled = entry.enabled,
                     mark = change?.let(::changeMark) ?: if (changed) "•" else null,
                     details = details, ignored = showGit && isIgnored,
                     modifier = Modifier.animateItem(),
                 ) {
                     when {
-                        !f.isDirectory -> onOpenFile(f)
+                        !entry.isDir -> onOpenFile(f)
                         open.containsKey(f.path) -> open.keys.filter { it == f.path || it.startsWith(f.path + "/") }.forEach { open.remove(it) }
                         else -> scope.launch { open[f.path] = list(f) }
                     }
@@ -866,6 +877,9 @@ private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<
         }
     }
 }
+
+/** A file-tree row with its file-system facts read once, off the main thread. */
+private data class TreeEntry(val file: File, val depth: Int, val isDir: Boolean, val enabled: Boolean)
 
 private fun changeMark(c: GitChange) = when (c.label) {
     "new" -> "?"
