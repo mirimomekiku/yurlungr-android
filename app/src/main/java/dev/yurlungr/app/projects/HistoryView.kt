@@ -107,30 +107,82 @@ fun HistoryView(dir: java.io.File, git: Git, status: GitStatus?, refreshKey: Int
     var open by remember { mutableStateOf<GitCommit?>(null) }
     // Why the log couldn't be read; distinct from a repository that has no commits.
     var logError by remember { mutableStateOf<String?>(null) }
+    var filterAuthor by rememberSaveable(dir.path) { mutableStateOf<String?>(null) }
+    var filterPeriod by rememberSaveable(dir.path) { mutableStateOf(HistoryPeriod.Any) }
+    var query by rememberSaveable(dir.path) { mutableStateOf("") }
+    var searching by rememberSaveable(dir.path) { mutableStateOf(false) }
+    // Typing shouldn't run git for every letter.
+    var debouncedQuery by remember { mutableStateOf(query) }
+    LaunchedEffect(query) { kotlinx.coroutines.delay(350); debouncedQuery = query }
+    val filter = HistoryFilter(filterAuthor, filterPeriod, debouncedQuery)
+    var authors by remember(dir.path) { mutableStateOf(emptyList<String>()) }
 
-    LaunchedEffect(dir, refreshKey, allBranches, status?.isRepo, status?.unborn) {
+    LaunchedEffect(dir, refreshKey, allBranches, status?.isRepo, status?.unborn, filter) {
         if (status?.isRepo != true || status.unborn) { commits = emptyList(); logError = null; return@LaunchedEffect }
-        git.log(dir, allBranches = allBranches).fold(
-            onSuccess = { commits = it; logError = null },
+        git.log(dir, allBranches = allBranches, filter = filter).fold(
+            onSuccess = { list -> commits = list.filter(filter::matchesHash); logError = null },
             onFailure = { commits = emptyList(); logError = it.message },
         )
         unpushed = if (status.hasOrigin) git.unpushed(dir) else emptySet()
     }
+    LaunchedEffect(dir, refreshKey, allBranches, status?.isRepo) {
+        if (status?.isRepo == true && !status.unborn) authors = git.authors(dir, allBranches)
+    }
 
-    val items = remember(commits) { commits?.let(::buildItems) }
+    // Filtered lists leave out commits the graph would connect through: show them without lanes.
+    val items = remember(commits, filter.isActive) {
+        commits?.let { c -> buildItems(if (filter.isActive) c.map { it.copy(parents = emptyList()) } else c) }
+    }
     val laneCount = remember(items) { items.orEmpty().filterIsInstance<HistoryItem.Entry>().maxOfOrNull { it.row.width }?.coerceIn(1, MAX_LANES) ?: 1 }
 
     LazyColumn(contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 16.dp), modifier = Modifier.fillMaxSize()) {
         item(key = "filters") {
-            Row(Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Chip("This branch", selected = !allBranches, onClick = { allBranches = false })
-                Chip("All branches", selected = allBranches, onClick = { allBranches = true })
-                Spacer(Modifier.weight(1f))
+            Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Chip(if (allBranches) "All branches" else "This branch", selected = allBranches, onClick = { allBranches = !allBranches })
+                    dev.yurlungr.app.ui.MenuChip(filterAuthor ?: "Author") { close ->
+                        androidx.compose.material3.DropdownMenuItem(text = { Text("Anyone") }, onClick = { filterAuthor = null; close() })
+                        for (a in authors.take(30)) {
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text(a, fontWeight = if (a == filterAuthor) FontWeight.SemiBold else null) },
+                                onClick = { filterAuthor = a; close() },
+                            )
+                        }
+                    }
+                    dev.yurlungr.app.ui.MenuChip(if (filterPeriod == HistoryPeriod.Any) "Date" else filterPeriod.label) { close ->
+                        for (p in HistoryPeriod.entries) {
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text(p.label, fontWeight = if (p == filterPeriod) FontWeight.SemiBold else null) },
+                                onClick = { filterPeriod = p; close() },
+                            )
+                        }
+                    }
+                    Chip(if (query.isNotBlank()) "“${query.trim().take(12)}”" else "Search", selected = searching || query.isNotBlank(), onClick = { searching = !searching })
+                    if (filter.isActive || query.isNotBlank()) {
+                        Chip("Clear", onClick = { filterAuthor = null; filterPeriod = HistoryPeriod.Any; query = ""; searching = false })
+                    }
+                }
+                if (searching) {
+                    androidx.compose.material3.OutlinedTextField(
+                        query, { query = it },
+                        placeholder = { Text("Message or commit hash") },
+                        singleLine = true,
+                        leadingIcon = { PhIcon(Ph.MagnifyingGlass, null, size = 18.dp) },
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 commits?.let { c ->
                     Text(
-                        "${c.size}${if (c.size >= 300) "+" else ""} commits" + if (unpushed.isNotEmpty()) " · ${unpushed.size} not pushed" else "",
+                        (if (filter.isActive) "${c.size}${if (c.size >= 300) "+" else ""} matching commits" else "${c.size}${if (c.size >= 300) "+" else ""} commits") +
+                            if (unpushed.isNotEmpty() && !filter.isActive) " · ${unpushed.size} not pushed" else "",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp),
                     )
                 }
             }
@@ -139,6 +191,7 @@ fun HistoryView(dir: java.io.File, git: Git, status: GitStatus?, refreshKey: Int
             status == null || items == null -> items(6) { SkeletonListItem() }
             !status.isRepo -> item { Note(status.error?.message ?: "Not a git repository.") }
             logError != null -> item { Note("Couldn't read the history: $logError") }
+            items.isEmpty() && filter.isActive -> item { Note("No commits match these filters.") }
             items.isEmpty() -> item { Note("No commits yet. Commit from the Changes tab.") }
             else -> items(items, key = { it.key }) { item ->
                 when (item) {
@@ -305,6 +358,10 @@ private fun CommitSheet(dir: java.io.File, git: Git, c: GitCommit, notPushed: Bo
     var filesError by remember { mutableStateOf<String?>(null) }
     val diffs = remember { mutableStateMapOf<String, String?>() } // path -> diff (null = loading)
     var openFile by remember { mutableStateOf<String?>(null) }
+    var fullScreen by remember { mutableStateOf<String?>(null) }
+    fullScreen?.let { path ->
+        diffs[path]?.let { d -> DiffFullScreen(path, "${c.short} · ${c.subject}", d) { fullScreen = null } }
+    }
     LaunchedEffect(c.hash) {
         body = git.commitBody(dir, c.hash)
         files = git.commitFiles(dir, c.hash).getOrElse { filesError = it.message; emptyList() }
@@ -368,9 +425,16 @@ private fun CommitSheet(dir: java.io.File, git: Git, c: GitCommit, notPushed: Bo
                         PhIcon(if (openFile == f.path) Ph.CaretDown else Ph.CaretRight, null, size = 12.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (openFile == f.path) {
-                        Box(Modifier.padding(start = 8.dp, end = 8.dp, bottom = 8.dp)) {
+                        Column(Modifier.padding(start = 8.dp, end = 8.dp, bottom = 8.dp)) {
                             val d = diffs[f.path]
-                            if (d == null) SkeletonCode(lines = 6) else UnifiedDiff(d)
+                            if (d == null) SkeletonCode(lines = 6) else {
+                                UnifiedDiff(d)
+                                androidx.compose.material3.TextButton(onClick = { fullScreen = f.path }) {
+                                    PhIcon(Ph.ArrowsLeftRight, null, size = 14.dp)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Full screen")
+                                }
+                            }
                         }
                     }
                 }

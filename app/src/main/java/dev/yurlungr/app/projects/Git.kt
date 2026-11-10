@@ -184,12 +184,23 @@ class Git(private val paths: RuntimePaths) {
     }
 
     /** Newest first, topologically ordered (children before parents) for the graph. */
-    suspend fun log(dir: File, count: Int = 300, allBranches: Boolean = false): Result<List<GitCommit>> {
+    suspend fun log(dir: File, count: Int = 300, allBranches: Boolean = false, filter: HistoryFilter = HistoryFilter()): Result<List<GitCommit>> {
         val args = mutableListOf("log", "-n", count.toString(), "--topo-order", "--no-color", "--pretty=format:%H%x1f%P%x1f%an%x1f%ct%x1f%D%x1f%s%x1e")
         if (allBranches) args += "--all"
+        args += filter.gitArgs()
         val r = runParsed(dir, *args.toTypedArray())
         if (!r.ok) return failure(r, "git log")
         return Result.success(parseLog(r.output))
+    }
+
+    /** Commit authors, most commits first (for the history's author filter). */
+    suspend fun authors(dir: File, allBranches: Boolean): List<String> {
+        val args = mutableListOf("log", "-n", "5000", "--format=%an")
+        if (allBranches) args += "--all"
+        val r = runParsed(dir, *args.toTypedArray())
+        if (!r.ok) return emptyList()
+        return r.output.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            .groupingBy { it }.eachCount().entries.sortedByDescending { it.value }.map { it.key }
     }
 
     /** Commits on HEAD that no remote has yet (empty when there's no remote). */
