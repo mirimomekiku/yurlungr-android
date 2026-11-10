@@ -141,6 +141,15 @@ class MainActivity : ComponentActivity() {
                 val context = LocalContext.current
                 val drawer = rememberDrawerState(DrawerValue.Closed)
                 val scope = rememberCoroutineScope()
+                // Opening the sidebar (button or swipe) puts the keyboard away.
+                val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+                val focus = androidx.compose.ui.platform.LocalFocusManager.current
+                LaunchedEffect(drawer.targetValue) {
+                    if (drawer.targetValue == DrawerValue.Open) {
+                        keyboard?.hide()
+                        focus.clearFocus()
+                    }
+                }
                 fun go(route: Route) {
                     scope.launch { drawer.close() }
                     // "Projects" reopens the last project's workspace; its name menu lists the rest.
