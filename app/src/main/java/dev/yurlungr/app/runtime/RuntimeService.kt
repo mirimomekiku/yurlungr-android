@@ -39,6 +39,10 @@ class RuntimeService : Service() {
                 dev.yurlungr.app.remote.RemoteServer.stop()
                 dev.yurlungr.app.web.WebRunSessions.stopAll(this)
                 TerminalSessions.closeAll(this)
+                // Exit means nothing should keep the phone awake or the service alive.
+                wakeLock?.takeIf { it.isHeld }?.release()
+                wakeLock = null
+                stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_TOGGLE_WAKE_LOCK -> toggleWakeLock()
