@@ -98,14 +98,16 @@ object CommandRunner {
         forParsing: Boolean = false,
     ): CommandResult = withContext(Dispatchers.IO) {
         // A missing or unrunnable program is a result, not an exception: callers run in UI coroutines.
+        // A missing folder falls back to the app's files dir; PWD must then say so too.
+        val dir = cwd.takeIf { it.isDirectory } ?: paths.filesDir
         val process = try {
             ProcessBuilder(command)
-                .directory(cwd.takeIf { it.isDirectory } ?: paths.filesDir)
+                .directory(dir)
                 .redirectErrorStream(!forParsing)
                 .apply {
                     environment().run {
                         clear()
-                        putAll(RuntimeEnv.map(paths, cwd))
+                        putAll(RuntimeEnv.map(paths, dir))
                         putAll(extraEnv)
                     }
                 }
@@ -135,9 +137,19 @@ object CommandRunner {
             thread(isDaemon = true, name = "cmd-stderr") { runCatching { errors.readRaw(process.errorStream.bufferedReader()) } }
         } else null
 
-        val exited = withTimeoutOrNull(timeoutMs) { runInterruptible { process.waitFor() } } != null
-        // On Android, Process.destroy() sends SIGKILL (waitFor(timeout)/destroyForcibly need API 26).
-        if (!exited) process.destroy()
+        val pid = ProcessTree.pidOf(process)
+        var exited = false
+        try {
+            exited = withTimeoutOrNull(timeoutMs) { runInterruptible { process.waitFor() } } != null
+        } finally {
+            // Timed out, or the caller was cancelled (screen closed): stop the command and
+            // everything it started, not just the direct child, so nothing keeps running unseen.
+            if (!exited) {
+                if (pid > 0) ProcessTree.terminate(pid, graceMs = 1_000)
+                // On Android, Process.destroy() sends SIGKILL (destroyForcibly needs API 26).
+                process.destroy()
+            }
+        }
         reader.join(2_000)
         errorReader?.join(500)
         CommandResult(
@@ -157,6 +169,8 @@ object CommandRunner {
             private set
 
         fun appendLine(line: String) = synchronized(text) {
+            // Once full, stop: appending later (shorter) lines after a dropped one would leave gaps.
+            if (truncated) return@synchronized
             if (text.length + line.length < limit) text.appendLine(line) else truncated = true
         }
 

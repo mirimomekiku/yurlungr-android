@@ -30,18 +30,31 @@ object RuntimeBridge {
     var lastUrl by mutableStateOf<String?>(null)
         private set
 
+    /**
+     * Starts watching the inbox, or restarts the watch: after a base-system reinstall the inbox is
+     * a new directory, and a watch on the deleted one would never fire again.
+     */
     fun start(context: Context) {
         val app = context.applicationContext
         val paths = RuntimePaths(app)
-        if (observer != null || !paths.isBootstrapInstalled) return
+        observer?.stopWatching()
+        observer = null
+        if (!paths.isBootstrapInstalled) return
         val inbox = paths.inbox.apply { mkdirs() }
 
         @Suppress("DEPRECATION") // File-based constructor needs API 29; minSdk is 24.
-        observer = object : FileObserver(inbox.path, MOVED_TO or CLOSE_WRITE) {
+        val watcher = object : FileObserver(inbox.path, MOVED_TO or CLOSE_WRITE or DELETE_SELF or MOVE_SELF) {
             override fun onEvent(event: Int, name: String?) {
+                if (event and (DELETE_SELF or MOVE_SELF) != 0) {
+                    // The inbox went away (reinstall): forget this watch so the next start() makes a new one.
+                    main.post { if (observer === this) { stopWatching(); observer = null } }
+                    return
+                }
                 if (name != null && !name.startsWith(".")) consume(app, File(inbox, name))
             }
-        }.also { it.startWatching() }
+        }
+        observer = watcher
+        watcher.startWatching()
 
         // Requests written while the app wasn't running.
         inbox.listFiles { f -> !f.name.startsWith(".") }?.forEach { consume(app, it) }

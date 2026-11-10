@@ -34,10 +34,10 @@ object RuntimeEnv {
         put("ANDROID__BUILD_VERSION_SDK", Build.VERSION.SDK_INT.toString())
         put("YURLUNGR", "1")
         for (key in ANDROID_PASSTHROUGH) System.getenv(key)?.let { put(key, it) }
-        if (paths.androidSdk.isDirectory) {
-            put("ANDROID_HOME", paths.androidSdk.path)
-            put("ANDROID_SDK_ROOT", paths.androidSdk.path)
-        }
+        // Always, not only once the SDK exists: the shell left open after the SDK setup (started
+        // before the folder existed) must have it too. Without an SDK, builds fail the same way either way.
+        put("ANDROID_HOME", paths.androidSdk.path)
+        put("ANDROID_SDK_ROOT", paths.androidSdk.path)
         // termux-exec rewrites shebangs like #!/usr/bin/env to $PREFIX paths. `login` sets
         // this too; we set it so non-login commands (setup checks, scripts) get it as well.
         termuxExecLib(paths)?.let { put("LD_PRELOAD", it.path) }

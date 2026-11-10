@@ -35,32 +35,42 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
         val arch = RuntimePaths.termuxArch()
             ?: error("Unsupported ABI: ${Build.SUPPORTED_ABIS.joinToString()}")
 
-        progress.update("Finding latest bootstrap for $arch…", null)
-        val release = resolveLatest(arch)
-
-        val zip = File(context.cacheDir, "bootstrap-$arch.zip")
+        // Set for the whole install: until it completes, nothing may start from the prefix (it is
+        // about to be replaced), and a kill leaves a prefix that looks installed but isn't. An
+        // install that fails before touching the old prefix clears it again (unless it was
+        // already there from an earlier interrupted install).
+        val wasIncomplete = paths.bootstrapIncomplete.exists()
+        paths.bootstrapIncomplete.writeText("installing")
+        var prefixReplaced = false
         try {
-            val sha = download(release.url, zip) { done ->
-                progress.update("Downloading ${release.tag}", if (release.size > 0) done.toFloat() / release.size else null)
-            }
-            if (release.sha256 == null) {
-                // Older API responses have no asset digest; the download still came over TLS from GitHub.
-                Log.w(TAG, "No published SHA-256 for ${release.tag}; not verified beyond TLS (got $sha)")
-            } else if (!release.sha256.equals(sha, ignoreCase = true)) {
-                error("Checksum mismatch for ${release.tag}: expected ${release.sha256}, got $sha")
-            }
-            // From here until the end, a kill leaves a prefix that looks installed but isn't:
-            // the marker makes the app offer to install again instead of using it.
-            paths.bootstrapIncomplete.writeText(release.tag)
-            extract(zip, progress)
-        } finally {
-            zip.delete()
-        }
+            progress.update("Finding latest bootstrap for $arch…", null)
+            val release = resolveLatest(arch)
 
-        runSecondStage(progress)
-        RuntimeAssets.install(context, paths)
-        paths.bootstrapIncomplete.delete()
-        progress.update("Done", 1f)
+            val zip = File(context.cacheDir, "bootstrap-$arch.zip")
+            try {
+                val sha = download(release.url, zip) { done ->
+                    progress.update("Downloading ${release.tag}", if (release.size > 0) done.toFloat() / release.size else null)
+                }
+                if (release.sha256 == null) {
+                    // Older API responses have no asset digest; the download still came over TLS from GitHub.
+                    Log.w(TAG, "No published SHA-256 for ${release.tag}; not verified beyond TLS (got $sha)")
+                } else if (!release.sha256.equals(sha, ignoreCase = true)) {
+                    error("Checksum mismatch for ${release.tag}: expected ${release.sha256}, got $sha")
+                }
+                extract(zip, progress) { prefixReplaced = true }
+            } finally {
+                zip.delete()
+            }
+
+            runSecondStage(progress)
+            RuntimeAssets.install(context, paths)
+            paths.bootstrapIncomplete.delete()
+            progress.update("Done", 1f)
+        } catch (e: Throwable) {
+            // The old system is still intact (download or extract failed): it stays usable.
+            if (!prefixReplaced && !wasIncomplete) paths.bootstrapIncomplete.delete()
+            throw e
+        }
     }
 
     /** Newest apt-based bootstrap release in termux/termux-packages with an asset for [arch]. */
@@ -136,11 +146,33 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
             setRequestProperty("User-Agent", "yurlungr-android")
         }
 
-    private suspend fun extract(zip: File, progress: Progress) {
+    /**
+     * Extracts into a staging folder and only then swaps it in for the old prefix ([onReplaced]
+     * marks the point of no return), so a full disk or a bad archive leaves the old system as it
+     * was. Staging is removed on any failure.
+     */
+    private suspend fun extract(zip: File, progress: Progress, onReplaced: () -> Unit) {
         // Leftovers from an interrupted install are unusable; start clean.
         RuntimePaths.deleteNoFollow(paths.staging)
-        RuntimePaths.deleteNoFollow(paths.prefix)
         paths.staging.mkdirs()
+        try {
+            extractInto(zip, progress)
+        } catch (e: Throwable) {
+            RuntimePaths.deleteNoFollow(paths.staging)
+            throw e
+        }
+        progress.update("Replacing the base system", null)
+        onReplaced()
+        RuntimePaths.deleteNoFollow(paths.prefix)
+        if (!paths.staging.renameTo(paths.prefix)) {
+            RuntimePaths.deleteNoFollow(paths.staging)
+            error("Could not move staging dir into prefix")
+        }
+        paths.home.mkdirs()
+        paths.tmp.mkdirs()
+    }
+
+    private suspend fun extractInto(zip: File, progress: Progress) {
         val stagingRoot = paths.staging.canonicalPath + File.separator
         val symlinks = mutableListOf<Pair<String, String>>()
 
@@ -186,10 +218,6 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
             require((parent.canonicalPath + File.separator).startsWith(stagingRoot)) { "Symlink escapes prefix: $linkPath" }
             Os.symlink(linkTarget, linkPath)
         }
-
-        if (!paths.staging.renameTo(paths.prefix)) error("Could not move staging dir into prefix")
-        paths.home.mkdirs()
-        paths.tmp.mkdirs()
     }
 
     private fun isExecutable(name: String) =

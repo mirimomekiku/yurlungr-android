@@ -48,17 +48,17 @@ object Toolchain {
 
     val tools = listOf(
         Tool("git", "Git", "git --version", ToolSetup.DevTools, essential = true),
-        Tool("gh", "GitHub CLI", "gh --version | head -n1", ToolSetup.DevTools),
+        Tool("gh", "GitHub CLI", "gh --version | sed -n 1p", ToolSetup.DevTools),
         Tool("node", "Node.js", "node --version", ToolSetup.DevTools),
         Tool("npm", "npm", "npm --version", ToolSetup.DevTools),
-        Tool("rg", "ripgrep", "rg --version | head -n1", ToolSetup.DevTools),
+        Tool("rg", "ripgrep", "rg --version | sed -n 1p", ToolSetup.DevTools),
         Tool("gemini", "Gemini CLI", "gemini --version", ToolSetup.Agents, onlyIf = "bin/gemini"),
         Tool("codex", "Codex", "codex --version", ToolSetup.Agents, onlyIf = "bin/codex"),
         Tool("codex-acp", "Codex ACP adapter", "test -x \"\$(command -v codex-acp)\" && echo \"\$(command -v codex-acp)\"", ToolSetup.Agents, onlyIf = "bin/codex-acp"),
         Tool("claude", "Claude Code", "claude --version", ToolSetup.Agents, onlyIf = "libexec/yurlungr/claude-glibc"),
         Tool("claude-agent-acp", "Claude ACP adapter", "test -x \"\$(command -v claude-agent-acp)\" && echo \"\$(command -v claude-agent-acp)\"", ToolSetup.Agents, onlyIf = "bin/claude-agent-acp"),
         Tool("agy", "Antigravity", "agy --version", ToolSetup.Agents, onlyIf = "bin/agy"),
-        Tool("java", "Java (JDK)", "java -version 2>&1 | head -n1", ToolSetup.AndroidSdk, onlyIf = "bin/java"),
+        Tool("java", "Java (JDK)", "java -version 2>&1 | sed -n 1p", ToolSetup.AndroidSdk, onlyIf = "bin/java"),
         Tool("aapt2", "aapt2", "aapt2 version", ToolSetup.AndroidSdk, onlyIf = "bin/aapt2"),
     )
 
@@ -66,17 +66,29 @@ object Toolchain {
     const val PROBE_TIMEOUT_S = 20
 
     /**
-     * One script that probes [tools] in parallel and prints `id<TAB>exit<TAB>first line` per tool.
-     * 127 = not installed, 124 = timed out.
+     * How many probes run at once. Each is ~5 processes (subshells, timeout, bash, the tool), and
+     * Android 12+ kills apps' child processes beyond 32: all at once would cause false failures.
+     */
+    const val PROBE_PARALLEL = 4
+
+    /** Worst-case time for the whole probe script, for the caller's timeout. */
+    fun probeBudgetMs(count: Int): Long = ((count + PROBE_PARALLEL - 1) / PROBE_PARALLEL) * (PROBE_TIMEOUT_S + 12) * 1000L + 10_000
+
+    /**
+     * One script that probes [tools], [PROBE_PARALLEL] at a time, and prints
+     * `id<TAB>exit<TAB>first line` per tool. 127 = not installed, 124 = timed out.
      */
     fun probeScript(tools: List<Tool>): String = buildString {
-        appendLine("d=\$(mktemp -d \"\${TMPDIR:-\$PREFIX/tmp}/probe.XXXXXX\") || exit 70")
+        // Recreate the temp folder if it was deleted rather than failing every tool.
+        appendLine("t=\"\${TMPDIR:-\$PREFIX/tmp}\"; mkdir -p \"\$t\" 2>/dev/null")
+        appendLine("d=\$(mktemp -d \"\$t/probe.XXXXXX\") || exit 70")
         for ((i, tool) in tools.withIndex()) {
-            // Each probe in its own subshell; the outer timeout bounds a hung tool.
-            // pipefail: "gh --version | head -n1" must fail when gh is missing, not report head's 0.
-            append("( out=\$(timeout ").append(PROBE_TIMEOUT_S).append(" bash -o pipefail -c ").append(shellQuote(tool.probe))
+            // Each probe in its own subshell. -k: a tool that ignores SIGTERM is killed, so `wait` can't hang.
+            // pipefail: "gh --version | sed -n 1p" must fail when gh is missing, not report sed's 0.
+            append("( out=\$(timeout -k 5 ").append(PROBE_TIMEOUT_S).append(" bash -o pipefail -c ").append(shellQuote(tool.probe))
             append(" 2>&1 </dev/null); s=\$?; ")
             append("printf '%s\\t%s\\t%s\\n' ").append(shellQuote(tool.id)).append(" \"\$s\" \"\$(printf '%s' \"\$out\" | grep -m1 . | tr '\\t' ' ')\" > \"\$d/").append(i).append("\" ) &\n")
+            if ((i + 1) % PROBE_PARALLEL == 0) appendLine("wait")
         }
         appendLine("wait")
         appendLine("cat \"\$d\"/* 2>/dev/null; rm -rf \"\$d\"")

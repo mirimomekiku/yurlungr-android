@@ -27,6 +27,13 @@ object RuntimeAssets {
     @Volatile var lastError: String? = null
         private set
 
+    /**
+     * Parts of the last refresh that live in the user's home (agent notes, the MOTD hook) and
+     * couldn't be written. Never fatal: a read-only ~/.claude/CLAUDE.md must not block the runtime.
+     */
+    @Volatile var lastWarning: String? = null
+        private set
+
     /** Refreshes everything; records (and rethrows) a failure so System checks can offer a repair. */
     @Synchronized
     fun install(context: Context, paths: RuntimePaths) {
@@ -42,9 +49,12 @@ object RuntimeAssets {
     }
 
     private fun installAll(context: Context, paths: RuntimePaths) {
+        val warnings = mutableListOf<String>()
         paths.home.mkdirs()
         paths.shimBin.mkdirs()
         paths.inbox.mkdirs()
+        // Probes, setups and many tools need it; nothing else recreates it if it's deleted.
+        paths.tmp.mkdirs()
 
         for ((asset, dest) in scripts(paths)) {
             val text = context.assets.open(asset).bufferedReader(Charsets.UTF_8).use { it.readText() }
@@ -58,22 +68,29 @@ object RuntimeAssets {
         // Termux's supported dynamic MOTD hook. Never overwrite a user's own hook or static MOTD.
         val hook = File(paths.home, ".termux/motd.sh")
         if (!hook.exists() && runCatching { Os.lstat(hook.path); false }.getOrDefault(true)) {
-            hook.parentFile?.mkdirs()
-            writeExecutable(hook, motdLauncher)
+            runCatching {
+                hook.parentFile?.mkdirs()
+                writeExecutable(hook, motdLauncher)
+            }.onFailure { warnings += "terminal welcome hook (${it.message})" }
         }
 
         writeShim(paths, "yurlungr-open", openShim(paths))
         writeShim(paths, "yurlungr-install", installShim(paths))
         for (alias in OPEN_ALIASES) {
-            val link = File(paths.shimBin, alias)
-            link.delete()
-            Os.symlink("yurlungr-open", link.path)
+            // An alias the user replaced with something else (e.g. a folder) is left alone.
+            runCatching {
+                val link = File(paths.shimBin, alias)
+                link.delete()
+                Os.symlink("yurlungr-open", link.path)
+            }.onFailure { warnings += "$alias shim (${it.message})" }
         }
 
-        // Global instruction files each CLI reads at startup.
+        // Global instruction files each CLI reads at startup. Best effort: they're the user's files.
         for (file in listOf(".claude/CLAUDE.md", ".codex/AGENTS.md", ".gemini/GEMINI.md")) {
-            upsertManagedBlock(File(paths.home, file), agentGuide())
+            runCatching { upsertManagedBlock(File(paths.home, file), agentGuide()) }
+                .onFailure { warnings += "~/$file (${it.message})" }
         }
+        lastWarning = warnings.takeIf { it.isNotEmpty() }?.joinToString("; ")
     }
 
     private fun writeShim(paths: RuntimePaths, name: String, body: String) {
@@ -150,16 +167,22 @@ object RuntimeAssets {
     /** Replaces the managed block in [file] (or appends it), leaving the user's own text alone. */
     private fun upsertManagedBlock(file: File, block: String) {
         val current = if (file.isFile) file.readText() else ""
+        val updated = mergeManagedBlock(current, block)
+        if (updated != current) {
+            file.parentFile?.mkdirs()
+            // Through the editor's atomic save: an interrupted write must not truncate the user's notes.
+            dev.yurlungr.app.editor.FileSave.writeAtomically(file, updated)
+        }
+    }
+
+    /** [current] with the managed [block] replaced, or appended after the user's text. */
+    internal fun mergeManagedBlock(current: String, block: String): String {
         val start = current.indexOf(BEGIN)
         val end = current.indexOf(END)
-        val updated = if (start >= 0 && end > start) {
+        return if (start >= 0 && end > start) {
             current.substring(0, start) + block.trimEnd('\n') + current.substring(end + END.length)
         } else {
             (if (current.isBlank()) "" else current.trimEnd('\n') + "\n\n") + block
-        }
-        if (updated != current) {
-            file.parentFile?.mkdirs()
-            file.writeText(updated)
         }
     }
 }
