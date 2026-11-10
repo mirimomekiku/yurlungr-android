@@ -18,6 +18,8 @@ import dev.yurlungr.app.terminal.TerminalSessions
 class YurlungrApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        // Before any UI: the first frame must already use the chosen light/dark theme.
+        dev.yurlungr.app.ui.ThemePrefs.load(this)
         TerminalSessions.init(this)
         dev.yurlungr.app.web.WebRunSessions.init(this)
         ChatSessions.init(this)

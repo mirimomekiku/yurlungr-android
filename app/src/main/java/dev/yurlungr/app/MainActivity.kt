@@ -125,6 +125,18 @@ class MainActivity : ComponentActivity() {
         val nav = Navigator(if (RuntimePaths(this).isBootstrapInstalled) Route.NewChat else Route.Setup)
 
         setContent {
+            // Status and navigation bar icons follow the app's theme, not the phone's.
+            val dark = dev.yurlungr.app.ui.ThemePrefs.isDark()
+            androidx.compose.runtime.DisposableEffect(dark) {
+                enableEdgeToEdge(
+                    statusBarStyle = androidx.activity.SystemBarStyle.auto(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT) { dark },
+                    navigationBarStyle = androidx.activity.SystemBarStyle.auto(
+                        android.graphics.Color.argb(0xe6, 0xff, 0xff, 0xff),
+                        android.graphics.Color.argb(0x80, 0x1b, 0x1b, 0x1b),
+                    ) { dark },
+                )
+                onDispose {}
+            }
             AppTheme {
                 val context = LocalContext.current
                 val drawer = rememberDrawerState(DrawerValue.Closed)

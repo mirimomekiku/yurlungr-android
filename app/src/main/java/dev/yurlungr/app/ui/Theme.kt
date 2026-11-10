@@ -1,6 +1,5 @@
 package dev.yurlungr.app.ui
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -141,7 +140,8 @@ private val DarkColors = darkColorScheme(
 
 @Composable
 fun AppTheme(content: @Composable () -> Unit) {
-    val dark = isSystemInDarkTheme()
+    // The user's choice (Settings → Appearance), or the system's when following it.
+    val dark = ThemePrefs.isDark()
     MaterialTheme(colorScheme = if (dark) DarkColors else LightColors, typography = AppTypography, shapes = AppShapes) {
         CompositionLocalProvider(
             LocalStatusColors provides if (dark) DarkStatus else LightStatus,
