@@ -22,6 +22,14 @@ import java.util.concurrent.Executors
 object ChatSessions {
     val chats = mutableStateListOf<ChatSession>()
 
+    /** A chat waiting for the user's answer; shown as a sticky banner until resolved. */
+    data class Urgent(val chatId: String, val agentName: String, val what: String)
+
+    /** Open alerts, oldest first. Cleared as each is answered, finished or deleted. */
+    val urgent = mutableStateListOf<Urgent>()
+
+    private fun clearUrgent(id: String) = urgent.removeAll { it.chatId == id }
+
     /** True while an activity is visible; agent alerts only notify when it isn't. */
     @Volatile var appVisible = false
 
@@ -65,6 +73,7 @@ object ChatSessions {
     fun delete(context: Context, chat: ChatSession) {
         chat.close()
         chats.remove(chat)
+        clearUrgent(chat.id)
         onRegistryChanged?.invoke()
         NotificationManagerCompat.from(context).cancel(chat.id.hashCode())
         val id = chat.id
@@ -86,14 +95,18 @@ object ChatSessions {
         }
         onActiveChanged = { RuntimeService.refresh(appContext) }
         onTurnFinished = { c, summary ->
-            awaitingApproval -= c.id // replaced by this notification (same id)
-            notify(c, "${c.agent.displayName} finished", summary.ifBlank { "Turn complete" })
+            clearUrgent(c.id)
+            // A finished turn needs no answer: no popup, no sound. Drop a stale approval alert if one is up.
+            if (awaitingApproval.remove(c.id)) runCatching { NotificationManagerCompat.from(appContext).cancel(c.id.hashCode()) }
         }
         onNeedsAttention = { c, what ->
             awaitingApproval += c.id
+            clearUrgent(c.id)
+            urgent += Urgent(c.id, c.agent.displayName, what)
             notify(c, "${c.agent.displayName} needs you", what)
         }
         onAttentionResolved = { c ->
+            clearUrgent(c.id)
             if (awaitingApproval.remove(c.id)) {
                 runCatching { NotificationManagerCompat.from(appContext).cancel(c.id.hashCode()) }
             }
@@ -105,8 +118,14 @@ object ChatSessions {
 
     @SuppressLint("MissingPermission") // targetSdk 28: notification permission isn't a runtime grant
     private fun notify(chat: ChatSession, title: String, text: String) {
-        if (appVisible) return
         val context = appContext
+        if (appVisible) {
+            // In the app: the sticky banner shows it; add the sound so it isn't missed.
+            runCatching {
+                android.media.RingtoneManager.getRingtone(context, android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION))?.play()
+            }
+            return
+        }
         val open = PendingIntent.getActivity(
             context,
             chat.id.hashCode(),
@@ -115,7 +134,10 @@ object ChatSessions {
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val notification = NotificationCompat.Builder(context, YurlungrApp.CHANNEL_AGENTS)
+        val notification = NotificationCompat.Builder(context, YurlungrApp.CHANNEL_ATTENTION)
+            .setPriority(NotificationCompat.PRIORITY_HIGH) // heads-up on Android 7.x, before channels
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setSmallIcon(R.drawable.ic_stat_terminal)
             .setContentTitle(title)
             .setContentText(text.take(200))

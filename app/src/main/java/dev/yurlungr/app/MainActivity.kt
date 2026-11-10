@@ -177,6 +177,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     // Top-level places without their own back handling return to the new-chat screen.
                     BackHandler(enabled = nav.canGoBack) { nav.pop() }
+                    Box(Modifier.fillMaxSize()) {
                     CompositionLocalProvider(
                         dev.yurlungr.app.ui.LocalOpenFile provides { nav.push(Route.FileView(it.path)) },
                         LocalOpenDrawer provides { scope.launch { drawer.open() } },
@@ -189,6 +190,12 @@ class MainActivity : ComponentActivity() {
                         ) { route ->
                             Screen(route, nav, context)
                         }
+                    }
+                    dev.yurlungr.app.chat.UrgentBanner(
+                        viewing = (nav.current as? Route.Chat)?.id,
+                        onOpen = { nav.reset(Route.Chat(it)) },
+                        modifier = Modifier.align(Alignment.TopCenter).systemBarsPadding(),
+                    )
                     }
                     // Registered last, so it wins: back closes the sidebar first.
                     BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }

@@ -27,13 +27,16 @@ class YurlungrApp : Application() {
         RemoteHosts.init(this)
         RemoteServer.init(this)
         if (Build.VERSION.SDK_INT >= 26) {
+            getSystemService(NotificationManager::class.java).deleteNotificationChannel(CHANNEL_AGENTS)
             getSystemService(NotificationManager::class.java).createNotificationChannels(
                 listOf(
                     NotificationChannel(CHANNEL_RUNTIME, "Runtime", NotificationManager.IMPORTANCE_LOW).apply {
                         description = "Shown while chats or terminal sessions are running"
                     },
-                    NotificationChannel(CHANNEL_AGENTS, "Agent updates", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                        description = "An agent finished or needs your approval"
+                    // Heads-up with sound: only when an agent is waiting for the user's answer.
+                    NotificationChannel(CHANNEL_ATTENTION, "Needs your answer", NotificationManager.IMPORTANCE_HIGH).apply {
+                        description = "An agent is waiting for you to approve or answer"
+                        enableVibration(true)
                     },
                 ),
             )
@@ -56,6 +59,8 @@ class YurlungrApp : Application() {
 
     companion object {
         const val CHANNEL_RUNTIME = "runtime"
+        const val CHANNEL_ATTENTION = "attention"
+        /** Retired: finished-turn alerts no longer notify. Removed at startup so it doesn't linger in settings. */
         const val CHANNEL_AGENTS = "agents"
     }
 }
