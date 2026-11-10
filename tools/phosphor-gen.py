@@ -73,6 +73,14 @@ ICONS = {
     'LockSimple': ('regular', 'lock-simple'),
     'Laptop': ('regular', 'laptop'),
     'DeviceTablet': ('regular', 'device-tablet'),
+    'Sun': ('regular', 'sun'),
+    'Moon': ('regular', 'moon'),
+    'GitMerge': ('regular', 'git-merge'),
+    'CloudArrowDown': ('regular', 'cloud-arrow-down'),
+    'CloudArrowUp': ('regular', 'cloud-arrow-up'),
+    'ArrowsClockwise': ('regular', 'arrows-clockwise'),
+    'ArrowCounterClockwise': ('regular', 'arrow-counter-clockwise'),
+    'Eye': ('regular', 'eye'),
 }
 # Icons whose inner chambers must be holes: Compose's nonzero fill closes them, so a phone
 # renders as a solid block (bezels filled). Even-odd keeps the outline look.
