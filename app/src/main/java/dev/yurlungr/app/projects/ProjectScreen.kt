@@ -300,9 +300,11 @@ private fun Header(
                 PhIcon(Ph.CaretDown, "Switch project", size = 14.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                val others = remember(menu) {
-                    projectsDir.listFiles { f -> f.isDirectory && !f.name.startsWith(".") && f != dir }.orEmpty()
-                        .sortedByDescending { it.lastModified() }.take(8)
+                val others by androidx.compose.runtime.produceState(emptyList<File>(), menu) {
+                    value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        projectsDir.listFiles { f -> f.isDirectory && !f.name.startsWith(".") && f != dir }.orEmpty()
+                            .sortedByDescending { it.lastModified() }.take(8)
+                    }
                 }
                 for (p in others) {
                     DropdownMenuItem(
@@ -383,7 +385,11 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
 private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit, runInTerminal: (String, String) -> Unit,
     onOpenTerminal: () -> Unit, hasWeb: Boolean, onRunWeb: () -> Unit) {
     val context = LocalContext.current
-    val installed = remember { agentStatuses(RuntimePaths(context)).filter { it.installed }.map { it.agent } }
+    val installed by androidx.compose.runtime.produceState(emptyList<Agent>()) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            agentStatuses(RuntimePaths(context)).filter { it.installed }.map { it.agent }
+        }
+    }
     var agentMenu by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Box(Modifier.weight(2f)) {

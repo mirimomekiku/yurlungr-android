@@ -105,17 +105,22 @@ class Git(private val paths: RuntimePaths) {
     private suspend fun run(dir: File, vararg args: String, timeoutMs: Long = 60_000): CommandResult =
         CommandRunner.run(paths, listOf(git, "-C", dir.path, *args), cwd = dir, timeoutMs = timeoutMs, extraEnv = env)
 
+    /** For output that gets parsed: exact stdout, stderr kept apart (warnings can't corrupt it), large cap. */
+    private suspend fun runParsed(dir: File, vararg args: String, timeoutMs: Long = 60_000): CommandResult =
+        CommandRunner.run(paths, listOf(git, "-C", dir.path, *args), cwd = dir, timeoutMs = timeoutMs, extraEnv = env, forParsing = true)
+            .also { if (it.truncated) android.util.Log.w("Git", "Output of git ${args.firstOrNull()} was truncated") }
+
     suspend fun status(dir: File): GitStatus {
         if (!File(dir, ".git").exists()) return GitStatus.NotARepo
-        val r = run(dir, "status", "--porcelain=v1", "-b", "-z", "-uall")
+        val r = runParsed(dir, "status", "--porcelain=v1", "-b", "-z", "-uall")
         if (!r.ok) return GitStatus.NotARepo
-        val remotes = run(dir, "remote").output.lines().map { it.trim() }
+        val remotes = runParsed(dir, "remote").output.lines().map { it.trim() }
         return parseStatus(r.output).copy(hasOrigin = "origin" in remotes)
     }
 
     /** Ignored untracked paths, collapsing entire ignored directories to avoid scanning build caches. */
     suspend fun ignoredPaths(dir: File): Set<String>? {
-        val result = run(dir, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+        val result = runParsed(dir, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
         return if (result.ok) FileTreeGitState.parseIgnoredPaths(result.output) else null
     }
 
@@ -144,14 +149,14 @@ class Git(private val paths: RuntimePaths) {
     suspend fun log(dir: File, count: Int = 300, allBranches: Boolean = false): List<GitCommit> {
         val args = mutableListOf("log", "-n", count.toString(), "--topo-order", "--no-color", "--pretty=format:%H%x1f%P%x1f%an%x1f%ct%x1f%D%x1f%s%x1e")
         if (allBranches) args += "--all"
-        val r = run(dir, *args.toTypedArray())
+        val r = runParsed(dir, *args.toTypedArray())
         if (!r.ok) return emptyList()
         return parseLog(r.output)
     }
 
     /** Commits on HEAD that no remote has yet (empty when there's no remote). */
     suspend fun unpushed(dir: File): Set<String> {
-        val r = run(dir, "rev-list", "-n", "500", "HEAD", "--not", "--remotes")
+        val r = runParsed(dir, "rev-list", "-n", "500", "HEAD", "--not", "--remotes")
         return if (r.ok) r.output.lines().map { it.trim() }.filter { it.length == 40 }.toSet() else emptySet()
     }
 
@@ -161,12 +166,10 @@ class Git(private val paths: RuntimePaths) {
 
     /** Files changed by a commit, against its first parent (or everything, for the first commit). */
     suspend fun commitFiles(dir: File, hash: String): List<CommitFile> {
-        val r = run(dir, "diff-tree", "--root", "--no-commit-id", "-r", "-m", "--first-parent", "--name-status", hash)
+        // -z: paths verbatim (no quoting of non-ASCII, quotes or tabs), so they can be passed back to git.
+        val r = runParsed(dir, "diff-tree", "--root", "--no-commit-id", "-r", "-m", "--first-parent", "--name-status", "-z", hash)
         if (!r.ok) return emptyList()
-        return r.output.lines().mapNotNull { line ->
-            val parts = line.split('\t')
-            if (parts.size >= 2 && parts[0].isNotEmpty()) CommitFile(parts[0][0], parts.last()) else null
-        }.distinctBy { it.path }
+        return parseNameStatus(r.output)
     }
 
     suspend fun commitDiff(dir: File, hash: String, path: String): String =
@@ -209,7 +212,7 @@ class Git(private val paths: RuntimePaths) {
 
     /** Local branches, then remote ones without a local branch of the same name. */
     suspend fun branches(dir: File): List<GitBranch> {
-        val r = run(
+        val r = runParsed(
             dir, "for-each-ref", "--sort=-committerdate",
             "--format=%(refname)%1f%(refname:short)%1f%(upstream:short)%1f%(committerdate:relative)%1f%(HEAD)",
             "refs/heads", "refs/remotes",
@@ -228,7 +231,7 @@ class Git(private val paths: RuntimePaths) {
     suspend fun createBranch(dir: File, name: String): CommandResult = run(dir, "switch", "-c", name)
 
     suspend fun stashes(dir: File): List<GitStash> {
-        val r = run(dir, "stash", "list", "--format=%gd%x1f%s%x1f%cr")
+        val r = runParsed(dir, "stash", "list", "--format=%gd%x1f%s%x1f%cr")
         if (!r.ok) return emptyList()
         return r.output.lines().mapNotNull { line ->
             val f = line.split('\u001f')
@@ -292,7 +295,7 @@ class Git(private val paths: RuntimePaths) {
     /** "owner/name" (lowercase) of the origin remote if it's on GitHub; null otherwise. */
     suspend fun originSlug(dir: File): String? {
         if (!File(dir, ".git").exists()) return null
-        val r = run(dir, "remote", "get-url", "origin", timeoutMs = 10_000)
+        val r = runParsed(dir, "remote", "get-url", "origin", timeoutMs = 10_000)
         return if (r.ok) githubSlug(r.firstLine) else null
     }
 
@@ -312,6 +315,25 @@ class Git(private val paths: RuntimePaths) {
                 refs = f[4].split(", ").map { it.trim() }.filter { it.isNotEmpty() },
                 subject = f[5],
             )
+        }
+
+        /**
+         * Parses `diff-tree --name-status -z`: a status token, then the path (or old and new
+         * paths for renames/copies, "R100"/"C75"). Merges list a path once.
+         */
+        fun parseNameStatus(text: String): List<CommitFile> {
+            val tokens = text.split('\u0000')
+            val files = mutableListOf<CommitFile>()
+            var i = 0
+            while (i < tokens.size) {
+                val status = tokens[i].trim('\n')
+                if (status.isEmpty()) { i++; continue }
+                val twoPaths = status[0] == 'R' || status[0] == 'C'
+                val path = tokens.getOrNull(if (twoPaths) i + 2 else i + 1) ?: break
+                files += CommitFile(status[0], path)
+                i += if (twoPaths) 3 else 2
+            }
+            return files.distinctBy { it.path }
         }
 
         /** Parses `for-each-ref` output (fields split by \u001f) from [branches]. */
@@ -417,8 +439,8 @@ class Git(private val paths: RuntimePaths) {
                         val x = t[0]
                         val y = t[1]
                         val path = t.substring(3)
-                        // Renames/copies are followed by the original path as its own token.
-                        val orig = if (x == 'R' || x == 'C') tokens.getOrNull(++i) else null
+                        // Renames/copies (in either column) are followed by the original path as its own token.
+                        val orig = if (x == 'R' || x == 'C' || y == 'R' || y == 'C') tokens.getOrNull(++i) else null
                         changes += GitChange(path, x, y, orig)
                     }
                 }
