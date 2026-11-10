@@ -104,9 +104,11 @@ Then, on the phone:
   mode, the prompt stays queued and the chat shows an error. Existing chats expose the agent's supported
   modes in the mode picker; Antigravity's launch flag requires a new chat to change. Remote new chats
   have the same setup option.
-- Replies use CommonMark parsing with nested lists, headings, emphasis, quotes, tables, strikethrough,
-  fenced code and clickable links. Local file links open in the file viewer (Markdown previews or the
-  text editor); remote file links aren't opened on the client. Markdown previews also resolve relative links.
+- Replies use GitHub-flavoured CommonMark: headings, nested lists, task lists, quotes and `> [!NOTE]`
+  callouts, tables with column alignment, strikethrough, footnotes, bare URLs and clickable links.
+  Code blocks get syntax colours for their language, from the editor's lexer and theme, plus a
+  **Copy** button. Local file links open in the file viewer (Markdown previews or the text editor);
+  remote file links aren't opened on the client. Markdown previews also resolve relative links.
 - Chats are saved after every turn and restored as history after a restart; opening one restarts the
   agent and reloads its session (`session/load`).
 - Code: `chat/` (`ChatSession`, `ChatScreen`, `Composer`, `AcpExtras`, `Attachments`, `ChatStore`),
@@ -196,8 +198,21 @@ Then, on the phone:
   size (Settings → Editor).
 - *Format with Prettier* runs `npx prettier@3.3.3` in the file's folder (so project config applies) for
   JS/TS/JSON/CSS/SCSS/HTML/Markdown/YAML.
-- Markdown opens in a read-only rendered viewer with an Edit action; other text files open directly in
-  the editor. CRLF files are edited as LF and saved back as CRLF; files over 1 MB or binary files are not opened.
+- Markdown opens in a read-only rendered viewer with an **Edit** action; other text files open directly
+  in the editor. CRLF files are edited as LF and saved back as CRLF; files over 1 MB or binary files
+  are not opened. The viewer:
+  - renders lazily, so large documents stay smooth;
+  - has **Find** (a match count, with previous and next) and an **Outline** sheet of the headings;
+  - follows `#section` links and footnotes within the file, using GitHub-style heading anchors;
+  - adjusts the text size, shows the raw text, and offers **Copy all** and **Share**;
+  - reloads when the file changes on disk, and remembers where you were between Preview and Edit.
+- README-style HTML is shown safely:
+  - `<details>`/`<summary>` become collapsible sections, which open when a search matches inside them;
+  - `<img>`, `<br>`, `<kbd>`, `<sub>`/`<sup>` and similar tags work;
+  - script and style contents are dropped, and other tags are stripped, never executed;
+  - YAML front matter is shown as a small card.
+- Images in the project folder are shown downscaled. Remote images load only after a tap, so opening
+  a file doesn't contact their server. SVG images show their alternative text.
 - Code: `editor/`.
 
 </details>
