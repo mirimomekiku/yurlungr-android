@@ -79,8 +79,11 @@ terminal processes alive.
 ## Two phones
 
 `remote/` lets one phone use another's agents. The host runs a WebSocket server (Java-WebSocket, port
-8765, Tailscale address only unless local Wi-Fi is allowed) that authenticates clients with a pairing code
-compared in constant time. The protocol (`RemoteProtocol.kt`) sends a snapshot when a chat is opened, then
+8765, Tailscale address only unless local Wi-Fi is allowed, which still refuses peers outside Tailscale and
+private LAN ranges). Pairing (`RemotePairing.kt`) is a mutual HMAC challenge-response over the pairing code,
+so the code is never sent and the client also verifies the host; afterwards every frame is sealed with
+AES-256-GCM under per-direction keys derived from the code and both nonces (counter nonces reject replay
+and reordering). Unpaired connections get 10 s and 4 KB messages; frames are capped at 64 MB. The protocol (`RemoteProtocol.kt`) sends a snapshot when a chat is opened, then
 per-item updates and text deltas from `ChatListener` events. The client (`RemoteClient.kt`) mirrors chats
 as `ChatModel`s and reconnects with backoff unless the host disconnected it.
 

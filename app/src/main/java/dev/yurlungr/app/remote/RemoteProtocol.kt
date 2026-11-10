@@ -20,18 +20,38 @@ import kotlinx.serialization.json.putJsonArray
 
 /**
  * Messages between a host phone (runs the agents) and a client phone (shows them), as JSON
- * text frames over a WebSocket. Every message has a type field "t".
+ * over a WebSocket. Every message has a type field "t".
  *
- * client → host: hello{token,device} · open{chat} · close{chat} · create{req,agent,folder}
+ * Pairing (text frames, see [RemotePairing]): host challenge{v,nonce} → client hello{v,nonce,proof,device}
+ * → host auth{proof}. After that every message is a binary frame sealed by [SecureChannel]:
+ *
+ * client → host: open{chat} · close{chat} · create{req,agent,folder,skipPermissions}
  *                send{chat,text} · cancel · permission{chat,k,option} · mode{chat,mode}
  *                resume · restart · stop · delete (all {chat})
  * host → client: welcome{device,agents,chats} · chats{chats} · created{req,chat}
  *                snapshot{chat} · item{chat,item} · append{chat,k,text} · state{chat,…} · meta{chat,…}
  *                error{message}
+ *
+ * Version 1 sent the pairing code itself in hello{token}; hosts now refuse it.
  */
 object RemoteProtocol {
-    const val VERSION = 1
+    const val VERSION = 2
     const val DEFAULT_PORT = 8765
+    /** Largest frame either side accepts: a message with a few 10 MB attachments, base64-encoded. */
+    const val MAX_FRAME_BYTES = 64 * 1024 * 1024
+
+    private val FOLDER = Regex("[A-Za-z0-9._-]{1,64}")
+
+    /** A folder name under ~/projects: no separators, and not "." or ".." (which would leave it). */
+    fun isValidFolder(name: String): Boolean = FOLDER.matches(name) && name.trim('.').isNotEmpty()
+
+    /** Tailscale's 100.64.0.0/10 always; private LAN ranges only when local Wi-Fi is allowed. */
+    fun isAllowedPeer(address: String?, allowLan: Boolean): Boolean {
+        val o = address?.split('.')?.mapNotNull { it.toIntOrNull() }?.takeIf { it.size == 4 } ?: return false
+        val tailscale = o[0] == 100 && o[1] in 64..127
+        val lan = o[0] == 10 || (o[0] == 172 && o[1] in 16..31) || (o[0] == 192 && o[1] == 168)
+        return tailscale || (allowLan && lan)
+    }
 
     fun encodeState(state: ChatState): Pair<String, String?> = when (state) {
         ChatState.Saved -> "saved" to null

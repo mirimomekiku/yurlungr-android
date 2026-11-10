@@ -38,8 +38,10 @@ import java.io.File
 import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
-import java.security.MessageDigest
+import java.nio.ByteBuffer
+import java.security.GeneralSecurityException
 import java.security.SecureRandom
+import org.java_websocket.drafts.Draft_6455
 import kotlin.concurrent.thread
 
 /**
@@ -54,6 +56,15 @@ object RemoteServer : ChatListener {
     private const val CLOSE_BAD_CODE = 4001
     /** The host user disconnected this device; the client doesn't auto-reconnect. */
     private const val CLOSE_KICKED = 4002
+    /** The client speaks protocol 1 (sends the code in the clear): it needs updating. */
+    private const val CLOSE_OLD_VERSION = 4003
+    /** A sealed frame failed to open: tampered with, replayed or out of order. */
+    private const val CLOSE_TAMPERED = 4004
+    private const val CLOSE_POLICY = 1008
+    /** Unpaired connections get this long to pair. */
+    private const val PAIRING_TIMEOUT_MS = 10_000L
+    /** Nothing an unpaired client legitimately sends is bigger than this. */
+    private const val MAX_UNPAIRED_CHARS = 4 * 1024
 
     sealed interface Status {
         data object Off : Status
@@ -76,6 +87,8 @@ object RemoteServer : ChatListener {
     private val json = Json { ignoreUnknownKeys = true }
     private lateinit var appContext: Context
     private var server: Server? = null
+    /** The previous server, still releasing its port; the next one binds after it's done. */
+    private var stopping: Thread? = null
 
     val isRunning: Boolean get() = server != null
 
@@ -129,6 +142,8 @@ object RemoteServer : ChatListener {
         stop()
         val tailscale = tailscaleAddresses()
         val bindHost = when {
+            // Every interface; connections from outside Tailscale and private LAN ranges
+            // (e.g. mobile data, hotspot clients on public addresses) are refused in onOpen.
             allowLan -> "0.0.0.0"
             tailscale.isNotEmpty() -> tailscale.first()
             else -> {
@@ -143,7 +158,12 @@ object RemoteServer : ChatListener {
         }
         server = s
         status = Status.Running(shown, RemoteProtocol.DEFAULT_PORT)
-        s.start()
+        // Rebinding the port while the previous server is still closing fails with "address in use".
+        val previous = stopping
+        thread(name = "remote-start", isDaemon = true) {
+            previous?.join(3_000)
+            s.start() // binding errors arrive in onError
+        }
         ChatSessions.onRegistryChanged = {
             attachListeners()
             broadcastChats()
@@ -157,7 +177,7 @@ object RemoteServer : ChatListener {
         server = null
         ChatSessions.onRegistryChanged = null
         ChatSessions.chats.forEach { it.listeners -= this }
-        thread(name = "remote-stop", isDaemon = true) { runCatching { s.stop(1_000) } }
+        stopping = thread(name = "remote-stop", isDaemon = true) { runCatching { s.stop(1_000) } }
         status = Status.Off
         clientCount = 0
         devices = emptyList()
@@ -169,7 +189,11 @@ object RemoteServer : ChatListener {
     // ---- outgoing ----------------------------------------------------------------------
 
     private class Client {
-        var authed = false
+        /** Sent in the challenge; the client's proof must cover it. */
+        val hostNonce: ByteArray = RemotePairing.newNonce()
+        /** Set (on the main thread) once paired; read by the socket thread to open frames. */
+        @Volatile var channel: SecureChannel? = null
+        val authed: Boolean get() = channel != null
         var device: String? = null
         var since = 0L
         val subscriptions = mutableSetOf<String>()
@@ -177,8 +201,12 @@ object RemoteServer : ChatListener {
 
     private val WebSocket.client: Client? get() = getAttachment<Client>()
 
-    private fun send(conn: WebSocket, msg: JsonObject) {
-        runCatching { conn.send(msg.toString()) }
+    /** Sends to a paired device, sealed with its session keys. */
+    private fun send(conn: WebSocket, msg: JsonObject) = sendText(conn, msg.toString())
+
+    private fun sendText(conn: WebSocket, text: String) {
+        val channel = conn.client?.channel ?: return
+        runCatching { conn.send(channel.seal(text)) }
     }
 
     private fun refreshClients() {
@@ -198,7 +226,7 @@ object RemoteServer : ChatListener {
 
     private fun toSubscribers(chatId: String, msg: JsonObject) {
         val text = msg.toString()
-        authed().filter { chatId in it.client!!.subscriptions }.forEach { runCatching { it.send(text) } }
+        authed().filter { chatId in it.client!!.subscriptions }.forEach { sendText(it, text) }
     }
 
     private fun broadcastChats() {
@@ -237,31 +265,54 @@ object RemoteServer : ChatListener {
 
     // ---- incoming (main thread) ------------------------------------------------------------
 
+    /** The unpaired client's answer to our challenge (text frame). */
+    private fun handleHello(conn: WebSocket, text: String) {
+        val client = conn.client ?: return
+        if (client.authed || !conn.isOpen) return
+        val msg = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
+        if (msg?.str("t") != "hello") return reject(conn, CLOSE_POLICY, "Pair first")
+        if (msg.str("token") != null || (msg.long("v") ?: 1L) < RemoteProtocol.VERSION) {
+            return reject(conn, CLOSE_OLD_VERSION, "Update Yurlungr on this phone to connect to this host.")
+        }
+        val clientNonce = RemotePairing.fromHex(msg.str("nonce"), RemotePairing.NONCE_BYTES)
+            ?: return reject(conn, CLOSE_POLICY, "Bad hello")
+        val pairingCode = code
+        val expected = RemotePairing.clientProof(pairingCode, client.hostNonce, clientNonce)
+        if (!RemotePairing.matches(expected, RemotePairing.fromHex(msg.str("proof"), expected.size))) {
+            return reject(conn, CLOSE_BAD_CODE, "Wrong pairing code")
+        }
+        // Prove we know the code too, in the clear, before anything sealed follows.
+        runCatching {
+            conn.send(buildJsonObject {
+                put("t", "auth")
+                put("proof", RemotePairing.toHex(RemotePairing.hostProof(pairingCode, client.hostNonce, clientNonce)))
+            }.toString())
+        }
+        client.channel = RemotePairing.channel(pairingCode, client.hostNonce, clientNonce, isHost = true)
+        client.device = msg.str("device")?.take(80)
+        client.since = System.currentTimeMillis()
+        send(conn, buildJsonObject {
+            put("t", "welcome")
+            put("version", RemoteProtocol.VERSION)
+            put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
+            put("agents", JsonArray(RemoteProtocol.agents(agentStatuses(RuntimePaths(appContext)))))
+            put("chats", JsonArray(ChatSessions.chats.map(RemoteProtocol::summary)))
+        })
+        refreshClients()
+        Log.i(TAG, "Paired: ${client.device} from ${conn.remoteSocketAddress}")
+    }
+
+    private fun reject(conn: WebSocket, code: Int, reason: String) {
+        Log.w(TAG, "Rejected ${conn.remoteSocketAddress}: $reason")
+        conn.close(code, reason)
+    }
+
+    /** A message from a paired device (already opened from its sealed frame). */
     private fun handle(conn: WebSocket, text: String) {
         val msg = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
         val client = conn.client ?: return
+        if (!client.authed) return
         val type = msg.str("t")
-
-        if (!client.authed) {
-            if (type == "hello" && codeMatches(msg.str("token"))) {
-                client.authed = true
-                client.device = msg.str("device")
-                client.since = System.currentTimeMillis()
-                send(conn, buildJsonObject {
-                    put("t", "welcome")
-                    put("version", RemoteProtocol.VERSION)
-                    put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
-                    put("agents", JsonArray(RemoteProtocol.agents(agentStatuses(RuntimePaths(appContext)))))
-                    put("chats", JsonArray(ChatSessions.chats.map(RemoteProtocol::summary)))
-                })
-                refreshClients()
-                Log.i(TAG, "Paired: ${client.device} from ${conn.remoteSocketAddress}")
-            } else {
-                Log.w(TAG, "Rejected connection from ${conn.remoteSocketAddress}")
-                conn.close(CLOSE_BAD_CODE, "Wrong pairing code")
-            }
-            return
-        }
 
         val chat = ChatSessions.get(msg.str("chat"))
         when (type) {
@@ -273,7 +324,7 @@ object RemoteServer : ChatListener {
             "close" -> msg.str("chat")?.let { client.subscriptions -= it }.also { refreshClients() }
             "create" -> {
                 val agent = RemoteProtocol.agentOf(msg.str("agent")) ?: return
-                val folder = msg.str("folder").orEmpty().trim().takeIf { FOLDER.matches(it) } ?: "scratch"
+                val folder = msg.str("folder").orEmpty().trim().takeIf(RemoteProtocol::isValidFolder) ?: "scratch"
                 val created = ChatSessions.create(appContext, agent, File(RuntimePaths(appContext).projects, folder), skipPermissions = (msg["skipPermissions"] as? JsonPrimitive)?.booleanOrNull ?: false)
                 client.subscriptions += created.id
                 refreshClients()
@@ -304,17 +355,56 @@ object RemoteServer : ChatListener {
         }
     }
 
-    private class Server(address: InetSocketAddress) : WebSocketServer(address) {
+    private class Server(address: InetSocketAddress) :
+        WebSocketServer(address, listOf(Draft_6455(emptyList(), RemoteProtocol.MAX_FRAME_BYTES))) {
         override fun onOpen(conn: WebSocket, handshake: ClientHandshake) {
-            conn.setAttachment(Client())
+            val remote = conn.remoteSocketAddress?.address?.hostAddress
+            if (!RemoteProtocol.isAllowedPeer(remote, allowLan)) {
+                Log.w(TAG, "Refused connection from $remote (not Tailscale or local Wi-Fi)")
+                conn.close(CLOSE_POLICY, "Not allowed from this network")
+                return
+            }
+            val client = Client()
+            conn.setAttachment(client)
+            runCatching {
+                conn.send(buildJsonObject {
+                    put("t", "challenge")
+                    put("v", RemoteProtocol.VERSION)
+                    put("nonce", RemotePairing.toHex(client.hostNonce))
+                }.toString())
+            }
+            main.postDelayed({ if (!client.authed && conn.isOpen) reject(conn, CLOSE_POLICY, "Pairing timed out") }, PAIRING_TIMEOUT_MS)
         }
 
         override fun onClose(conn: WebSocket, code: Int, reason: String?, remote: Boolean) {
             main.post { refreshClients() }
         }
 
+        /** Text frames are only for pairing; once paired everything is sealed (binary). */
         override fun onMessage(conn: WebSocket, message: String) {
-            main.post { handle(conn, message) }
+            val client = conn.client ?: return
+            if (client.authed || message.length > MAX_UNPAIRED_CHARS) {
+                conn.close(CLOSE_POLICY, "Unexpected message")
+                return
+            }
+            main.post { handleHello(conn, message) }
+        }
+
+        /** Opened here, on this connection's socket thread, so frames are opened in order. */
+        override fun onMessage(conn: WebSocket, message: ByteBuffer) {
+            val channel = conn.client?.channel ?: run {
+                conn.close(CLOSE_POLICY, "Pair first")
+                return
+            }
+            val bytes = ByteArray(message.remaining()).also { message.get(it) }
+            val text = try {
+                channel.open(bytes)
+            } catch (e: GeneralSecurityException) {
+                Log.w(TAG, "Dropping ${conn.remoteSocketAddress}: frame failed authentication")
+                conn.close(CLOSE_TAMPERED, "Message failed authentication")
+                return
+            }
+            main.post { handle(conn, text) }
         }
 
         override fun onError(conn: WebSocket?, ex: Exception) {
@@ -344,14 +434,6 @@ object RemoteServer : ChatListener {
             if (bytes.isEmpty() || bytes.size > Attachments.MAX_BYTES) return@mapNotNull null
             Attachment(o.str("name") ?: "file", o.str("mime") ?: "application/octet-stream", bytes)
         }
-
-    private val FOLDER = Regex("[A-Za-z0-9._-]{1,64}")
-
-    private fun codeMatches(given: String?): Boolean {
-        val normalized = given?.uppercase()?.filter { it.isLetterOrDigit() } ?: return false
-        val expected = code.filter { it.isLetterOrDigit() }
-        return MessageDigest.isEqual(normalized.toByteArray(), expected.toByteArray())
-    }
 
     private fun newCode(): String {
         // Crockford-style alphabet: no 0/O or 1/I/L confusion when typing it on another phone.

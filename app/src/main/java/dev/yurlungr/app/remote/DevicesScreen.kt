@@ -478,7 +478,7 @@ private fun ShareGroup() {
         }
         GroupRow(
             "Also allow local Wi-Fi",
-            subtitle = "Without Tailscale. Unencrypted on the network; the code still protects it.",
+            subtitle = "Without Tailscale, on private networks only. Traffic is encrypted and checked with the pairing code.",
             trailing = { Switch(checked = RemoteServer.allowLan, onCheckedChange = { RemoteServer.allowLocalWifi(it) }) },
         )
         if (context.packageManager.getLaunchIntentForPackage("com.tailscale.ipn") == null) {

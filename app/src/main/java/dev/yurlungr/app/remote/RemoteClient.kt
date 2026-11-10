@@ -24,8 +24,11 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import org.java_websocket.client.WebSocketClient
+import org.java_websocket.drafts.Draft_6455
 import org.java_websocket.handshake.ServerHandshake
 import java.net.URI
+import java.nio.ByteBuffer
+import java.security.GeneralSecurityException
 import java.util.UUID
 
 /** A phone this one can connect to. [address] is a Tailscale IP / MagicDNS name, optionally with :port. */
@@ -108,7 +111,9 @@ class RemoteConnection(val host: RemoteHost) {
     private val openChats = HashMap<String, RemoteChat>()
     private val pendingCreates = HashMap<Long, (RemoteChat) -> Unit>()
     private var nextReq = 1L
-    private var socket: WebSocketClient? = null
+    @Volatile private var socket: WebSocketClient? = null
+    /** The current socket's sealed channel, once the host proved it knows the code. */
+    @Volatile private var channel: SecureChannel? = null
     private var wanted = false
     private var retryDelayMs = 2_000L
 
@@ -116,21 +121,63 @@ class RemoteConnection(val host: RemoteHost) {
         wanted = true
         if (socket != null) return
         status = Status.Connecting
+        channel = null
         val uri = runCatching { URI("ws://${withPort(host.address)}/") }.getOrElse {
             status = Status.Failed("Invalid address: ${host.address}", retrying = false)
             return
         }
-        socket = object : WebSocketClient(uri) {
+        socket = object : WebSocketClient(uri, Draft_6455(emptyList(), RemoteProtocol.MAX_FRAME_BYTES)) {
+            // Pairing runs on this socket's thread, so the channel exists before any sealed frame is read.
+            private var hostNonce: ByteArray? = null
+            private var clientNonce: ByteArray? = null
+
             override fun onOpen(handshake: ServerHandshake) {
-                send(buildJsonObject {
-                    put("t", "hello")
-                    put("token", host.code)
-                    put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
-                }.toString())
+                // The host speaks first (challenge). A host that stays silent runs an older version.
+                main.postDelayed({
+                    if (this@RemoteConnection.socket === this && this@RemoteConnection.channel == null && isOpen) close(CLOSE_NO_CHALLENGE, "")
+                }, HANDSHAKE_TIMEOUT_MS)
             }
 
             override fun onMessage(message: String) {
+                if (this@RemoteConnection.socket !== this) return
                 val msg = runCatching { json.parseToJsonElement(message).jsonObject }.getOrNull() ?: return
+                when (msg.str("t")) {
+                    "challenge" -> {
+                        val nonce = RemotePairing.fromHex(msg.str("nonce"), RemotePairing.NONCE_BYTES)
+                        if (nonce == null || hostNonce != null) return close(CLOSE_POLICY, "Bad challenge")
+                        val mine = RemotePairing.newNonce()
+                        hostNonce = nonce
+                        clientNonce = mine
+                        send(buildJsonObject {
+                            put("t", "hello")
+                            put("v", RemoteProtocol.VERSION)
+                            put("nonce", RemotePairing.toHex(mine))
+                            put("proof", RemotePairing.toHex(RemotePairing.clientProof(this@RemoteConnection.host.code, nonce, mine)))
+                            put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
+                        }.toString())
+                    }
+                    "auth" -> {
+                        val hn = hostNonce ?: return close(CLOSE_POLICY, "Unexpected auth")
+                        val cn = clientNonce ?: return close(CLOSE_POLICY, "Unexpected auth")
+                        val expected = RemotePairing.hostProof(this@RemoteConnection.host.code, hn, cn)
+                        if (this@RemoteConnection.channel != null || !RemotePairing.matches(expected, RemotePairing.fromHex(msg.str("proof"), expected.size))) {
+                            return close(CLOSE_BAD_HOST, "")
+                        }
+                        this@RemoteConnection.channel = RemotePairing.channel(this@RemoteConnection.host.code, hn, cn, isHost = false)
+                    }
+                    // Anything else in the clear is ignored: once paired, the host only sends sealed frames.
+                }
+            }
+
+            override fun onMessage(bytes: ByteBuffer) {
+                if (this@RemoteConnection.socket !== this) return
+                val ch = this@RemoteConnection.channel ?: return close(CLOSE_POLICY, "Not paired")
+                val text = try {
+                    ch.open(ByteArray(bytes.remaining()).also { bytes.get(it) })
+                } catch (e: GeneralSecurityException) {
+                    return close(CLOSE_TAMPERED, "")
+                }
+                val msg = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
                 main.post { handle(msg) }
             }
 
@@ -152,11 +199,31 @@ class RemoteConnection(val host: RemoteHost) {
         main.removeCallbacksAndMessages(null)
         socket?.close()
         socket = null
+        channel = null
     }
 
     private fun onDisconnected(which: WebSocketClient, code: Int, reason: String?) {
         if (socket !== which) return
         socket = null
+        channel = null
+        if (code == CLOSE_BAD_HOST) {
+            wanted = false
+            status = Status.Failed(
+                "This address answered but couldn't prove it has the pairing code. Check the address and code; on shared Wi-Fi, someone may be impersonating the host.",
+                retrying = false,
+            )
+            return
+        }
+        if (code == CLOSE_OLD_VERSION) {
+            wanted = false
+            status = Status.Failed(reason?.takeIf { it.isNotBlank() } ?: "Update Yurlungr on this phone to connect.", retrying = false)
+            return
+        }
+        if (code == CLOSE_NO_CHALLENGE) {
+            status = Status.Failed("The host didn't start pairing. It may run an older Yurlungr: update both phones.", retrying = wanted)
+            if (wanted) scheduleRetry()
+            return
+        }
         if (code == CLOSE_BAD_CODE) {
             wanted = false
             status = Status.Failed("The host rejected the pairing code. Check the code shown on the host.", retrying = false)
@@ -169,14 +236,19 @@ class RemoteConnection(val host: RemoteHost) {
         }
         val detail = reason?.takeIf { it.isNotBlank() } ?: "Can't reach ${host.address}. Is Tailscale on and sharing enabled on the host?"
         status = Status.Failed(detail, retrying = wanted)
-        if (wanted) {
-            main.postDelayed({ if (wanted) connect() }, retryDelayMs)
-            retryDelayMs = (retryDelayMs * 2).coerceAtMost(30_000)
-        }
+        if (wanted) scheduleRetry()
     }
 
+    private fun scheduleRetry() {
+        main.postDelayed({ if (wanted) connect() }, retryDelayMs)
+        retryDelayMs = (retryDelayMs * 2).coerceAtMost(30_000)
+    }
+
+    /** Sealed for the host; dropped until paired. */
     private fun send(msg: JsonObject) {
-        runCatching { socket?.takeIf { it.isOpen }?.send(msg.toString()) }
+        val s = socket?.takeIf { it.isOpen } ?: return
+        val ch = channel ?: return
+        runCatching { s.send(ch.seal(msg.toString())) }
     }
 
     /** The mirrored chat, subscribed to updates. */
@@ -249,6 +321,14 @@ class RemoteConnection(val host: RemoteHost) {
         private const val TAG = "RemoteConnection"
         private const val CLOSE_BAD_CODE = 4001
         private const val CLOSE_KICKED = 4002
+        private const val CLOSE_OLD_VERSION = 4003
+        private const val CLOSE_TAMPERED = 4004
+        /** Local: the host failed its proof. */
+        private const val CLOSE_BAD_HOST = 4005
+        /** Local: no challenge arrived in time. */
+        private const val CLOSE_NO_CHALLENGE = 4006
+        private const val CLOSE_POLICY = 1008
+        private const val HANDSHAKE_TIMEOUT_MS = 10_000L
 
         fun withPort(address: String): String {
             val a = address.trim().removePrefix("ws://").trimEnd('/')

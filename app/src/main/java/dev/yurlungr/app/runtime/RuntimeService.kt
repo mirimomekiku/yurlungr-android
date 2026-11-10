@@ -34,6 +34,9 @@ class RuntimeService : Service() {
         when (intent?.action) {
             ACTION_EXIT -> {
                 ChatSessions.stopAll()
+                // Otherwise a paired phone could start agents again right after Exit. Sharing stays
+                // enabled in settings, so it comes back when the app is next opened.
+                dev.yurlungr.app.remote.RemoteServer.stop()
                 dev.yurlungr.app.web.WebRunSessions.stopAll(this)
                 TerminalSessions.closeAll(this)
                 return START_NOT_STICKY

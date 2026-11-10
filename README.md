@@ -216,8 +216,10 @@ credential-file presence; Antigravity's is not documented, so it shows as *Insta
 <summary><b>Devices (two phones)</b></summary>
 
 - **Share this phone**: a WebSocket server on port 8765, off by default, bound to the Tailscale address
-  (100.64.0.0/10) unless *Also allow local Wi-Fi* is on. Clients must send the pairing code first
-  (compared in constant time); *New* code disconnects everyone; a single device can be disconnected.
+  (100.64.0.0/10) unless *Also allow local Wi-Fi* is on (private network ranges only). Both phones prove
+  they know the pairing code without sending it, and all traffic is then encrypted and authenticated with
+  keys derived from it. *New* code disconnects everyone; a single device can be disconnected. Phones on
+  Yurlungr 0.0.2 or older can't pair with newer ones: update both.
 - **Connect to one**: enter the other phone's address and code; its chats appear and work like local ones.
   A client needs no runtime of its own.
 - The Devices screen is a live connection map of this phone, the phones using it and saved hosts.
