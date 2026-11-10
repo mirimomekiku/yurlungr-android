@@ -153,6 +153,21 @@ Then, on the phone:
   must use `127.0.0.1` and the supplied `$PORT`; project-specific native dependencies can still fail on
   Android and their errors remain in Logs. Static serving blocks dotfiles and paths outside the app folder.
 - **Terminal** from a project offers the terminals already open there, or a new one.
+- **Git** (next to Terminal) opens one-tap routines:
+  - **Get latest changes:** saves your uncommitted work, pulls (merging if the branches diverged), then puts your work back (stash → pull → stash pop).
+  - **Sync:** the same, then pushes.
+  - **Push** or **Publish branch.**
+  - **Undo last commit:** only while it's unpushed; keeps the changes.
+  - **Branches & stashes.**
+
+  Each routine stops at the first problem and says where things were left. Your work is never discarded.
+- **With AI** actions do the same work with an agent of your choice, in a new chat:
+  - **Get latest changes & fix conflicts:** runs the routine and, if a pull or the stash pop conflicts, the agent resolves the conflicts. It finishes the merge, or leaves your restored work uncommitted.
+  - **Fix merge conflicts.**
+  - **Write commit message & commit.**
+  - **Review my changes.**
+
+  The agents never push.
 - Git runs with `GIT_TERMINAL_PROMPT=0`, so a missing login fails fast instead of hanging.
 - Code: `projects/` (`Git`, `GitGraph`, `ProjectScreen`, `ProjectsScreen`, `HistoryView`, `BranchSheet`).
 
@@ -231,9 +246,12 @@ credential-file presence; Antigravity's is not documented, so it shows as *Insta
 <summary><b>Settings & system checks</b></summary>
 
 - Settings is a grouped list: System runtime (opens System checks), Coding agents, Keep agents running
-  (notifications, battery, background process limit), Editor, GitHub and About (version, licences).
+  (notifications, battery, background process limit), Appearance, Editor, GitHub and About (version,
+  licences). Details and choices open as bottom sheets.
+- **Appearance:** System / Light / Dark. *System* follows the phone, and the status and navigation bars
+  follow the app's choice.
 - System checks (also the first-run screen) groups Phone · Linux runtime · Developer tools · Tools ·
-  Background; areas that pass fold away and problems show their fix. Opening it runs every tool (git,
+  Background; areas that pass fold away and problems show their fix. Pull down to run them again. Opening it runs every tool (git,
   gh, Node, the agents, the JDK) to check that it works. If the shell or package manager is broken it
   offers to reinstall the base system, keeping your home folder. A failed setup run shows its failed
   steps and a link to its log.

@@ -141,6 +141,7 @@ fun ProjectScreen(
     val isAndroid = capabilities?.android ?: false
     var showWebRun by remember(dir.path) { mutableStateOf(false) }
     var showBranches by remember { mutableStateOf(false) }
+    var showGitActions by remember { mutableStateOf(false) }
 
     LaunchedEffect(dir, refreshTick, reload) {
         launch { status = git.status(dir) }
@@ -247,7 +248,27 @@ fun ProjectScreen(
             }
         }
         ActionBar(dir, isAndroid, onNewChat, runInTerminal, onOpenTerminal,
-            hasWeb = capabilities?.web?.isNotEmpty() == true, onRunWeb = { showWebRun = true })
+            hasWeb = capabilities?.web?.isNotEmpty() == true, onRunWeb = { showWebRun = true },
+            hasGit = status?.isRepo == true, onGitActions = { showGitActions = true })
+    }
+
+    if (showGitActions) status?.takeIf { it.isRepo }?.let { s ->
+        val agents by androidx.compose.runtime.produceState(emptyList<Agent>()) {
+            value = withContext(Dispatchers.IO) { agentStatuses(paths).filter { it.installed }.map { it.agent } }
+        }
+        GitActionsSheet(
+            dir, git, s, agents,
+            onDismiss = { showGitActions = false },
+            onChanged = { reload++ },
+            onAgentTask = { agent, prompt ->
+                // A new chat in this project; the prompt goes out as soon as the agent is ready.
+                showGitActions = false
+                val chat = dev.yurlungr.app.chat.ChatSessions.create(context, agent, dir)
+                chat.queue(prompt, emptyList())
+                onOpenChat(chat)
+            },
+            onOpenBranches = { showGitActions = false; showBranches = true },
+        )
     }
 
     if (showWebRun) capabilities?.web?.takeIf { it.isNotEmpty() }?.let { webProjects ->
@@ -397,7 +418,7 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
 /** Chat (pick an agent) · Build & install (Android projects) · Terminal. */
 @Composable
 private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit, runInTerminal: (String, String) -> Unit,
-    onOpenTerminal: () -> Unit, hasWeb: Boolean, onRunWeb: () -> Unit) {
+    onOpenTerminal: () -> Unit, hasWeb: Boolean, onRunWeb: () -> Unit, hasGit: Boolean, onGitActions: () -> Unit) {
     val context = LocalContext.current
     val installed by androidx.compose.runtime.produceState(emptyList<Agent>()) {
         value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -434,6 +455,10 @@ private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit,
         }
         if (hasWeb) {
             ActionTile("Run", Ph.Globe, Modifier.weight(1f), tile = AppColors.tiles.lime, onClick = onRunWeb)
+        }
+        if (hasGit) {
+            // Next to Terminal: one-tap routines (get latest, sync, push…) and AI-assisted ones.
+            ActionTile("Git", Ph.GitBranch, Modifier.weight(1f), tile = AppColors.tiles.lilac, onClick = onGitActions)
         }
         Box(Modifier.weight(1f)) {
             var terminalMenu by remember { mutableStateOf(false) }

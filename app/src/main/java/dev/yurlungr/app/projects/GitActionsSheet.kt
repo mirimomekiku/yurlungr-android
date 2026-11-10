@@ -1,0 +1,299 @@
+package dev.yurlungr.app.projects
+
+import android.content.Context
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.core.content.edit
+import dev.yurlungr.app.agents.Agent
+import dev.yurlungr.app.ui.AppColors
+import dev.yurlungr.app.ui.AppSheet
+import dev.yurlungr.app.ui.Chip
+import dev.yurlungr.app.ui.FlowBar
+import dev.yurlungr.app.ui.Ph
+import dev.yurlungr.app.ui.PhIcon
+import dev.yurlungr.app.ui.SectionLabel
+import dev.yurlungr.app.ui.Tile
+import kotlinx.coroutines.launch
+import java.io.File
+
+/** Which agent the AI actions use; the last one picked is remembered. */
+private object GitAiAgent {
+    private const val PREFS = "git_actions"
+
+    fun get(context: Context, installed: List<Agent>): Agent? {
+        val saved = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("agent", null)
+        return installed.firstOrNull { it.name == saved } ?: installed.firstOrNull()
+    }
+
+    fun set(context: Context, agent: Agent) =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { putString("agent", agent.name) }
+}
+
+/**
+ * Git routines for the project, one tap each: get the latest changes (stash → pull → stash pop),
+ * sync, push, undo the last commit; and the same with an agent finishing the job (resolving
+ * merge conflicts, writing commit messages, reviewing changes).
+ */
+@Composable
+fun GitActionsSheet(
+    dir: File,
+    git: Git,
+    status: GitStatus,
+    installedAgents: List<Agent>,
+    onDismiss: () -> Unit,
+    /** Something changed the repository: refresh the project's status. */
+    onChanged: () -> Unit,
+    /** Starts a chat in this project with [agent] and sends [prompt] as soon as it's ready. */
+    onAgentTask: (agent: Agent, prompt: String) -> Unit,
+    onOpenBranches: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val routines = remember(git) { GitRoutines(git) }
+    var agent by remember { mutableStateOf(GitAiAgent.get(context, installedAgents)) }
+    var running by remember { mutableStateOf<String?>(null) }
+    val steps = remember { mutableStateListOf<String>() }
+    var outcome by remember { mutableStateOf<RoutineOutcome?>(null) }
+
+    val conflicts = status.conflicts
+    val hasChanges = status.changes.isNotEmpty()
+    val canPull = status.hasOrigin && status.upstream != null
+
+    fun run(label: String, aiFollowUp: Boolean = false, block: suspend ((String) -> Unit) -> RoutineOutcome) {
+        if (running != null) return
+        running = label
+        steps.clear()
+        outcome = null
+        scope.launch {
+            val result = try {
+                block { step -> steps += step }
+            } finally {
+                running = null
+                onChanged()
+            }
+            outcome = result
+            // The AI variant goes straight on to the agent when there's something to resolve.
+            val a = agent
+            if (aiFollowUp && result is RoutineOutcome.Conflicts && a != null) {
+                onAgentTask(a, GitRoutines.conflictPrompt(result, status.branch, status.upstream))
+            }
+        }
+    }
+
+    fun ask(prompt: String) {
+        val a = agent ?: return
+        onAgentTask(a, prompt)
+    }
+
+    AppSheet(
+        "Git actions",
+        onDismiss = onDismiss,
+        subtitle = listOfNotNull(
+            status.branch?.let { "On $it" },
+            status.upstream?.let { "tracking $it" },
+            if (hasChanges) "${status.changes.size} uncommitted" else "clean",
+            if (status.ahead > 0) "${status.ahead} to push" else null,
+            if (status.behind > 0) "${status.behind} to pull" else null,
+        ).joinToString(" · "),
+        icon = Ph.GitBranch,
+        tile = AppColors.tiles.lilac,
+        dismissable = running == null,
+    ) {
+        // Progress and result of the last routine.
+        if (running != null || outcome != null) {
+            RoutineCard(running, steps, outcome, agent, onFixWithAi = { c ->
+                agent?.let { onAgentTask(it, GitRoutines.conflictPrompt(c, status.branch, status.upstream)) }
+            })
+        }
+
+        if (conflicts.isNotEmpty()) {
+            Text(
+                "${conflicts.size} file${if (conflicts.size == 1) " has" else "s have"} unresolved conflicts: ${conflicts.take(3).joinToString()}${if (conflicts.size > 3) "…" else ""}",
+                style = MaterialTheme.typography.bodySmall,
+                color = AppColors.status.onWarningContainer,
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(AppColors.status.warningContainer).padding(12.dp),
+            )
+        }
+
+        SectionLabel("Quick actions")
+        ActionRow(
+            Ph.CloudArrowDown, "Get latest changes",
+            if (hasChanges) "Saves your changes, pulls, then puts them back (stash → pull → stash pop)" else "Pulls new commits from ${status.upstream ?: "the remote"}",
+            enabled = running == null && canPull && conflicts.isEmpty(), tile = AppColors.tiles.sky,
+        ) { run("Getting the latest changes") { routines.getLatest(dir, it) } }
+        ActionRow(
+            Ph.ArrowsClockwise, "Sync",
+            "Gets the latest changes, then pushes your commits",
+            enabled = running == null && canPull && conflicts.isEmpty(), tile = AppColors.tiles.sky,
+        ) { run("Syncing") { routines.sync(dir, it) } }
+        if (status.ahead > 0 || (status.hasOrigin && status.upstream == null)) {
+            ActionRow(
+                Ph.CloudArrowUp, if (status.upstream == null) "Publish branch" else "Push ${status.ahead} commit${if (status.ahead == 1) "" else "s"}",
+                if (status.upstream == null) "Sends this branch to the remote for the first time" else "Sends your commits to ${status.upstream}",
+                enabled = running == null && conflicts.isEmpty(), tile = AppColors.tiles.lime,
+            ) {
+                run("Pushing") { step ->
+                    step("Sending your commits (git push)…")
+                    val r = git.push(dir, status)
+                    if (r.ok) RoutineOutcome.Done("Pushed.") else RoutineOutcome.Failed(r.describe("git push"))
+                }
+            }
+        }
+        if (!status.unborn) {
+            ActionRow(
+                Ph.ArrowCounterClockwise, "Undo last commit",
+                "Takes back the last commit (if not pushed) and keeps its changes",
+                enabled = running == null && conflicts.isEmpty(), tile = AppColors.tiles.peach,
+            ) { run("Undoing the last commit") { routines.undoLastCommit(dir) } }
+        }
+        ActionRow(Ph.GitBranch, "Branches & stashes", "Switch or create branches, restore saved changes", enabled = running == null) {
+            onOpenBranches()
+        }
+
+        SectionLabel("With AI")
+        if (installedAgents.isEmpty()) {
+            Text("Install an agent (☰ → Agents) to have it resolve conflicts, write commit messages or review changes.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            // Which agent does the work.
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (a in installedAgents) {
+                    Chip(a.displayName, onClick = { agent = a; GitAiAgent.set(context, a) }, selected = a == agent)
+                }
+            }
+            ActionRow(
+                Ph.GitMerge, "Get latest changes & fix conflicts",
+                "Same as Get latest changes; if anything conflicts, ${agent?.displayName ?: "the agent"} resolves it in a new chat",
+                enabled = running == null && canPull && conflicts.isEmpty(), tile = AppColors.tiles.lilac, ai = true,
+            ) { run("Getting the latest changes", aiFollowUp = true) { routines.getLatest(dir, it) } }
+            if (conflicts.isNotEmpty()) {
+                ActionRow(
+                    Ph.MagicWand, "Fix merge conflicts",
+                    "${agent?.displayName ?: "The agent"} resolves the ${conflicts.size} conflicted file${if (conflicts.size == 1) "" else "s"}",
+                    enabled = running == null, tile = AppColors.tiles.lilac, ai = true,
+                ) { ask(GitRoutines.fixConflictsPrompt(conflicts, git.mergeInProgress(dir))) }
+            }
+            ActionRow(
+                Ph.GitCommit, "Write commit message & commit",
+                "Reads your changes and commits them with a clear message (doesn't push)",
+                enabled = running == null && hasChanges && conflicts.isEmpty(), tile = AppColors.tiles.lilac, ai = true,
+            ) { ask(GitRoutines.commitPrompt()) }
+            ActionRow(
+                Ph.Eye, "Review my changes",
+                "Looks for bugs and problems in your uncommitted changes, without editing",
+                enabled = running == null && hasChanges, tile = AppColors.tiles.lilac, ai = true,
+            ) { ask(GitRoutines.reviewPrompt()) }
+        }
+    }
+}
+
+@Composable
+private fun RoutineCard(
+    running: String?,
+    steps: List<String>,
+    outcome: RoutineOutcome?,
+    agent: Agent?,
+    onFixWithAi: (RoutineOutcome.Conflicts) -> Unit,
+) {
+    val tones = AppColors.status
+    val (bg, fg) = when (outcome) {
+        null -> MaterialTheme.colorScheme.surfaceContainerHigh to MaterialTheme.colorScheme.onSurface
+        is RoutineOutcome.Done -> tones.successContainer to tones.onSuccessContainer
+        is RoutineOutcome.Conflicts -> tones.warningContainer to tones.onWarningContainer
+        is RoutineOutcome.Failed -> MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
+    }
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(bg).padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (running != null) {
+            Text(running, style = MaterialTheme.typography.titleSmall, color = fg)
+            FlowBar(Modifier.fillMaxWidth())
+            steps.lastOrNull()?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = fg) }
+        } else if (outcome != null) {
+            Text(outcome.message, style = MaterialTheme.typography.bodyMedium, color = fg, maxLines = 8, overflow = TextOverflow.Ellipsis)
+            if (outcome is RoutineOutcome.Conflicts) {
+                Text(outcome.files.take(5).joinToString("\n") { "• $it" } + if (outcome.files.size > 5) "\n• …" else "",
+                    style = MaterialTheme.typography.bodySmall, color = fg)
+                if (agent != null) {
+                    Button(onClick = { onFixWithAi(outcome) }) {
+                        PhIcon(Ph.MagicWand, null, size = 16.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Fix with ${agent.displayName}")
+                    }
+                } else {
+                    Text("Resolve them in the Changes tab, or install an agent to have it done.", style = MaterialTheme.typography.bodySmall, color = fg)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActionRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    enabled: Boolean,
+    tile: Tile? = null,
+    ai: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 60.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(colors.surfaceContainerHigh.copy(alpha = if (enabled) 1f else 0.5f))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val t = tile ?: AppColors.tiles.sky
+        Box(Modifier.size(40.dp).clip(RoundedCornerShape(13.dp)).background(if (enabled) t.fill else colors.surfaceContainer), contentAlignment = Alignment.Center) {
+            PhIcon(icon, null, size = 20.dp, tint = if (enabled) t.on else colors.outline)
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(title, style = MaterialTheme.typography.titleSmall, color = if (enabled) colors.onSurface else colors.outline)
+                if (ai) {
+                    Spacer(Modifier.width(6.dp))
+                    PhIcon(Ph.Sparkle, "AI", size = 13.dp, tint = if (enabled) colors.primary else colors.outline)
+                }
+            }
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}

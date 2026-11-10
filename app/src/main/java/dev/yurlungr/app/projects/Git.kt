@@ -51,6 +51,12 @@ data class GitStatus(
     /** Git couldn't read the repository (or isn't installed): [isRepo] is false but it may well be one. */
     val error: GitError? = null,
 ) {
+    /** Paths with unresolved merge conflicts (porcelain "unmerged": U in either column, AA or DD). */
+    val conflicts: List<String>
+        get() = changes.filter { c ->
+            c.index == 'U' || c.worktree == 'U' || (c.index == 'A' && c.worktree == 'A') || (c.index == 'D' && c.worktree == 'D')
+        }.map { it.path }
+
     companion object {
         val NotARepo = GitStatus(isRepo = false)
     }
@@ -239,6 +245,30 @@ class Git(private val paths: RuntimePaths) {
         }
 
     suspend fun pull(dir: File): CommandResult = run(dir, "pull", "--ff-only", timeoutMs = 300_000)
+
+    /**
+     * Pull that merges when the branches diverged (instead of refusing like --ff-only), so remote
+     * work always lands; conflicts are left for the user or an agent to resolve. --no-edit: no
+     * editor can open here.
+     */
+    suspend fun pullMerge(dir: File): CommandResult = run(dir, "pull", "--no-rebase", "--no-edit", timeoutMs = 300_000)
+
+    /** The current commit's hash, or null (no commits yet, or git failed). */
+    suspend fun head(dir: File): String? =
+        runParsed(dir, "rev-parse", "--verify", "--quiet", "HEAD").takeIf { it.ok }?.output?.trim()?.takeIf { it.length == 40 }
+
+    /** How many commits [to] has that [from] doesn't (0 on failure). */
+    suspend fun countCommits(dir: File, from: String, to: String): Int =
+        runParsed(dir, "rev-list", "--count", "$from..$to").takeIf { it.ok }?.output?.trim()?.toIntOrNull() ?: 0
+
+    /** Re-applies and drops the newest stash; on a conflict git keeps it (stash@{0}). */
+    suspend fun stashPopLatest(dir: File): CommandResult = run(dir, "stash", "pop")
+
+    /** Undoes the last commit but keeps its changes, staged. */
+    suspend fun undoLastCommit(dir: File): CommandResult = run(dir, "reset", "--soft", "HEAD~1")
+
+    /** A merge is half done (after a conflicted pull): it needs resolving and committing. */
+    fun mergeInProgress(dir: File): Boolean = File(dir, ".git/MERGE_HEAD").exists()
 
     // ---- Branches & stash --------------------------------------------------------------------
 
