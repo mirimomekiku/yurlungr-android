@@ -107,8 +107,28 @@ private const val MAX_HIGHLIGHT_CHARS = 300_000
 
 private sealed interface Load {
     data object Loading : Load
-    data class Ready(val text: String, val crlf: Boolean) : Load
+    data class Ready(val text: String, val crlf: Boolean, val stamp: DiskStamp = DiskStamp(false, 0, 0)) : Load
     data class Unavailable(val reason: String) : Load
+}
+
+/** Reads [file] for editing (call off the main thread). */
+private fun readForEdit(file: File): Load = when {
+    !file.exists() -> Load.Ready("", crlf = false) // new file
+    !file.isFile -> Load.Unavailable("Not a file")
+    file.length() > MAX_EDIT_BYTES -> Load.Unavailable("Too large to edit here (${humanSize(file.length())})")
+    Git.isBinary(file) -> Load.Unavailable("Binary file (${humanSize(file.length())})")
+    else -> {
+        val stamp = DiskStamp.of(file)
+        val raw = file.readText()
+        val crlf = raw.contains("\r\n")
+        Load.Ready(if (crlf) raw.replace("\r\n", "\n") else raw, crlf, stamp)
+    }
+}
+
+private sealed interface SaveOutcome {
+    data object Saved : SaveOutcome
+    data object ChangedOnDisk : SaveOutcome
+    data class Failed(val message: String) : SaveOutcome
 }
 
 /** Undo/redo snapshots; consecutive typing is grouped into one step. */
@@ -148,19 +168,7 @@ fun EditorScreen(file: File, onBack: () -> Unit) {
 
     var load by remember(file) { mutableStateOf<Load>(Load.Loading) }
     LaunchedEffect(file) {
-        load = withContext(Dispatchers.IO) {
-            when {
-                !file.exists() -> Load.Ready("", crlf = false) // new file
-                !file.isFile -> Load.Unavailable("Not a file")
-                file.length() > MAX_EDIT_BYTES -> Load.Unavailable("Too large to edit here (${humanSize(file.length())})")
-                Git.isBinary(file) -> Load.Unavailable("Binary file (${humanSize(file.length())})")
-                else -> {
-                    val raw = file.readText()
-                    val crlf = raw.contains("\r\n")
-                    Load.Ready(if (crlf) raw.replace("\r\n", "\n") else raw, crlf)
-                }
-            }
-        }
+        load = withContext(Dispatchers.IO) { readForEdit(file) }
     }
 
     when (val l = load) {
@@ -184,6 +192,11 @@ private fun Editor(file: File, initial: Load.Ready, lang: Language, paths: Runti
     val density = LocalDensity.current
     var value by remember { mutableStateOf(TextFieldValue(initial.text)) }
     var saved by remember { mutableStateOf(initial.text) }
+    var crlf by remember { mutableStateOf(initial.crlf) }
+    // What the file looked like when we last read or wrote it.
+    var diskStamp by remember { mutableStateOf(initial.stamp) }
+    // Save found the file changed on disk; holds what to do after a successful save.
+    var conflict by remember { mutableStateOf<(() -> Unit)?>(null) }
     val history = remember { History() }
     val indentUnit = remember { detectIndent(initial.text, lang) }
     var readOnly by remember { mutableStateOf(false) }
@@ -220,21 +233,46 @@ private fun Editor(file: File, initial: Load.Ready, lang: Language, paths: Runti
         value = new
     }
 
-    fun save(then: () -> Unit = {}) = scope.launch {
+    fun save(then: () -> Unit = {}, overwrite: Boolean = false) = scope.launch {
         val text = value.text
-        val ok = withContext(Dispatchers.IO) {
+        val expected = diskStamp
+        val useCrlf = crlf
+        var written = expected
+        val outcome = withContext<SaveOutcome>(Dispatchers.IO) {
+            // Never silently replace edits made elsewhere (an agent, git pull, a stash pop).
+            if (!overwrite && DiskStamp.of(file) != expected) return@withContext SaveOutcome.ChangedOnDisk
             runCatching {
-                file.parentFile?.mkdirs()
-                file.writeText(if (initial.crlf) text.replace("\n", "\r\n") else text)
-            }.isSuccess
+                FileSave.writeAtomically(file, if (useCrlf) text.replace("\n", "\r\n") else text)
+                written = DiskStamp.of(file)
+            }.fold({ SaveOutcome.Saved }, { SaveOutcome.Failed(it.message ?: it.toString()) })
         }
-        if (ok) {
-            saved = text
-            history.breakGroup()
-            Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
-            then()
-        } else {
-            Toast.makeText(context, "Couldn't save ${file.name}", Toast.LENGTH_LONG).show()
+        when (outcome) {
+            SaveOutcome.Saved -> {
+                saved = text
+                diskStamp = written
+                history.breakGroup()
+                Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
+                then()
+            }
+            SaveOutcome.ChangedOnDisk -> conflict = then
+            is SaveOutcome.Failed ->
+                Toast.makeText(context, "Couldn't save ${file.name}: ${outcome.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** Replaces the buffer with what's on disk now (the user's unsaved edits are dropped). */
+    fun reloadFromDisk() = scope.launch {
+        when (val fresh = withContext(Dispatchers.IO) { readForEdit(file) }) {
+            is Load.Ready -> {
+                set(TextFieldValue(fresh.text, TextRange(value.selection.start.coerceAtMost(fresh.text.length))))
+                saved = fresh.text
+                crlf = fresh.crlf
+                diskStamp = fresh.stamp
+                history.breakGroup()
+                Toast.makeText(context, "Reloaded ${file.name}", Toast.LENGTH_SHORT).show()
+            }
+            is Load.Unavailable -> Toast.makeText(context, "Can't reload: ${fresh.reason}", Toast.LENGTH_LONG).show()
+            Load.Loading -> Unit
         }
     }
 
@@ -485,9 +523,26 @@ private fun Editor(file: File, initial: Load.Ready, lang: Language, paths: Runti
             lines = lineStarts.size,
             lang = lang.name,
             indent = if (indentUnit == "\t") "Tabs" else "Spaces: ${indentUnit.length}",
-            eol = if (initial.crlf) "CRLF" else "LF",
+            eol = if (crlf) "CRLF" else "LF",
             readOnly = readOnly,
             highlightOff = value.text.length > MAX_HIGHLIGHT_CHARS,
+        )
+    }
+
+    conflict?.let { then ->
+        AlertDialog(
+            onDismissRequest = { conflict = null },
+            title = { Text("${file.name} changed on disk") },
+            text = { Text("Something else changed this file after you opened it. Overwrite it with your version, or reload it and lose your unsaved edits?") },
+            confirmButton = {
+                Button(onClick = { conflict = null; save(then, overwrite = true) }) { Text("Overwrite") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { conflict = null }) { Text("Cancel") }
+                    TextButton(onClick = { conflict = null; reloadFromDisk() }) { Text("Reload") }
+                }
+            },
         )
     }
 
