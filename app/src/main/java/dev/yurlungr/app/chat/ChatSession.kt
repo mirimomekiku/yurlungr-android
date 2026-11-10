@@ -186,7 +186,16 @@ class ChatSession(
             val spawned = AtomicReference<Process?>(null)
             var conn: AcpConnection? = null
             try {
-                cwd.mkdirs()
+                val hasHistory = items.isNotEmpty() || acpSessionId != null
+                if (!cwd.isDirectory) {
+                    // An existing chat whose project was deleted or moved: recreating an empty folder
+                    // would let the agent work (and write) somewhere the user no longer expects.
+                    if (hasHistory) {
+                        state = ChatState.Failed("The project folder ${cwdLabel(cwd.path)} no longer exists. Restore it, or start a new chat.")
+                        return@launch
+                    }
+                    check(cwd.mkdirs() || cwd.isDirectory) { "Couldn't create the project folder ${cwd.path}" }
+                }
                 val process = withContext(Dispatchers.IO) {
                     ProcessBuilder(paths.bash.path, "-c", "exec ${agent.launchCommand(skipPermissions)}")
                         .directory(cwd)

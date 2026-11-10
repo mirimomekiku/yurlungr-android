@@ -181,6 +181,11 @@ fun TerminalScreen(onBack: () -> Unit) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text("Process exited with code ${session.exitStatus}", color = Fg)
+                    // The shell's conventions: 127 = command not found, 126 = found but can't run.
+                    when (session.exitStatus) {
+                        127 -> Text("A command wasn't found. Is it installed? See System checks.", color = Fg.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
+                        126 -> Text("A command couldn't run (permissions or a broken install). See System checks.", color = Fg.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { requestAction(session, SessionAction.Close) }) { Text("Close") }
                         Button(onClick = { requestAction(session, SessionAction.Restart) }) { Text("Restart") }

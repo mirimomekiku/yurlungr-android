@@ -82,7 +82,15 @@ import dev.yurlungr.app.agents.Agent
 import dev.yurlungr.app.runtime.RuntimeBridge
 
 @Composable
-fun ChatScreen(chat: ChatModel, onBack: () -> Unit, onLogin: (Agent) -> Unit, onNewChat: (() -> Unit)? = null) {
+fun ChatScreen(
+    chat: ChatModel,
+    onBack: () -> Unit,
+    onLogin: (Agent) -> Unit,
+    onNewChat: (() -> Unit)? = null,
+    /** Reruns the agents setup (offered when the agent couldn't start because something's missing). */
+    onInstallAgents: (() -> Unit)? = null,
+    onSystemChecks: (() -> Unit)? = null,
+) {
     BackHandler(onBack = onBack)
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = chat.items.size)
     // A saved chat restarts its agent (and restores its context) when opened.
@@ -134,7 +142,7 @@ fun ChatScreen(chat: ChatModel, onBack: () -> Unit, onLogin: (Agent) -> Unit, on
                     ChatItemView(chat, item)
                 }
             }
-            item(key = "footer") { ChatFooter(chat, onLogin) }
+            item(key = "footer") { ChatFooter(chat, onLogin, onInstallAgents, onSystemChecks) }
         }
 
         Composer(chat)
@@ -490,18 +498,24 @@ private fun PermissionCard(item: ChatItem.Permission, onChoose: (PermissionOptio
 }
 
 @Composable
-private fun ChatFooter(chat: ChatModel, onLogin: (Agent) -> Unit) {
+private fun ChatFooter(chat: ChatModel, onLogin: (Agent) -> Unit, onInstallAgents: (() -> Unit)?, onSystemChecks: (() -> Unit)?) {
     // Crossfade between states (starting → ready → working → …) instead of jumping.
     AnimatedContent(
         targetState = chat.state,
         contentKey = { it::class },
         transitionSpec = { (fadeIn(tween(Motion.MEDIUM)) + expandVertically(tween(Motion.MEDIUM))).togetherWith(fadeOut(tween(Motion.SHORT))) },
         label = "chat-footer",
-    ) { state -> FooterContent(chat, state, onLogin) }
+    ) { state -> FooterContent(chat, state, onLogin, onInstallAgents, onSystemChecks) }
 }
 
 @Composable
-private fun FooterContent(chat: ChatModel, state: ChatState, onLogin: (Agent) -> Unit) {
+private fun FooterContent(
+    chat: ChatModel,
+    state: ChatState,
+    onLogin: (Agent) -> Unit,
+    onInstallAgents: (() -> Unit)?,
+    onSystemChecks: (() -> Unit)?,
+) {
     val context = LocalContext.current
     when (state) {
         ChatState.Saved -> StatusCard(
@@ -541,8 +555,18 @@ private fun FooterContent(chat: ChatModel, state: ChatState, onLogin: (Agent) ->
                 TextButton(onClick = { RuntimeBridge.open(context, url) }) { Text("Open sign-in link") }
             }
         }
-        is ChatState.Failed -> StatusCard(title = "${chat.agent.displayName} stopped", body = state.message, isError = true) {
-            Button(onClick = chat::restart) { Text("Restart") }
+        is ChatState.Failed -> {
+            // Restarting can't help when the agent (or Node, or a library) is missing: offer the fix too.
+            val missing = !chat.isRemote && failureLooksLikeMissingTool(state.message)
+            StatusCard(
+                title = "${chat.agent.displayName} stopped",
+                body = if (missing) state.message + "\n\nThe agent or something it needs isn't installed or can't run." else state.message,
+                isError = true,
+            ) {
+                if (missing && onInstallAgents != null) Button(onClick = onInstallAgents) { Text("Reinstall agents") }
+                if (missing) FilledTonalButton(onClick = chat::restart) { Text("Restart") } else Button(onClick = chat::restart) { Text("Restart") }
+                if (missing && onSystemChecks != null) TextButton(onClick = onSystemChecks) { Text("System checks") }
+            }
         }
         ChatState.Ready -> if (chat.items.isEmpty()) {
             Text(

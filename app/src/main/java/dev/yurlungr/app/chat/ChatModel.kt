@@ -61,5 +61,16 @@ interface ChatListener {
     fun onMetaChanged(chat: ChatSession) {}
 }
 
+private val MISSING_TOOL = Regex(
+    "(?i)\\b(code|exit) 12[67]\\b|command not found|not found|no such file or directory|cannot link executable|" +
+        "cannot execute|permission denied|exec format error|error while loading shared libraries",
+)
+
+/**
+ * Whether a chat failure means the agent, Node or a library is missing or can't run (exit 126/127,
+ * "not found", a linker error): reinstalling is the fix, restarting alone won't help.
+ */
+fun failureLooksLikeMissingTool(message: String): Boolean = MISSING_TOOL.containsMatchIn(message)
+
 fun cwdLabel(path: String): String =
     path.substringAfter("/files/home", missingDelimiterValue = "").let { if (it.isEmpty() && !path.contains("/files/home")) path else "~$it" }
