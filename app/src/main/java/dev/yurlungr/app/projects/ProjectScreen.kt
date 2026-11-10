@@ -235,7 +235,8 @@ fun ProjectScreen(
                             "cd ${shellQuote(dir.path)} && " +
                                 "{ command -v gh >/dev/null || pkg install -y gh; } && " +
                                 "{ gh auth status >/dev/null 2>&1 || { gh auth login --hostname github.com --git-protocol https --web && gh auth setup-git; }; } && " +
-                                "gh repo create ${shellQuote(dir.name)} --private --source=. --remote=origin --push",
+                                // Options first, then `--`: a folder name starting with "-" must not read as a flag.
+                                "gh repo create --private --source=. --remote=origin --push -- ${shellQuote(dir.name)}",
                             "Publish ${dir.name}",
                         )
                     },
