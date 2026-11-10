@@ -1,4 +1,5 @@
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <jni.h>
 #include <signal.h>
@@ -48,6 +49,7 @@ static int create_subprocess(JNIEnv* env,
             ptsname_r(ptm, devname, sizeof(devname))
 #endif
        ) {
+        close(ptm);
         return throw_runtime_exception(env, "Cannot grantpt()/unlockpt()/ptsname_r() on /dev/ptmx");
     }
 
@@ -64,6 +66,7 @@ static int create_subprocess(JNIEnv* env,
 
     pid_t pid = fork();
     if (pid < 0) {
+        close(ptm);
         return throw_runtime_exception(env, "Fork failed");
     } else if (pid > 0) {
         *pProcessId = (int) pid;
@@ -73,12 +76,17 @@ static int create_subprocess(JNIEnv* env,
         sigset_t signals_to_unblock;
         sigfillset(&signals_to_unblock);
         sigprocmask(SIG_UNBLOCK, &signals_to_unblock, 0);
+        // Also restore default handling: the app process ignores SIGHUP (and SIGQUIT), and ignored
+        // signals survive exec. A shell started with SIGHUP ignored can't even trap it, so closing a
+        // tab wouldn't hang up its jobs, and setup scripts couldn't record that they were stopped.
+        for (int sig = 1; sig < NSIG; sig++) signal(sig, SIG_DFL);
 
         close(ptm);
         setsid();
 
         int pts = open(devname, O_RDWR);
-        if (pts < 0) exit(-1);
+        // _exit, not exit: the forked child must not run the app's atexit handlers or flush its stdio.
+        if (pts < 0) _exit(126);
 
         dup2(pts, 0);
         dup2(pts, 1);
@@ -100,17 +108,22 @@ static int create_subprocess(JNIEnv* env,
 
         if (chdir(cwd) != 0) {
             char* error_message;
-            // No need to free asprintf()-allocated memory since doing execvp() or exit() below.
+            // No need to free asprintf()-allocated memory since doing _exit() below.
             if (asprintf(&error_message, "chdir(\"%s\")", cwd) == -1) error_message = "chdir()";
             perror(error_message);
             fflush(stderr);
+            // Don't silently carry on in "/": a command meant for a project folder must not run elsewhere.
+            _exit(126);
         }
         execvp(cmd, argv);
+        int exec_errno = errno;
         // Show terminal output about failing exec() call:
         char* error_message;
         if (asprintf(&error_message, "exec(\"%s\")", cmd) == -1) error_message = "exec()";
+        errno = exec_errno;
         perror(error_message);
-        _exit(1);
+        // The shell's conventions, so the app can tell "missing" (127) from "can't run" (126).
+        _exit(exec_errno == ENOENT ? 127 : 126);
     }
 }
 

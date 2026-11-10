@@ -52,6 +52,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -90,12 +91,31 @@ fun TerminalScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     BackHandler(onBack = onBack)
 
+    // Whether this screen has shown a session: once the last one is closed (or Exit closed them
+    // all), leave the screen instead of quietly starting a new shell.
+    var hadSession by remember { mutableStateOf(false) }
     val session = TerminalSessions.current
     if (session == null) {
-        LaunchedEffect(Unit) { TerminalSessions.create(context) }
-        Box(Modifier.fillMaxSize().background(Bg))
+        var error by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(Unit) {
+            if (hadSession) {
+                onBack()
+                return@LaunchedEffect
+            }
+            // E.g. the Linux environment isn't installed yet: explain instead of a shell that exits at once.
+            runCatching { TerminalSessions.create(context) }.onFailure { error = it.message ?: it.toString() }
+        }
+        Box(Modifier.fillMaxSize().background(Bg).systemBarsPadding().padding(24.dp), contentAlignment = Alignment.Center) {
+            error?.let { message ->
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(message, color = Fg)
+                    TextButton(onClick = onBack) { Text("Back") }
+                }
+            }
+        }
         return
     }
+    SideEffect { hadSession = true }
 
     val density = LocalDensity.current
     val minFont = with(density) { 8.sp.roundToPx() }
@@ -180,11 +200,14 @@ fun TerminalScreen(onBack: () -> Unit) {
                         .padding(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text("Process exited with code ${session.exitStatus}", color = Fg)
-                    // The shell's conventions: 127 = command not found, 126 = found but can't run.
-                    when (session.exitStatus) {
-                        127 -> Text("A command wasn't found. Is it installed? See System checks.", color = Fg.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
-                        126 -> Text("A command couldn't run (permissions or a broken install). See System checks.", color = Fg.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
+                    val code = session.exitStatus
+                    // Negative: killed by a signal (End sends one), not an exit code.
+                    Text(if (code < 0) "Process stopped (signal ${-code})" else "Process exited with code $code", color = Fg)
+                    // 127/126 only mean "missing" / "can't run" when the shell itself died right away; an
+                    // interactive shell just passes on the status of the last command typed in it.
+                    if (TerminalSessions.exitedAtStart(session)) when (code) {
+                        127 -> Text("The shell or command wasn't found. Check the Linux environment in System checks.", color = Fg.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
+                        126 -> Text("The shell or command couldn't run (permissions or a broken install). See System checks.", color = Fg.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { requestAction(session, SessionAction.Close) }) { Text("Close") }
@@ -359,7 +382,9 @@ private fun SessionRail(onPicked: () -> Unit, onActions: (TerminalSession, Sessi
                 .clip(RoundedCornerShape(15.dp))
                 .border(1.5.dp, Muted.copy(alpha = 0.5f), RoundedCornerShape(15.dp))
                 .touchOnlyClickable {
-                    TerminalSessions.create(context)
+                    runCatching { TerminalSessions.create(context) }.onFailure {
+                        android.widget.Toast.makeText(context, it.message ?: "Couldn't open a terminal", android.widget.Toast.LENGTH_LONG).show()
+                    }
                     onPicked()
                 },
             contentAlignment = Alignment.Center,

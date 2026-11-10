@@ -37,5 +37,48 @@ public final class NativeSmokeChecks {
             executor.shutdownNow();
             marker.delete();
         }
+        // The terminal's shell must start with SIGHUP neither blocked nor ignored (the app ignores it):
+        // otherwise closing a tab can't hang up its jobs and scripts can't trap it.
+        File masks = new File(context.getCacheDir(), "native-signals-" + UUID.randomUUID());
+        int[] spid = new int[1];
+        int sfd = -1;
+        var sexec = Executors.newSingleThreadExecutor();
+        try {
+            sfd = JNI.createSubprocess("/system/bin/sh", context.getCacheDir().getPath(),
+                new String[]{"sh", "-c", "grep -E '^Sig(Blk|Ign)' /proc/$$/status > '" + masks.getPath() + "'"},
+                new String[]{"PATH=/system/bin"}, spid, 24, 80, 8, 16);
+            int exit = sexec.submit(() -> JNI.waitFor(spid[0])).get(10, TimeUnit.SECONDS);
+            if (exit != 0) throw new AssertionError("signal-mask child exit: " + exit);
+            String text = new String(java.nio.file.Files.readAllBytes(masks.toPath()), StandardCharsets.UTF_8);
+            for (String line : text.split("\n")) {
+                String[] parts = line.trim().split("\\s+");
+                if (parts.length == 2 && (Long.parseUnsignedLong(parts[1], 16) & 1L) != 0) {
+                    throw new AssertionError("SIGHUP not at its default in terminal children: " + text);
+                }
+            }
+        } finally {
+            if (sfd >= 0) JNI.close(sfd);
+            sexec.shutdownNow();
+            masks.delete();
+        }
+        // A missing program exits 127 and a missing working folder 126 (not 1, and not "carry on in /"),
+        // so the terminal can tell the user the shell is missing.
+        expectExit(context, "/system/bin/does-not-exist-" + UUID.randomUUID(), context.getCacheDir().getPath(), 127);
+        expectExit(context, "/system/bin/sh", new File(context.getCacheDir(), "missing-" + UUID.randomUUID()).getPath(), 126);
+    }
+
+    private static void expectExit(Context context, String cmd, String cwd, int expected) throws Exception {
+        int[] pid = new int[1];
+        int fd = -1;
+        var executor = Executors.newSingleThreadExecutor();
+        try {
+            fd = JNI.createSubprocess(cmd, cwd, new String[]{"x", "-c", "exit 0"}, new String[]{"PATH=/system/bin"}, pid, 24, 80, 8, 16);
+            if (fd < 0 || pid[0] <= 0) throw new AssertionError("PTY creation failed for " + cmd);
+            int exit = executor.submit(() -> JNI.waitFor(pid[0])).get(10, TimeUnit.SECONDS);
+            if (exit != expected) throw new AssertionError("exec of " + cmd + " in " + cwd + ": exit " + exit + ", expected " + expected);
+        } finally {
+            if (fd >= 0) JNI.close(fd);
+            executor.shutdownNow();
+        }
     }
 }

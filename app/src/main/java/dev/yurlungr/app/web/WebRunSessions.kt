@@ -80,7 +80,15 @@ internal object WebRunSessions {
                     exited = { scope.launch { update(run); finish(app,run) } },
                 ))
                 // PTYs otherwise start only when attached to TerminalView. Web runs also start off-screen.
-                terminal.updateSize(80,24,8,16)
+                try {
+                    terminal.updateSize(80,24,8,16)
+                } catch (e: Exception) {
+                    // No process exists (e.g. no free file descriptors): drop the tab rather than leave
+                    // one that looks running and can't be stopped.
+                    run.terminal = null
+                    TerminalSessions.closeDirect(app, terminal)
+                    throw IllegalStateException("Couldn't start the server's terminal: ${e.message ?: e}", e)
+                }
                 var browserOpened = false
                 val startTime = System.currentTimeMillis()
                 while (!run.finalized) {

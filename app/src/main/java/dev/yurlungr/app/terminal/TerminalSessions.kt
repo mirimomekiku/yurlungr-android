@@ -46,11 +46,40 @@ object TerminalSessions {
     private val names = HashMap<TerminalSession, String>()
     private val commands = HashMap<TerminalSession, String?>()
     private val statusIds = HashMap<TerminalSession, String>()
+    private val cwds = HashMap<TerminalSession, File>()
+    private val startedAt = HashMap<TerminalSession, Long>()
+    private val finishedAt = HashMap<TerminalSession, Long>()
+    /** Relaunches waiting for their old process to exit (see [restart]). */
+    private val pendingRestarts = HashMap<TerminalSession, () -> Unit>()
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
     private val managed = HashMap<TerminalSession, ManagedLifecycle>()
     data class ManagedLifecycle(val end: () -> Unit, val close: () -> Unit, val restart: () -> Unit, val exited: () -> Unit)
     fun manage(session: TerminalSession, lifecycle: ManagedLifecycle) { managed[session] = lifecycle }
-    fun endProcess(session: TerminalSession) { managed[session]?.end?.invoke() ?: session.finishIfRunning() }
+    fun endProcess(session: TerminalSession) { managed[session]?.end?.invoke() ?: stopProcess(session) }
     fun statusId(session: TerminalSession): String = statusIds[session].orEmpty()
+
+    /** An app-launched command (setup, sign-in, clone…), as opposed to a plain shell. */
+    fun isCommand(session: TerminalSession): Boolean = commands[session] != null
+
+    /** The process ended within a few seconds of starting: it most likely never ran at all. */
+    fun exitedAtStart(session: TerminalSession): Boolean {
+        val start = startedAt[session] ?: return false
+        val end = finishedAt[session] ?: return false
+        return end - start < 3_000
+    }
+
+    /**
+     * Stops the session's shell and everything it started (jobs, apt, npm, node…), like closing
+     * a terminal window. Never uses TerminalSession.finishIfRunning(): for a session whose process
+     * never started its pid is 0, and kill(0, SIGKILL) would kill this app's whole process group.
+     */
+    private fun stopProcess(session: TerminalSession) {
+        if (!session.isRunning) return
+        val pid = session.pid
+        if (pid <= 0) return // never started: nothing to stop
+        // termux.c calls setsid(), so the shell's pid is also its process group id.
+        dev.yurlungr.app.runtime.ProcessTree.terminate(pid, alsoGroup = true)
+    }
 
     fun rename(session: TerminalSession, name: String) {
         if (session !in sessions) return
@@ -59,23 +88,56 @@ object TerminalSessions {
         RuntimeStatus.refresh()
     }
 
+    /**
+     * Reruns the session's command (or shell) in the same place in the tab list, in the same
+     * folder, once the old process has exited: a setup restarted while its predecessor still
+     * holds the setup lock would fail with "Another setup is already running".
+     */
     fun restart(context: Context, session: TerminalSession) {
         if (session !in sessions) return
         managed[session]?.let { it.restart(); return }
         val command = commands[session]
         val name = names[session]
-        close(context, session)
-        create(context, command, name)
+        val cwd = cwds[session]
+        val relaunch = {
+            val index = sessions.indexOf(session).takeIf { it >= 0 }
+            closeDirect(context, session)
+            runCatching { create(context, command, name, workingDirectory = cwd, index = index) }.onFailure {
+                Log.w("TerminalSessions", "Restart failed", it)
+                android.widget.Toast.makeText(context, "Couldn't restart: ${it.message}", android.widget.Toast.LENGTH_LONG).show()
+            }
+            Unit
+        }
+        if (!session.isRunning || session.pid <= 0) {
+            relaunch()
+            return
+        }
+        pendingRestarts[session] = relaunch
+        stopProcess(session)
+        // If the exit callback never comes (a process that won't die), relaunch anyway.
+        main.postDelayed({ pendingRestarts.remove(session)?.invoke() }, 4_000)
     }
 
     /**
      * Opens a terminal tab. With [command], runs it in a login bash and then leaves an
      * interactive shell open so the output stays readable.
      */
-    fun create(context: Context, command: String? = null, name: String? = null, keepShell: Boolean = true, workingDirectory: File? = null): TerminalSession {
+    fun create(
+        context: Context,
+        command: String? = null,
+        name: String? = null,
+        keepShell: Boolean = true,
+        workingDirectory: File? = null,
+        /** Position in the tab list (a restarted tab keeps its place); appended when null. */
+        index: Int? = null,
+    ): TerminalSession {
         val paths = RuntimePaths(context)
+        // Before (or during a re)install there's no shell to run: say so instead of "exited with code 1".
+        check(paths.isBootstrapInstalled) { "The Linux environment isn't installed (or is being reinstalled). Open System checks first." }
         val statusId = UUID.randomUUID().toString()
         val cwd = workingDirectory ?: paths.home
+        // The child would otherwise print an error and carry on in "/".
+        check(cwd.isDirectory) { "The folder ${cwd.path} no longer exists." }
         val welcome = "if [ ! -f \"\$HOME/.hushlogin\" ] && [ -z \"\$TERMUX_HUSHLOGIN\" ] && [ -f '${paths.libexec}/motd.sh' ]; then '${paths.bash}' '${paths.libexec}/motd.sh'; fi"
         val (shell, args) = if (command == null) {
             // Like Termux: prefer $PREFIX/bin/login (sets up LD_PRELOAD, motd), run as a login shell.
@@ -83,7 +145,10 @@ object TerminalSessions {
             login to arrayOf("-${login.name}")
         } else {
             val status = "_yurlungr_exit=\$?; if [ \"\$_yurlungr_exit\" -ne 0 ]; then printf '\\nCommand failed (exit %s). Review the output above before retrying.\\n' \"\$_yurlungr_exit\"; fi"
-            paths.bash to arrayOf("-bash", "-c", if (keepShell) "$command\n$status\n$welcome\nexec bash -l" else command)
+            // Plain (non-login) bash for the command: the environment already comes from RuntimeEnv, and a
+            // profile that exits, execs another shell or starts tmux must not hijack setups and sign-ins.
+            // The interactive shell left open afterwards is a normal login shell.
+            paths.bash to arrayOf("bash", "-c", if (keepShell) "$command\n$status\n$welcome\nexec bash -l" else command)
         }
         val session = TerminalSession(
             shell.path,
@@ -95,8 +160,10 @@ object TerminalSessions {
         )
         statusIds[session] = statusId
         commands[session] = command
+        cwds[session] = cwd
+        startedAt[session] = System.currentTimeMillis()
         if (name != null) names[session] = name
-        sessions += session
+        if (index != null && index in 0..sessions.size) sessions.add(index, session) else sessions += session
         current = session
         RuntimeService.refresh(context)
         return session
@@ -114,11 +181,14 @@ object TerminalSessions {
     /** Used after a managed process has finished its own cleanup. */
     fun closeDirect(context: Context, session: TerminalSession) {
         managed.remove(session)
-        session.finishIfRunning()
+        stopProcess(session)
         sessions.remove(session)
         names.remove(session)
         commands.remove(session)
         statusIds.remove(session)
+        cwds.remove(session)
+        startedAt.remove(session)
+        finishedAt.remove(session)
         if (current === session) current = sessions.lastOrNull()
         RuntimeService.refresh(context)
     }
@@ -144,9 +214,13 @@ object TerminalSessions {
         }
 
         override fun onSessionFinished(finishedSession: TerminalSession) {
+            finishedAt[finishedSession] = System.currentTimeMillis()
             managed[finishedSession]?.exited?.invoke()
+            pendingRestarts.remove(finishedSession)?.invoke()
             changeTick++
             RuntimeStatus.refresh()
+            // An exited tab no longer needs the foreground service (or a place in its count).
+            RuntimeService.refresh(appContext)
         }
 
         override fun onCopyTextToClipboard(session: TerminalSession, text: String) {

@@ -86,7 +86,7 @@ class RuntimeService : Service() {
             .setContentText(
                 buildList {
                     val chats = ChatSessions.activeCount
-                    val terminals = TerminalSessions.sessions.size
+                    val terminals = TerminalSessions.sessions.count { it.isRunning }
                     if (chats > 0) add(if (chats == 1) "1 chat" else "$chats chats")
                     if (terminals > 0) add(if (terminals == 1) "1 terminal" else "$terminals terminals")
                     if (RemoteServer.isRunning) add("sharing with ${RemoteServer.clientCount} device(s)")
@@ -113,7 +113,7 @@ class RuntimeService : Service() {
         fun refresh(context: Context) {
             RuntimeStatus.refresh()
             val intent = Intent(context, RuntimeService::class.java)
-            if (ChatSessions.activeCount > 0 || TerminalSessions.sessions.isNotEmpty() || RemoteServer.isRunning) {
+            if (ChatSessions.activeCount > 0 || TerminalSessions.sessions.any { it.isRunning } || RemoteServer.isRunning) {
                 ContextCompat.startForegroundService(context, intent)
             } else {
                 context.stopService(intent)
