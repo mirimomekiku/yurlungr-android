@@ -3,6 +3,7 @@ package dev.yurlungr.app.runtime
 import android.content.Context
 import android.os.Build
 import android.system.Os
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -42,7 +43,10 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
             val sha = download(release.url, zip) { done ->
                 progress.update("Downloading ${release.tag}", if (release.size > 0) done.toFloat() / release.size else null)
             }
-            if (release.sha256 != null && !release.sha256.equals(sha, ignoreCase = true)) {
+            if (release.sha256 == null) {
+                // Older API responses have no asset digest; the download still came over TLS from GitHub.
+                Log.w(TAG, "No published SHA-256 for ${release.tag}; not verified beyond TLS (got $sha)")
+            } else if (!release.sha256.equals(sha, ignoreCase = true)) {
                 error("Checksum mismatch for ${release.tag}: expected ${release.sha256}, got $sha")
             }
             extract(zip, progress)
@@ -149,6 +153,7 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
                         if (line.isBlank()) return@forEachLine
                         val parts = line.split("←")
                         require(parts.size == 2) { "Malformed symlink line: $line" }
+                        require(isContainedRelativePath(parts[1])) { "Symlink escapes prefix: ${parts[1]}" }
                         symlinks += parts[0] to File(paths.staging, parts[1]).path
                     }
                     continue
@@ -171,7 +176,10 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
         require(symlinks.isNotEmpty()) { "No SYMLINKS.txt in bootstrap zip" }
         progress.update("Creating ${symlinks.size} symlinks", null)
         for ((linkTarget, linkPath) in symlinks) {
-            File(linkPath).parentFile?.mkdirs()
+            val parent = File(linkPath).parentFile ?: continue
+            parent.mkdirs()
+            // An earlier link in the list could make this folder point outside the prefix.
+            require((parent.canonicalPath + File.separator).startsWith(stagingRoot)) { "Symlink escapes prefix: $linkPath" }
             Os.symlink(linkTarget, linkPath)
         }
 
@@ -203,6 +211,12 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
     }
 
     companion object {
+        private const val TAG = "BootstrapInstaller"
+
+        /** A relative path that stays inside its base folder: not absolute, no ".." segment. */
+        internal fun isContainedRelativePath(path: String): Boolean =
+            path.isNotEmpty() && !path.startsWith("/") && path.split('/').none { it == ".." }
+
         /** Current bootstraps use the first path; Termux app v0.118 expected the second. */
         private val SECOND_STAGE_PATHS = listOf(
             "etc/termux/termux-bootstrap/second-stage/termux-bootstrap-second-stage.sh",

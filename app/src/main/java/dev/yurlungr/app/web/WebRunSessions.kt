@@ -32,6 +32,7 @@ internal class WebRun(val root: File, val config: WebRunConfig, val id: String, 
 internal object WebRunSessions {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val runs = mutableStateMapOf<String, WebRun>()
+    private const val STALE_RUN_GRACE_MS = 15_000L
     fun get(root: File): WebRun? = runs[root.canonicalPath]
 
     fun init(context: Context) {
@@ -40,6 +41,10 @@ internal object WebRunSessions {
             .filter { it.isDirectory && runCatching { UUID.fromString(it.name) }.isSuccess }
         scope.launch(Dispatchers.IO) {
             previous.forEach { directory -> runCatching { File(directory,"stop").writeText(directory.name) } }
+            // Give any surviving supervisor time to see "stop", then remove the folders: they only
+            // hold config, status and the stop file (logs live in the terminal), and pile up otherwise.
+            delay(STALE_RUN_GRACE_MS)
+            previous.forEach { directory -> runCatching { directory.deleteRecursively() } }
         }
     }
 

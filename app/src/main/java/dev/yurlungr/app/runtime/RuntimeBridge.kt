@@ -22,6 +22,7 @@ import java.io.File
  */
 object RuntimeBridge {
     private const val TAG = "RuntimeBridge"
+    private const val MAX_REQUEST_BYTES = 8 * 1024
     private val main = Handler(Looper.getMainLooper())
     private var observer: FileObserver? = null
 
@@ -47,9 +48,25 @@ object RuntimeBridge {
     }
 
     private fun consume(context: Context, file: File) {
-        val value = runCatching { file.readText().trim() }.getOrNull()
+        // Claim the request first: the startup scan and the watcher can both see the same file,
+        // and only the one whose rename succeeds handles it. Dot names are ignored by both.
+        val claimed = File(file.parentFile, ".claimed-${System.nanoTime()}-${file.name}")
+        if (!file.renameTo(claimed)) return
         val kind = file.extension
-        file.delete()
+        // A URL or a path: anything longer isn't a real request (and mustn't be read into memory).
+        val value = runCatching {
+            claimed.inputStream().use { input ->
+                val buf = ByteArray(MAX_REQUEST_BYTES + 1)
+                var n = 0
+                while (n < buf.size) {
+                    val r = input.read(buf, n, buf.size - n)
+                    if (r < 0) break
+                    n += r
+                }
+                if (n > MAX_REQUEST_BYTES) null else String(buf, 0, n, Charsets.UTF_8).trim()
+            }
+        }.getOrNull()
+        claimed.delete()
         if (value.isNullOrEmpty()) return
         main.post {
             when (kind) {
