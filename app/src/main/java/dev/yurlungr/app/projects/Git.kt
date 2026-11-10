@@ -111,6 +111,9 @@ data class GhRepoList(val repos: List<GhRepo>, val orgError: String? = null)
 /** A branch; remote ones are named "origin/x" and only listed when there's no local "x". */
 data class GitBranch(val name: String, val isRemote: Boolean, val upstream: String?, val updated: String, val isCurrent: Boolean)
 
+/** The pull request of the current branch, from `gh pr view`. */
+data class GitPullRequest(val number: Int, val title: String, val state: String, val url: String, val isDraft: Boolean = false)
+
 /** A stash entry; [ref] is "stash@{n}". */
 data class GitStash(val ref: String, val message: String, val whenRelative: String)
 
@@ -374,6 +377,30 @@ class Git(private val paths: RuntimePaths) {
         Result.success(GhRepoList((mine + orgRepos).distinctBy { it.slug.lowercase() }.sortedByDescending { it.updatedAt }, orgError))
     }
 
+    private suspend fun runGh(dir: File, vararg args: String, timeoutMs: Long = 60_000): CommandResult? {
+        val gh = File(paths.bin, "gh")
+        if (!gh.exists()) return null
+        return CommandRunner.run(paths, listOf(gh.path, *args), cwd = dir, extraEnv = env + GH_VARS, timeoutMs = timeoutMs, forParsing = true)
+    }
+
+    /** The pull request for [dir]'s current branch: Success(null) when there isn't one. */
+    suspend fun pullRequest(dir: File): Result<GitPullRequest?> {
+        val r = runGh(dir, "pr", "view", "--json", "number,title,state,url,isDraft", timeoutMs = 30_000)
+            ?: return Result.failure(IllegalStateException("The GitHub CLI isn't installed."))
+        if (r.ok) return parsePullRequest(r.output)?.let { Result.success(it) } ?: Result.failure(IllegalStateException("Unexpected reply from gh pr view."))
+        val text = r.errorOutput + "\n" + r.output
+        if (text.contains("no pull requests found", ignoreCase = true)) return Result.success(null)
+        return Result.failure(IllegalStateException(ghError(r, "gh pr view")))
+    }
+
+    /** Opens a pull request for the current (pushed) branch, title and body filled from its commits. Returns its URL. */
+    suspend fun createPullRequest(dir: File): Result<String> {
+        val r = runGh(dir, "pr", "create", "--fill", timeoutMs = 120_000)
+            ?: return Result.failure(IllegalStateException("The GitHub CLI isn't installed."))
+        val url = r.output.lineSequence().map { it.trim() }.lastOrNull { it.startsWith("https://") }
+        return if (r.ok && url != null) Result.success(url) else Result.failure(IllegalStateException(ghError(r, "gh pr create")))
+    }
+
     /** "owner/name" (lowercase) of the origin remote if it's on GitHub; null otherwise. */
     suspend fun originSlug(dir: File): String? {
         if (!File(dir, ".git").exists()) return null
@@ -495,6 +522,19 @@ class Git(private val paths: RuntimePaths) {
             GITHUB_URL.find(url.trim())?.let { "${it.groupValues[1]}/${it.groupValues[2]}".lowercase() }
 
         private val json = Json { ignoreUnknownKeys = true }
+
+        /** Parses `gh pr view --json number,title,state,url,isDraft`; null if it isn't that. */
+        fun parsePullRequest(text: String): GitPullRequest? = runCatching {
+            val o = json.parseToJsonElement(text.substring(text.indexOf('{'))).jsonObject
+            fun str(k: String) = (o[k] as? JsonPrimitive)?.content
+            GitPullRequest(
+                number = str("number")!!.toInt(),
+                title = str("title").orEmpty(),
+                state = str("state").orEmpty(),
+                url = str("url")!!.also { require(it.startsWith("https://")) },
+                isDraft = str("isDraft") == "true",
+            )
+        }.getOrNull()
 
         /** Parses `gh repo list --json …` output; null if it isn't a JSON array. */
         fun parseRepos(text: String): List<GhRepo>? = runCatching {

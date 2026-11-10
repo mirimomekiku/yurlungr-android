@@ -176,6 +176,48 @@ fun GitActionsSheet(
                 enabled = running == null && conflicts.isEmpty(), tile = AppColors.tiles.peach,
             ) { run("Undoing the last commit") { routines.undoLastCommit(dir) } }
         }
+        // Pull request of this branch: open the existing one, or create it once the branch is pushed.
+        var pr by remember(status.branch, status.upstream) { mutableStateOf<GitPullRequest?>(null) }
+        var prError by remember(status.branch, status.upstream) { mutableStateOf<String?>(null) }
+        var prLoaded by remember(status.branch, status.upstream) { mutableStateOf(false) }
+        androidx.compose.runtime.LaunchedEffect(status.branch, status.upstream, status.ahead) {
+            if (!status.hasOrigin || status.branch == null || status.unborn) return@LaunchedEffect
+            git.pullRequest(dir).onSuccess { pr = it; prError = null }.onFailure { prError = it.message }
+            prLoaded = true
+        }
+        if (status.hasOrigin && !status.unborn) {
+            val current = pr
+            fun openUrl(url: String) = runCatching {
+                context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+            when {
+                current != null -> ActionRow(
+                    Ph.GitMerge, "Open pull request #${current.number}",
+                    "${current.title} · ${current.state.lowercase()}${if (current.isDraft) " (draft)" else ""}",
+                    enabled = running == null, tile = AppColors.tiles.lime,
+                ) { openUrl(current.url) }
+                else -> ActionRow(
+                    Ph.GitMerge, "Create pull request",
+                    when {
+                        status.upstream == null || status.ahead > 0 -> "Push this branch first, then create it"
+                        prError != null -> prError!!
+                        !prLoaded -> "Checking GitHub…"
+                        else -> "Opens a pull request for ${status.branch} with a title and description from its commits"
+                    },
+                    enabled = running == null && prLoaded && prError == null && status.upstream != null && status.ahead == 0 && conflicts.isEmpty(),
+                    tile = AppColors.tiles.lime,
+                ) {
+                    run("Creating the pull request") { step ->
+                        step("Asking GitHub (gh pr create)…")
+                        val r = git.createPullRequest(dir)
+                        r.fold(
+                            onSuccess = { url -> pr = parsePrFromUrl(url); openUrl(url); RoutineOutcome.Done("Pull request created: $url") },
+                            onFailure = { RoutineOutcome.Failed(it.message ?: "Couldn't create the pull request.") },
+                        )
+                    }
+                }
+            }
+        }
         ActionRow(Ph.GitBranch, "Branches & stashes", "Switch or create branches, restore saved changes", enabled = running == null) {
             onOpenBranches()
         }
@@ -216,6 +258,10 @@ fun GitActionsSheet(
         }
     }
 }
+
+/** A just-created pull request, known only by its URL (…/pull/N); the title loads on the next open. */
+private fun parsePrFromUrl(url: String): GitPullRequest? =
+    url.substringAfterLast("/pull/", "").toIntOrNull()?.let { GitPullRequest(it, "Pull request", "open", url) }
 
 @Composable
 private fun RoutineCard(
