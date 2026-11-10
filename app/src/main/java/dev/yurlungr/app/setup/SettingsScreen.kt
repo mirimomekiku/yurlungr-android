@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -189,6 +189,37 @@ fun SettingsScreen(
                 }
             }
 
+            item { SectionLabel("Appearance") }
+            item {
+                Group {
+                    val mode = dev.yurlungr.app.ui.ThemePrefs.mode
+                    GroupRow(
+                        "Theme",
+                        subtitle = when (mode) {
+                            dev.yurlungr.app.ui.ThemeMode.System -> "Follows the phone's light or dark setting"
+                            dev.yurlungr.app.ui.ThemeMode.Light -> "Always light"
+                            dev.yurlungr.app.ui.ThemeMode.Dark -> "Always dark"
+                        },
+                        icon = if (dev.yurlungr.app.ui.ThemePrefs.isDark()) Ph.Moon else Ph.Sun,
+                        tile = tiles.lime,
+                    )
+                    // A segmented switch under the row: three equal choices, the current one filled.
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        for (option in dev.yurlungr.app.ui.ThemeMode.entries) {
+                            dev.yurlungr.app.ui.Chip(
+                                option.label,
+                                onClick = { dev.yurlungr.app.ui.ThemePrefs.set(context, option) },
+                                selected = option == mode,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+            }
+
             item { SectionLabel("Editor") }
             item {
                 Group {
@@ -270,7 +301,7 @@ fun SettingsScreen(
     }
 
     if (showPhantomHelp) {
-        PhantomHelpDialog(
+        PhantomHelpSheet(
             onDismiss = { showPhantomHelp = false },
             onMarkDone = { done ->
                 vm.setPhantomFixDone(done)
@@ -278,8 +309,8 @@ fun SettingsScreen(
             },
         )
     }
-    if (showLicenses) LicensesDialog { showLicenses = false }
-    if (showThemes) ThemeDialog(onDismiss = { showThemes = false }) { EditorPrefs.setTheme(context, it) }
+    if (showLicenses) LicensesSheet { showLicenses = false }
+    if (showThemes) ThemeSheet(onDismiss = { showThemes = false }) { EditorPrefs.setTheme(context, it) }
 }
 
 @Composable
@@ -318,13 +349,16 @@ private const val PREVIEW = "// Greets the user\nfun greet(name: String): String
 
 /** Every theme as a live code sample; tap to choose. */
 @Composable
-private fun ThemeDialog(onDismiss: () -> Unit, onPick: (EditorTheme) -> Unit) {
+private fun ThemeSheet(onDismiss: () -> Unit, onPick: (EditorTheme) -> Unit) {
     val tokens = remember { Highlighter.tokenize(PREVIEW, Languages.Kotlin) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Editor theme") },
-        text = {
-            Column(Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    dev.yurlungr.app.ui.AppSheet(
+        "Editor theme",
+        onDismiss = onDismiss,
+        subtitle = "Colors for the code editor. Tap one to use it.",
+        icon = Ph.PencilSimple,
+        tile = AppColors.tiles.lilac,
+        actions = { Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text("Done") } },
+    ) {
                 for (t in EditorThemes.all) {
                     val selected = t.id == EditorPrefs.theme.id
                     Column(
@@ -348,15 +382,12 @@ private fun ThemeDialog(onDismiss: () -> Unit, onPick: (EditorTheme) -> Unit) {
                         Text(styled, color = t.Fg, fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 16.sp, modifier = Modifier.padding(10.dp))
                     }
                 }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
-    )
+    }
 }
 
 /** Licenses of what's bundled in the APK (fonts, icons); runtime packages carry their own. */
 @Composable
-private fun LicensesDialog(onDismiss: () -> Unit) {
+private fun LicensesSheet(onDismiss: () -> Unit) {
     val context = LocalContext.current
     var texts by remember { mutableStateOf<List<Pair<String, String>>?>(null) }
     LaunchedEffect(Unit) {
@@ -366,22 +397,18 @@ private fun LicensesDialog(onDismiss: () -> Unit) {
             }
         }
     }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Open-source licenses") },
-        text = {
-            Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "The Linux environment is the Termux bootstrap (packages under their own licenses, see \$PREFIX/share/doc). " +
-                        "The terminal view uses Termux's terminal libraries (Apache 2.0).",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                for ((name, text) in texts.orEmpty()) {
-                    Text(name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                    Text(text.trim(), fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 13.sp)
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
-    )
+    dev.yurlungr.app.ui.AppSheet(
+        "Open-source licenses",
+        onDismiss = onDismiss,
+        subtitle = "The Linux environment is the Termux bootstrap (packages under their own licenses, see \$PREFIX/share/doc). " +
+            "The terminal view uses Termux's terminal libraries (Apache 2.0).",
+        icon = Ph.FileText,
+        tile = AppColors.tiles.sky,
+    ) {
+        if (texts == null) dev.yurlungr.app.ui.SkeletonLine(width = 0.6f, height = 12.dp)
+        for ((name, text) in texts.orEmpty()) {
+            Text(name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text(text.trim(), fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 13.sp)
+        }
+    }
 }

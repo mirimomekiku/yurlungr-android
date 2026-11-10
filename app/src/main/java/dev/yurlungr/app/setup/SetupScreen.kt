@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package dev.yurlungr.app.setup
 
 import dev.yurlungr.app.ui.FlowBar
@@ -58,6 +60,9 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -149,10 +154,36 @@ fun SetupScreen(
                 if (vm.checking) WaveDots(dotSize = 4.dp) else PhIcon(Ph.ArrowClockwise, "Run checks again", size = 20.dp)
             }
         }
+        // Pull down to run every check again (tools included), like the refresh button.
+        val pullState = rememberPullToRefreshState()
+        var pulled by remember { mutableStateOf(false) }
+        LaunchedEffect(vm.checking) { if (!vm.checking) pulled = false }
+        PullToRefreshBox(
+            isRefreshing = pulled && vm.checking,
+            onRefresh = {
+                if (!installing) {
+                    pulled = true
+                    vm.refresh(deep = true, force = true)
+                }
+            },
+            state = pullState,
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            indicator = {
+                PullToRefreshDefaults.IndicatorBox(
+                    state = pullState,
+                    isRefreshing = pulled && vm.checking,
+                    modifier = Modifier.align(Alignment.TopCenter),
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ) {
+                    if (pulled && vm.checking) WaveDots(Modifier.align(Alignment.Center), dotSize = 4.dp)
+                    else PhIcon(Ph.ArrowClockwise, "Pull to run the checks again", Modifier.align(Alignment.Center), size = 18.dp)
+                }
+            },
+        ) {
         LazyColumn(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.fillMaxSize(),
         ) {
             item {
                 Text(
@@ -228,6 +259,7 @@ fun SetupScreen(
                 }
             }
         }
+        }
 
         if (firstRun) {
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp, top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -237,26 +269,31 @@ fun SetupScreen(
         }
     }
 
-    logPath?.let { path -> LogDialog(path, onDismiss = { logPath = null }) }
+    logPath?.let { path -> LogSheet(path, onDismiss = { logPath = null }) }
 
     if (confirmReinstall) {
-        AlertDialog(
-            onDismissRequest = { confirmReinstall = false },
-            title = { Text("Reinstall the base system?") },
-            text = {
-                Text(
-                    "Downloads the Termux base system again (~30 MB) and replaces the broken one. Running chats, " +
-                        "terminals and web servers are stopped. Your home folder, projects and chats are kept; installed " +
-                        "packages and agents need their setup run again afterwards.",
-                )
+        dev.yurlungr.app.ui.AppSheet(
+            "Reinstall the base system?",
+            onDismiss = { confirmReinstall = false },
+            subtitle = "Downloads the Termux base system again (~30 MB) and replaces the broken one.",
+            icon = Ph.ArrowClockwise,
+            tile = AppColors.tiles.peach,
+            actions = {
+                OutlinedButton(onClick = { confirmReinstall = false }, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Cancel") }
+                Button(onClick = { confirmReinstall = false; vm.reinstallBootstrap() }, modifier = Modifier.weight(2f).heightIn(min = 52.dp)) { Text("Reinstall") }
             },
-            confirmButton = { Button(onClick = { confirmReinstall = false; vm.reinstallBootstrap() }) { Text("Reinstall") } },
-            dismissButton = { TextButton(onClick = { confirmReinstall = false }) { Text("Cancel") } },
-        )
+        ) {
+            Text("Running chats, terminals and web servers are stopped first.", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "Your home folder, projects and chats are kept. Installed packages and agents need their setup run again afterwards.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 
     if (showPhantomHelp) {
-        PhantomHelpDialog(
+        PhantomHelpSheet(
             onDismiss = { showPhantomHelp = false },
             onMarkDone = { done ->
                 vm.setPhantomFixDone(done)
@@ -268,7 +305,7 @@ fun SetupScreen(
 
 /** The end of a setup log, read-only (logs are often too big for the editor, and shouldn't be edited). */
 @Composable
-private fun LogDialog(path: String, onDismiss: () -> Unit) {
+private fun LogSheet(path: String, onDismiss: () -> Unit) {
     val file = java.io.File(path)
     val text by androidx.compose.runtime.produceState<String?>(null, path) {
         value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -278,16 +315,19 @@ private fun LogDialog(path: String, onDismiss: () -> Unit) {
     val scroll = androidx.compose.foundation.rememberScrollState()
     // Open at the end: the failure is at the bottom.
     LaunchedEffect(text) { scroll.scrollTo(scroll.maxValue) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(file.name) },
-        text = {
-            Box(Modifier.heightIn(max = 460.dp).verticalScroll(scroll)) {
-                Text(text ?: "Loading…", fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp)
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
-    )
+    dev.yurlungr.app.ui.AppSheet(file.name, onDismiss = onDismiss, subtitle = "The end of the log: the failure is usually at the bottom.", icon = Ph.FileText) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = 420.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0xFF0D1117))
+                .verticalScroll(scroll)
+                .padding(10.dp),
+        ) {
+            Text(text ?: "Loading…", color = Color(0xFFE6EDF3), fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp)
+        }
+    }
 }
 
 /** First run, before the Linux environment exists. */
@@ -410,30 +450,29 @@ internal fun LogBox(text: String) {
 }
 
 @Composable
-internal fun PhantomHelpDialog(onDismiss: () -> Unit, onMarkDone: (Boolean) -> Unit) {
+internal fun PhantomHelpSheet(onDismiss: () -> Unit, onMarkDone: (Boolean) -> Unit) {
     val context = LocalContext.current
     val (instructions, command) = remember { DoctorChecks.phantomFixInstructions() }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Phantom process killer") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    "Android 12+ kills background child processes once more than 32 exist across apps. " +
-                        "Agent CLIs, npm and Gradle easily exceed that.",
-                )
-                Text(instructions)
-                if (command != null) {
-                    LogBox(command)
-                    TextButton(onClick = { copyToClipboard(context, command) }) { Text("Copy command") }
-                } else {
-                    TextButton(onClick = { openDeveloperOptions(context) }) { Text("Open developer options") }
-                }
-            }
+    dev.yurlungr.app.ui.AppSheet(
+        "Background process limit",
+        onDismiss = onDismiss,
+        subtitle = "Android 12+ kills background child processes once more than 32 exist across apps. " +
+            "Agent CLIs, npm and Gradle easily exceed that.",
+        icon = Ph.ShieldCheck,
+        tile = AppColors.tiles.peach,
+        actions = {
+            OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Later") }
+            Button(onClick = { onMarkDone(true) }, modifier = Modifier.weight(2f).heightIn(min = 52.dp)) { Text("I've done this") }
         },
-        confirmButton = { TextButton(onClick = { onMarkDone(true) }) { Text("I've done this") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Later") } },
-    )
+    ) {
+        Text(instructions, style = MaterialTheme.typography.bodyMedium)
+        if (command != null) {
+            LogBox(command)
+            FilledTonalButton(onClick = { copyToClipboard(context, command) }) { Text("Copy command") }
+        } else {
+            FilledTonalButton(onClick = { openDeveloperOptions(context) }) { Text("Open developer options") }
+        }
+    }
 }
 
 private fun copyToClipboard(context: Context, text: String) {
