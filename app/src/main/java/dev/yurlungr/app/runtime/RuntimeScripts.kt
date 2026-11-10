@@ -15,6 +15,18 @@ internal fun setupScriptCommand(name: String, test: Boolean = false): String {
     return "bash -n $path && bash $path" + if (test) " --test" else ""
 }
 
+/**
+ * The command that installs a project's dependencies with `project-setup.sh`: [packages] (Termux
+ * toolchain) then each of [steps] in [dir]. Every value is shell-quoted; steps are run by bash.
+ */
+internal fun projectSetupCommand(dir: java.io.File, packages: List<String>, steps: List<String>): String {
+    require(steps.isNotEmpty()) { "Nothing to run" }
+    require(packages.all { Regex("^[a-z0-9][a-z0-9.+-]*$").matches(it) }) { "Bad package name" }
+    fun q(s: String) = "'" + s.replace("'", "'\\''") + "'"
+    val path = "\"\$PREFIX/libexec/yurlungr/project-setup.sh\""
+    return "bash -n $path && bash $path " + (listOf(dir.path, packages.joinToString(" ")) + steps).joinToString(" ") { q(it) }
+}
+
 /** The command that installs or updates one native-binary agent with `agent-install.sh`. */
 internal fun agentInstallCommand(recipe: String): String {
     require(recipe in setOf("copilot", "goose", "opencode")) { "Unknown agent recipe: $recipe" }
