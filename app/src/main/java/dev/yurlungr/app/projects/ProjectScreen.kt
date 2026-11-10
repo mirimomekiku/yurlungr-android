@@ -142,6 +142,8 @@ fun ProjectScreen(
     var showWebRun by remember(dir.path) { mutableStateOf(false) }
     var showBranches by remember { mutableStateOf(false) }
     var showGitActions by remember { mutableStateOf(false) }
+    /** A git command running in the terminal sheet: its title and arguments. */
+    var gitTerminal by remember { mutableStateOf<Pair<String, List<String>>?>(null) }
 
     LaunchedEffect(dir, refreshTick, reload) {
         launch { status = git.status(dir) }
@@ -222,8 +224,13 @@ fun ProjectScreen(
                     commitMessage = commitMessage,
                     onCommitMessageChange = { commitMessage = it },
                     onCommit = ::commit,
-                    onPull = { runGit("Pull") { git.pull(dir) } },
-                    onPush = { status?.let { s -> runGit("Push") { git.push(dir, s) } } },
+                    // Shown live in a terminal sheet: progress, prompts and git's own messages.
+                    onPull = { gitTerminal = "Pull" to listOf("pull", "--ff-only") },
+                    onPush = {
+                        status?.let { s ->
+                            gitTerminal = "Push" to if (s.upstream == null) listOf("push", "-u", "origin", "HEAD") else listOf("push")
+                        }
+                    },
                     onAddGitignore = {
                         scope.launch {
                             git.addDefaultGitignore(dir)
@@ -250,6 +257,10 @@ fun ProjectScreen(
         ActionBar(dir, isAndroid, onNewChat, runInTerminal, onOpenTerminal,
             hasWeb = capabilities?.web?.isNotEmpty() == true, onRunWeb = { showWebRun = true },
             hasGit = status?.isRepo == true, onGitActions = { showGitActions = true })
+    }
+
+    gitTerminal?.let { (title, args) ->
+        GitTerminalSheet(dir, title, args, onDismiss = { gitTerminal = null; reload++ }, onFinished = { reload++ })
     }
 
     if (showGitActions) status?.takeIf { it.isRepo }?.let { s ->
@@ -788,45 +799,23 @@ private fun ResultBox(text: String, isError: Boolean) {
     )
 }
 
-/** Colors a unified diff (or the synthetic "new file" form). Capped for very large diffs. */
+/** The project's diffs (Changes tab, History): see [DiffViewer]. */
 @Composable
-fun UnifiedDiff(diff: String) {
-    val lines = remember(diff) {
-        diff.lines().filterNot { it.startsWith("diff --git") || it.startsWith("index ") }.take(1500)
-    }
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.small)
-            .background(Color(0xFF0D1117))
-            .padding(8.dp),
-    ) {
-        for (line in lines) {
-            Text(
-                line,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                lineHeight = 15.sp,
-                color = when {
-                    line.startsWith("+++") || line.startsWith("---") -> Color(0xFF8B949E)
-                    line.startsWith("@@") -> Color(0xFF79C0FF)
-                    line.startsWith("+") -> Color(0xFF7EE787)
-                    line.startsWith("-") -> Color(0xFFFF7B72)
-                    else -> Color(0xFFE6EDF3)
-                },
-            )
-        }
-    }
-}
+fun UnifiedDiff(diff: String) = DiffViewer(diff)
 
 // ---- Files ---------------------------------------------------------------------------
 
-/** Expandable file tree, with an optional view of Git ignore and working-tree state. */
+/**
+ * Expandable file tree. In a repository every file shows its Git state (a status pill, "staged",
+ * ignored files dimmed) and a filter row narrows it to uncommitted, ignored or not-ignored files.
+ * Pull down to re-read the tree and Git's state.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<Int, Int>, onOpenFile: (File) -> Unit) {
     val open = remember(root.path) { mutableStateMapOf<String, List<File>>() }
     var top by remember(root.path) { mutableStateOf<List<File>?>(null) }
-    var showGit by rememberSaveable(root.path) { mutableStateOf(false) }
+    var refreshing by remember(root.path) { mutableStateOf(false) }
     var filter by rememberSaveable(root.path) { mutableStateOf(FileTreeFilter.All) }
     var ignored by remember(root.path) { mutableStateOf<Set<String>?>(null) }
     var checkingIgnored by remember(root.path) { mutableStateOf(false) }
@@ -841,15 +830,23 @@ private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<
         treeStatus = if (treeReload > 0) git.status(root) else status
         top = list(root)
         for (path in open.keys.toList()) open[path] = list(File(path))
-        ignored = null
+        // Keep the previous ignore rules visible while they're re-read (no flicker on refresh).
         checkingIgnored = treeStatus?.isRepo == true
         if (checkingIgnored) {
             ignored = runCatching { git.ignoredPaths(root) }.getOrNull()
             checkingIgnored = false
-        }
+        } else ignored = null
+        refreshing = false
     }
+    val isRepo = treeStatus?.isRepo == true
     val gitState = remember(treeStatus, ignored) { FileTreeGitState(ignored.orEmpty(), treeStatus?.changes.orEmpty()) }
-    val effectiveFilter = if (showGit && ignored != null && treeStatus?.isRepo == true) filter else FileTreeFilter.All
+    // Uncommitted only needs the status; the ignore-based filters wait for the ignore rules.
+    val effectiveFilter = when {
+        !isRepo -> FileTreeFilter.All
+        filter == FileTreeFilter.Changed -> filter
+        ignored != null -> filter
+        else -> FileTreeFilter.All
+    }
     // Built off the main thread: every row needs a stat() or two, and big expanded trees have thousands.
     // Keeps showing the previous rows until the new ones are ready; null only before the first build.
     val openNow = open.toMap()
@@ -875,22 +872,53 @@ private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<
     }
 
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (treeStatus?.isRepo == true) {
-                Chip("Git details", selected = showGit, onClick = { showGit = !showGit })
-                if (showGit && ignored != null) FileTreeFilter.entries.forEach { option ->
-                    Chip(option.label, selected = filter == option, onClick = { filter = option })
+        if (isRepo) {
+            val changes = treeStatus?.changes.orEmpty()
+            val staged = changes.count { !it.untracked && it.index != ' ' }
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                for (option in listOf(FileTreeFilter.All, FileTreeFilter.Changed, FileTreeFilter.Ignored, FileTreeFilter.NotIgnored)) {
+                    val needsIgnore = option == FileTreeFilter.Ignored || option == FileTreeFilter.NotIgnored
+                    val label = when (option) {
+                        FileTreeFilter.Changed -> "Uncommitted · ${changes.size}"
+                        else -> option.label
+                    }
+                    Chip(label, selected = effectiveFilter == option, onClick = { if (!needsIgnore || ignored != null) filter = option })
                 }
             }
-            TextButton(onClick = { treeReload++ }) { Text("Refresh") }
+            // One line saying where things stand, instead of a toggle to find out.
+            Text(
+                when {
+                    checkingIgnored && ignored == null -> "Reading Git's ignore rules…"
+                    ignored == null -> "Couldn't read Git's ignore rules. Pull down to retry."
+                    changes.isEmpty() -> "Everything is committed."
+                    else -> "${changes.size} uncommitted" + (if (staged > 0) " · $staged staged" else "") +
+                        (treeStatus?.conflicts?.size?.takeIf { it > 0 }?.let { " · $it with conflicts" } ?: "")
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 4.dp),
+            )
         }
-        if (showGit && treeStatus?.isRepo == true && ignored == null) {
-            Text(if (checkingIgnored) "Checking Git ignore rules…" else "Couldn't read ignore rules. Tap Refresh to retry.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
-        }
-        LazyColumn(contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp), modifier = Modifier.weight(1f)) {
+        val pullState = androidx.compose.material3.pulltorefresh.rememberPullToRefreshState()
+        androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = { refreshing = true; treeReload++ },
+            state = pullState,
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            indicator = {
+                androidx.compose.material3.pulltorefresh.PullToRefreshDefaults.IndicatorBox(
+                    state = pullState,
+                    isRefreshing = refreshing,
+                    modifier = Modifier.align(Alignment.TopCenter),
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ) {
+                    if (refreshing) dev.yurlungr.app.ui.WaveDots(Modifier.align(Alignment.Center), dotSize = 4.dp)
+                    else PhIcon(Ph.ArrowClockwise, "Pull to refresh", Modifier.align(Alignment.Center), size = 18.dp)
+                }
+            },
+        ) {
+        LazyColumn(contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp), modifier = Modifier.fillMaxSize()) {
             val loaded = rows
             if (top == null || loaded == null) items(6) { SkeletonListItem() }
             else if (loaded.isEmpty()) item {
@@ -904,27 +932,14 @@ private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<
                 val change = gitState.changesByPath[relative]
                 val changed = gitState.isChanged(relative, entry.isDir)
                 val isIgnored = ignored != null && gitState.isIgnored(relative)
-                val details = if (showGit && ignored != null && treeStatus?.isRepo == true) {
-                    when {
-                        isIgnored -> "Ignored"
-                        change != null -> if (change.untracked) "Untracked" else {
-                            val label = change.label.replaceFirstChar { it.uppercase() }
-                            when {
-                                change.index != ' ' && change.worktree != ' ' -> "$label · staged + unstaged"
-                                change.index != ' ' -> "$label · staged"
-                                else -> label
-                            }
-                        }
-                        changed -> "Changes"
-                        else -> "Not ignored"
-                    }
-                } else null
                 TreeRow(
                     name = if (effectiveFilter == FileTreeFilter.Changed) relative else f.name,
                     depth = depth, isDir = entry.isDir, expanded = open.containsKey(f.path),
                     enabled = entry.enabled,
                     mark = change?.let(::changeMark) ?: if (changed) "•" else null,
-                    details = details, ignored = showGit && isIgnored,
+                    badge = change?.let(::changeBadge),
+                    staged = change != null && !change.untracked && change.index != ' ',
+                    ignored = isIgnored,
                     modifier = Modifier.animateItem(),
                 ) {
                     when {
@@ -935,7 +950,18 @@ private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<
                 }
             }
         }
+        }
     }
+}
+
+/** The word on a changed file's pill. */
+private fun changeBadge(c: GitChange): String = when (c.label) {
+    "new" -> "New"
+    "added" -> "Added"
+    "deleted" -> "Deleted"
+    "conflict" -> "Conflict"
+    "renamed" -> "Renamed"
+    else -> "Modified"
 }
 
 /** A file-tree row with its file-system facts read once, off the main thread. */
@@ -951,7 +977,13 @@ private fun changeMark(c: GitChange) = when (c.label) {
 }
 
 @Composable
-private fun TreeRow(name: String, depth: Int, isDir: Boolean, expanded: Boolean, mark: String?, details: String? = null, ignored: Boolean = false, enabled: Boolean = true, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun TreeRow(
+    name: String, depth: Int, isDir: Boolean, expanded: Boolean, mark: String?,
+    /** A changed file's state ("Modified", "New"…), shown as a coloured pill. */
+    badge: String? = null,
+    staged: Boolean = false,
+    ignored: Boolean = false, enabled: Boolean = true, modifier: Modifier = Modifier, onClick: () -> Unit,
+) {
     val tones = AppColors.status
     val markColor = when (mark) {
         "?", "A" -> tones.success
@@ -992,10 +1024,23 @@ private fun TreeRow(name: String, depth: Int, isDir: Boolean, expanded: Boolean,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
-        if (details != null) Text(details, style = MaterialTheme.typography.labelSmall,
-            color = if (mark != null) markColor else MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 8.dp))
-        else if (mark != null) Text(mark, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = markColor)
+        when {
+            badge != null && !isDir -> {
+                if (staged) {
+                    // Staged: in the next commit already.
+                    Text("staged", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 6.dp))
+                }
+                Text(
+                    badge, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = markColor,
+                    modifier = Modifier.padding(start = 6.dp).clip(RoundedCornerShape(50)).background(markColor.copy(alpha = 0.14f)).padding(horizontal = 8.dp, vertical = 2.dp),
+                )
+            }
+            ignored -> Text("ignored", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(start = 6.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surfaceContainerHigh).padding(horizontal = 8.dp, vertical = 2.dp))
+            // A folder with changes somewhere inside.
+            mark != null -> Box(Modifier.padding(start = 6.dp).size(7.dp).clip(RoundedCornerShape(50)).background(markColor))
+        }
     }
 }
 
