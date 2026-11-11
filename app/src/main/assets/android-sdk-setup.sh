@@ -171,7 +171,7 @@ EOF
     # Never fall back to the project folder: Gradle 9 there is exactly what this avoids.
     tmp=$(mktemp -d "$PREFIX/tmp/gradle-wrapper.XXXXXX") || { bad "temporary folder for the Gradle wrapper"; setup_finish ""; }
     touch "$tmp/settings.gradle"
-    (cd "$tmp" && run_logged with_timeout 900 gradle wrapper --gradle-version "$WRAPPER_GRADLE" --distribution-type bin) \
+    (cd "$tmp" && run_logged with_timeout 900 gradle --no-daemon wrapper --gradle-version "$WRAPPER_GRADLE" --distribution-type bin) \
       && cp -r "$tmp/gradlew" "$tmp/gradle" "$APP/" && ok "Gradle $WRAPPER_GRADLE wrapper" || bad "gradle wrapper"
     rm -rf "$tmp"
   fi

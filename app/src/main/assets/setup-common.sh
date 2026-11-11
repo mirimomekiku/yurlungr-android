@@ -8,8 +8,11 @@ setup_init() {
     exit 64
   fi
   # What packages add for login shells (JAVA_HOME from the JDK…), so the checks see it too.
-  local _f
+  local _f _nounset=0
+  case $- in *u*) _nounset=1; set +u ;; esac
+  # Not written for `set -u`: one reading an unset variable would end the setup silently.
   for _f in "$PREFIX"/etc/profile.d/*.sh; do [ -r "$_f" ] && . "$_f" >/dev/null 2>&1 </dev/null; done
+  [ "$_nounset" = 1 ] && set -u
   local tool
   for tool in apt-get tee timeout flock; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -33,10 +36,13 @@ setup_init() {
   fi
   # From here every way out records a status. Closing the terminal tab sends SIGHUP; without its
   # own trap the EXIT trap would see the last command's status (often 0) and record success.
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  trap 'status=$?; write_status "$status"; if [ "$status" -ne 0 ] && [ "$FINISH_REPORTED" -eq 0 ]; then printf "\nSetup stopped (exit %s). Details: %s. Fix the error above and rerun setup.\n" "$status" "$LOG" >&2; fi' EXIT
+  # Steps run in their own process groups (see with_timeout), listed here so these traps end them.
+  STEP_GROUPS="$PREFIX/tmp/yurlungr-setup-$$.groups"
+  : > "$STEP_GROUPS" 2>/dev/null || STEP_GROUPS=/dev/null
+  trap 'stop_steps; exit 129' HUP
+  trap 'stop_steps; exit 130' INT
+  trap 'stop_steps; exit 143' TERM
+  trap 'status=$?; stop_steps; [ "$STEP_GROUPS" = /dev/null ] || rm -f "$STEP_GROUPS"; write_status "$status"; if [ "$status" -ne 0 ] && [ "$FINISH_REPORTED" -eq 0 ]; then printf "\nSetup stopped (exit %s). Details: %s. Fix the error above and rerun setup.\n" "$status" "$LOG" >&2; fi' EXIT
   # "Running" until it ends: a run killed outright (SIGKILL, the app or phone dying) skips every
   # trap, and must then read as interrupted, not as whatever the previous run recorded.
   write_status -1
@@ -59,8 +65,10 @@ setup_init() {
   if [ "$COLS" -lt 20 ] || [ "$COLS" -gt 300 ]; then COLS=80; fi
   export DEBIAN_FRONTEND=noninteractive
   # Wait (up to 2 min) for a `pkg` the user is running in a terminal instead of failing at once.
-  APT_LOCK=(-o DPkg::Lock::Timeout=120)
-  APT_OPTS=(-y "${APT_LOCK[@]}" -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confnew)
+  # A stalled mirror gives up instead of holding the setup lock forever.
+  APT_LOCK=(-o DPkg::Lock::Timeout=120 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 -o Acquire::Retries=2)
+  # confold: keep config files the user edited (bash.bashrc, nanorc, sources.list) when a package updates.
+  APT_OPTS=(-y "${APT_LOCK[@]}" -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
 }
 
 # How this run ended, for System checks: exit code (-1 while running), its pid, log, time, and
@@ -91,10 +99,10 @@ require_space() { # MB
 apt_prepare() {
   if [ -n "$(dpkg --audit 2>/dev/null)" ]; then
     # Answer config-file questions up front: a prompt would wait forever on a line that's never shown.
-    run_logged dpkg --force-confdef --force-confnew --configure -a \
+    run_logged with_timeout 1800 dpkg --force-confdef --force-confold --configure -a \
       && ok "repaired an interrupted package install" || bad "package repair (dpkg --configure -a)"
   fi
-  if run_logged apt-get "${APT_LOCK[@]}" update; then
+  if run_logged with_timeout 600 apt-get "${APT_LOCK[@]}" update; then
     return 0
   fi
   bad "package index update"
@@ -105,7 +113,7 @@ apt_prepare() {
 install_pkgs() {
   local p
   for p in "$@"; do
-    run_logged apt-get install "${APT_OPTS[@]}" "$p" && ok "$p" || bad "$p"
+    run_logged with_timeout 1800 apt-get install "${APT_OPTS[@]}" "$p" && ok "$p" || bad "$p"
   done
 }
 
@@ -147,12 +155,31 @@ run_logged() {
   return "${statuses[2]}"
 }
 
-# Limits a step to SECS. --foreground keeps it in the terminal's process group, so Ctrl-C and
-# closing the tab still reach it; -k kills it if it ignores the polite signal.
+# Limits a step to SECS, children included: timeout runs it in a process group of its own and
+# signals the whole group (with --foreground it signalled only the first process, so a pipeline,
+# npm's postinstall scripts or a Gradle daemon outlived it and the step hung). -k kills what
+# ignores the polite signal. Ctrl-C and closing the tab reach the setup's own group, not this one,
+# so the group is recorded for the traps to end (stop_steps).
 with_timeout() { # SECS command...
-  local secs=$1
+  local secs=$1 pid rc
   shift
-  timeout --foreground -k 10 "$secs" "$@"
+  timeout -k 10 "$secs" "$@" &
+  pid=$!
+  printf '%s\n' "$pid" >> "${STEP_GROUPS:-/dev/null}" 2>/dev/null
+  wait "$pid"
+  rc=$?
+  return "$rc"
+}
+
+# Ends every step group still running (on Ctrl-C, a closed tab, or exit).
+stop_steps() {
+  local g
+  [ -n "${STEP_GROUPS:-}" ] && [ -r "$STEP_GROUPS" ] || return 0
+  while IFS= read -r g; do
+    case "$g" in ''|*[!0-9]*) continue ;; esac
+    kill -TERM -- "-$g" 2>/dev/null
+  done < "$STEP_GROUPS"
+  return 0
 }
 
 check() {

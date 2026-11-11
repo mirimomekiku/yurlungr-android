@@ -9,9 +9,12 @@ setup_init "$HOME/browser-setup.log"
 require_space "$YURLUNGR_SPACE_MB_BROWSER"
 
 step "x11 repository"
-apt_prepare && install_pkgs x11-repo
+# Each step needs the one before: without the repository there's no Chromium to install.
+apt_prepare || setup_finish ""
+install_pkgs x11-repo
+dpkg -s x11-repo >/dev/null 2>&1 || setup_finish ""
 # The new repository's package list.
-run_logged with_timeout 600 apt-get update && ok "package lists" || bad "package lists"
+run_logged with_timeout 600 apt-get "${APT_LOCK[@]}" update && ok "package lists" || { bad "package lists"; setup_finish ""; }
 
 step "Packages"
 install_pkgs "${YURLUNGR_PACKAGES_BROWSER[@]}"

@@ -35,7 +35,26 @@ internal fun packRemoveCommand(pack: ToolSetup): String {
 }
 
 /** Refreshes the package lists, then upgrades every installed package (in a terminal). */
-internal fun packagesUpgradeCommand(): String = Storage.UPGRADE_COMMAND
+internal fun packagesUpgradeCommand(): String = SetupLock.wrap(Storage.UPGRADE_COMMAND)
+
+/**
+ * The lock every setup script holds (setup-common.sh). Package and cache actions started from the
+ * app take it too, so they can't run under a setup: apt would fail on dpkg's lock, and clearing
+ * the npm cache would pull files from under a running `npm install`.
+ */
+object SetupLock {
+    /** Exit status when a setup holds the lock. */
+    const val BUSY = 75
+    const val BUSY_MESSAGE = "A setup is running. Try again when it finishes."
+
+    /** [command] run while holding the lock, or exit [BUSY] with a message if a setup has it. */
+    fun wrap(command: String): String {
+        val quoted = "'" + command.replace("'", "'\\''") + "'"
+        // A subshell: a terminal tab runs more after this (its "finished" line, a login shell).
+        return "(mkdir -p \"\$PREFIX/var/lock\" && flock -n -E $BUSY \"\$PREFIX/var/lock/yurlungr-setup.lock\" bash -c $quoted; " +
+            "rc=\$?; [ \$rc -eq $BUSY ] && echo '$BUSY_MESSAGE' >&2; exit \$rc)"
+    }
+}
 
 /** The recipes `agent-install.sh` knows: native glibc builds, then Python (uv) packages. */
 internal val AGENT_RECIPES = setOf("copilot", "goose", "opencode", "cline", "kilo", "cursor", "amp", "vibe", "kiro", "fast-agent", "minion")

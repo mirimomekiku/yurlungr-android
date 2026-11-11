@@ -23,7 +23,7 @@ if apt_prepare; then
   # The developer tools (git, gh, Node, termux-exec…) and the agents' own packages.
   install_pkgs "${YURLUNGR_DEV_PACKAGES[@]}" "${YURLUNGR_AGENT_PACKAGES[@]}"
   # glibc-repo just added a repository; its packages need a fresh index.
-  if run_logged apt-get "${APT_LOCK[@]}" update; then
+  if run_logged with_timeout 600 apt-get "${APT_LOCK[@]}" update; then
     install_pkgs "${YURLUNGR_AGENT_GLIBC_PACKAGES[@]}"
   else
     bad "glibc package index update"

@@ -285,7 +285,7 @@ fun DevEnvironmentScreen(
                             else TextButton(enabled = busy == null, onClick = {
                                 busy = "update"
                                 scope.launch {
-                                    val r = CommandRunner.run(paths, listOf(File(paths.bin, "apt-get").path, "update", "-qq"), timeoutMs = 180_000)
+                                    val r = CommandRunner.shell(paths, dev.yurlungr.app.runtime.SetupLock.wrap("apt-get -o Acquire::http::Timeout=60 update -qq"), timeoutMs = 180_000)
                                     if (!r.ok) Toast.makeText(context, r.describe("Checking for updates"), Toast.LENGTH_LONG).show()
                                     busy = null
                                     reload++
@@ -321,7 +321,7 @@ fun DevEnvironmentScreen(
                                         confirm = Triple("Clear the ${cache.title.lowercase()}?", "Frees ${dev.yurlungr.app.runtime.Storage.human(bytes)}. Builds and installs download what they need again.") {
                                             busy = cache.id
                                             scope.launch {
-                                                val r = CommandRunner.shell(paths, cache.clean, timeoutMs = 300_000)
+                                                val r = CommandRunner.shell(paths, dev.yurlungr.app.runtime.SetupLock.wrap(cache.clean), timeoutMs = 300_000)
                                                 Toast.makeText(context, if (r.ok) "Cleared" else r.describe("Clearing the cache"), Toast.LENGTH_SHORT).show()
                                                 busy = null
                                                 reload++
