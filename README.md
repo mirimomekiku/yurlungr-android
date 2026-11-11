@@ -58,7 +58,7 @@ and install it (allow installs from your browser or file manager when asked):
 Not sure? `adb shell getprop ro.product.cpu.abi` prints your phone's ABI. Each release lists SHA-256
 checksums in `SHA256SUMS.txt`.
 
-Changes in this version: [0.0.3 release notes](docs/releases/0.0.3.md).
+Changes in this version: [0.0.4 release notes](docs/releases/0.0.4.md).
 
 ## Quick start
 
@@ -132,7 +132,7 @@ Then, on the phone:
 <summary><b>Projects & git</b></summary>
 
 - **Workspace** per project: the name (tap to switch projects or open *All projects*), Branch / Changes /
-  To push stat tiles, and Files · Changes · History · Chats tabs. The tiles and tabs slide away while
+  To push stat tiles, and Files · Changes · History · Checks · Chats tabs. The tiles and tabs slide away while
   you scroll down a tab and come back when you scroll up. The bottom dock keeps to three buttons:
   **Chat**, the project's main action (Run/Open for web apps, Build for Android, otherwise Terminal), and
   **More**. More opens a sheet with the rest (Setup, Git, Terminal, Build, Run options), each with a line
@@ -432,11 +432,15 @@ credential-file presence; Antigravity's is not documented, so it shows as *Insta
 <details>
 <summary><b>Settings & system checks</b></summary>
 
-- Settings is a grouped list: System runtime (opens System checks), Coding agents, Keep agents running
-  (notifications, battery, background process limit), Appearance, Editor, GitHub and About (version,
-  licences). Details and choices open as bottom sheets.
-- **Appearance:** System / Light / Dark. *System* follows the phone, and the status and navigation bars
-  follow the app's choice.
+- Settings is a grouped list:
+  - Runtime: System runtime (opens System checks), Development environment, Coding agents;
+  - Keep agents running: notifications, battery, background process limit;
+  - Appearance, Feedback, Editor, GitHub and About (version, licences).
+
+  Details and choices open as bottom sheets.
+- **Appearance:** System / Light / Dark (*System* follows the phone, and the status and navigation bars
+  follow the app's choice), an accent colour, and Pure black for dark mode.
+- **Feedback:** vibration, sounds, battery and heat warnings, and the Tour.
 - System checks (also the first-run screen) groups Phone · Linux runtime · Developer tools · Tools ·
   Background; areas that pass fold away and problems show their fix. Pull down to run them again. Opening it runs every tool (git,
   gh, Node, the agents, the JDK) to check that it works. If the shell or package manager is broken it

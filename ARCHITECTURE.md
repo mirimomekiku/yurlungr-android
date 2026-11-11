@@ -184,8 +184,15 @@ Tools with `onlyIf` (optional agents) are checked only when installed, by System
 
 ## Navigation
 
-`MainActivity.kt` defines the `Route`s and a small `Navigator`: sidebar places replace the stack (☰
-shown), drilling in pushes (‹ shown), and back closes the sidebar, then pops, then returns to New chat.
+`MainActivity.kt` defines the `Route`s and a small `Navigator`:
+- sidebar places (New chat, Projects, Terminal, Servers, Agents, Devices, Settings) replace the stack, with ☰ shown;
+- drilling in pushes, with ‹ shown;
+- editor tabs replace the top;
+- back closes the sidebar, then pops, then returns to New chat.
+
+It also handles intents from notifications, tiles, the widget, launcher shortcuts and shares
+(`EXTRA_OPEN`, `EXTRA_TERMINAL_ID`, `ACTION_SEND`). On wide screens a file opened from a project shows
+beside it.
 Transitions come from `ui/Motion.kt`.
 
 ## Source map
