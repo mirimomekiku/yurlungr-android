@@ -147,8 +147,10 @@ object TerminalSessions {
             val status = "_yurlungr_exit=\$?; if [ \"\$_yurlungr_exit\" -ne 0 ]; then printf '\\nCommand failed (exit %s). Review the output above before retrying.\\n' \"\$_yurlungr_exit\"; fi"
             // Plain (non-login) bash for the command: the environment already comes from RuntimeEnv, and a
             // profile that exits, execs another shell or starts tmux must not hijack setups and sign-ins.
-            // The interactive shell left open afterwards is a normal login shell.
-            paths.bash to arrayOf("bash", "-c", if (keepShell) "$command\n$status\n$welcome\nexec bash -l" else command)
+            // The interactive shell left open afterwards is a normal login shell. Packages' own
+            // profile.d scripts (JAVA_HOME…) are still loaded, so commands see what terminals see.
+            val profiled = "${dev.yurlungr.app.runtime.RuntimeEnv.PROFILE_SNIPPET}\n$command"
+            paths.bash to arrayOf("bash", "-c", if (keepShell) "$profiled\n$status\n$welcome\nexec bash -l" else profiled)
         }
         val session = TerminalSession(
             shell.path,

@@ -7,6 +7,9 @@ setup_init() {
     printf 'Setup needs the installed Yurlungr Linux environment. Open System checks first.\n' >&2
     exit 64
   fi
+  # What packages add for login shells (JAVA_HOME from the JDK…), so the checks see it too.
+  local _f
+  for _f in "$PREFIX"/etc/profile.d/*.sh; do [ -r "$_f" ] && . "$_f" >/dev/null 2>&1 </dev/null; done
   local tool
   for tool in apt-get tee timeout flock; do
     if ! command -v "$tool" >/dev/null 2>&1; then

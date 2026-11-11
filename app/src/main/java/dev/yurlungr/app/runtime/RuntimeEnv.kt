@@ -22,7 +22,19 @@ object RuntimeEnv {
         put("HOME", paths.home.path)
         put("PREFIX", paths.prefix.path)
         put("TMPDIR", paths.tmp.path)
-        put("PATH", "${paths.shimBin.path}:${paths.bin.path}")
+        // Tools installed per user (cargo install, go install, uv tool, bun add -g…) come after
+        // the runtime's own bin, so they can never shadow the git and node the app relies on.
+        put("PATH", (listOf(paths.shimBin.path, paths.bin.path) + userBins(paths.home).map { it.path }).joinToString(":"))
+        put("PNPM_HOME", File(paths.home, PNPM_HOME).path)
+        put("GOPATH", File(paths.home, "go").path)
+        put("CARGO_HOME", File(paths.home, ".cargo").path)
+        // The same JDK `java` runs, as login shells get from profile.d/java.sh: agents, scripts
+        // and command terminals (none of them login shells) agree with the terminal.
+        Jdks.current(paths.prefix)?.let { put("JAVA_HOME", it.home.path) }
+        // .NET global tools look for the runtime here; Termux doesn't install it where they expect.
+        File(paths.prefix, "bin/dotnet").takeIf { it.exists() }
+            ?.let { runCatching { it.canonicalFile.parentFile }.getOrNull() }
+            ?.let { put("DOTNET_ROOT", it.path) }
         put("BROWSER", File(paths.shimBin, "yurlungr-open").path)
         put("PWD", cwd.path)
         put("TERMUX_VERSION", TERMUX_COMPAT_VERSION)
@@ -42,6 +54,22 @@ object RuntimeEnv {
         // this too; we set it so non-login commands (setup checks, scripts) get it as well.
         termuxExecLib(paths)?.let { put("LD_PRELOAD", it.path) }
     }
+
+    const val PNPM_HOME = ".local/share/pnpm"
+
+    /** Where language tools put the commands they install for the user, relative to home. */
+    val USER_BINS = listOf(
+        ".local/bin", ".cargo/bin", "go/bin", ".bun/bin", ".deno/bin", ".dotnet/tools", ".pub-cache/bin",
+        ".mix/escripts", ".luarocks/bin", ".config/composer/vendor/bin", ".yarn/bin", PNPM_HOME, ".nimble/bin", ".cabal/bin",
+    )
+
+    fun userBins(home: File): List<File> = USER_BINS.map { File(home, it) }
+
+    /**
+     * Shell code that loads the scripts in `$PREFIX/etc/profile.d` (what packages add for login shells, such
+     * as JAVA_HOME) into a non-login bash, silently: for agents' stdout is their protocol.
+     */
+    const val PROFILE_SNIPPET = "{ for _f in \"\$PREFIX\"/etc/profile.d/*.sh; do [ -r \"\$_f\" ] && . \"\$_f\"; done; } >/dev/null 2>&1 </dev/null; unset _f"
 
     fun array(paths: RuntimePaths, cwd: File = paths.home): Array<String> =
         map(paths, cwd).map { (k, v) -> "$k=$v" }.toTypedArray()

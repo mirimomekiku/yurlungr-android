@@ -199,7 +199,8 @@ class ChatSession(
                     check(cwd.mkdirs() || cwd.isDirectory) { "Couldn't create the project folder ${cwd.path}" }
                 }
                 val process = withContext(Dispatchers.IO) {
-                    ProcessBuilder(paths.bash.path, "-c", "exec ${agent.launchCommand(skipPermissions)}")
+                    // Package profile scripts (JAVA_HOME…) first, silently: stdout is the agent's protocol.
+                    ProcessBuilder(paths.bash.path, "-c", "${dev.yurlungr.app.runtime.RuntimeEnv.PROFILE_SNIPPET}; exec ${agent.launchCommand(skipPermissions)}")
                         .directory(cwd)
                         .apply {
                             environment().run {

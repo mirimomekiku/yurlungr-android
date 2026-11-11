@@ -65,6 +65,8 @@ object RuntimeAssets {
         }
         // Package lists and version checks for the setup scripts, from the same source as System checks.
         writeExecutable(File(paths.libexec, "toolchain.sh"), Toolchain.shellManifest())
+        // Gradle can use every installed JDK (projects that pin a toolchain); never fatal.
+        runCatching { Jdks.syncGradle(paths) }
 
         val motdLauncher = "#!${paths.bin}/sh\n# Yurlungr dynamic MOTD\nexec '${paths.bash}' '${paths.libexec}/motd.sh'\n"
         writeShim(paths, "yurlungr-status", motdLauncher)
@@ -171,9 +173,23 @@ object RuntimeAssets {
         |- GitHub: use `git` and `gh`. The user signs in from the app's Projects screen (gh auth + git credential
         |  helper), so pushes work once they have. Don't ask for tokens or passwords.
         |- Optional toolchains installed from System checks: ${installedPacks(paths)}. Anything else: `pkg install <name>`.
+        |- Java: ${jdkNote(paths)} ${'$'}JAVA_HOME is set everywhere. Gradle toolchains (`jvmToolchain(N)`) find
+        |  installed JDKs; there's no JDK auto-download on Android. The user switches the default in the app
+        |  (Settings → Development environment); don't change it with update-alternatives yourself.
+        |- Per-user tool folders are on PATH: ~/.local/bin, ~/.cargo/bin, ~/go/bin, ~/.bun/bin, ~/.deno/bin,
+        |  ~/.dotnet/tools, ~/.pub-cache/bin and others, so `cargo install`, `go install`, `uv tool install`,
+        |  `bun add -g`, `pnpm add -g` (PNPM_HOME is set) and `dotnet tool install -g` work.
         |- The user reads your replies on a phone screen: keep them short.
         |$END
         |""".trimMargin()
+
+    /** "JDK 21 (default), also 17." for the agent notes. */
+    private fun jdkNote(paths: RuntimePaths): String {
+        val all = Jdks.installed(paths.prefix)
+        val current = Jdks.current(paths.prefix) ?: return "no JDK installed yet (System checks → Java & Kotlin)."
+        val others = all.filter { it != current }.map { it.version }
+        return "JDK ${current.version} (default)" + (if (others.isEmpty()) "." else ", also ${others.joinToString()}.")
+    }
 
     /** Replaces the managed block in [file] (or appends it), leaving the user's own text alone. */
     private fun upsertManagedBlock(file: File, block: String) {
