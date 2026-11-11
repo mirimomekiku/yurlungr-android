@@ -14,7 +14,7 @@ internal data class WebRunConfig(
     val openBrowser: Boolean = true,
 ) {
     fun validate() {
-        require(project.supported) { "This framework hasn't been validated for local runs yet." }
+        require(project.supported || customCommand.isNotBlank()) { "Enter the command that starts this app's development server." }
         require(port in 1024..65535) { "Choose a port between 1024 and 65535." }
         require(project.directory.isDirectory) { "App folder no longer exists." }
         if (project.kind == WebKind.Vite && customCommand.isBlank()) require(script in project.scripts) { "Choose an available Vite development script." }
@@ -24,6 +24,8 @@ internal data class WebRunConfig(
         put("id", id); put("cwd", project.directory.canonicalPath); put("installCwd", project.installDirectory.canonicalPath)
         put("kind", project.kind.name); put("manager", manager.executable); put("script", script); put("port", port)
         put("install", install && project.kind != WebKind.Static); put("command", customCommand)
+        // The framework's own start command, used when there's no custom one.
+        project.launch?.let { put("launch", it) }
         put("node", node.path); put("bash", bash.path)
     }
 }

@@ -119,16 +119,21 @@ server.listen(config.port,'127.0.0.1',async () => {
     status('Starting','Waiting for the development server…');
     backendPort=await unusedPort();
     const flags=['--host','127.0.0.1','--port',String(backendPort),'--strictPort'];
-    child=config.command?.trim()
-      ? launch(config.bash,['-c',config.command],config.cwd,{PORT:String(backendPort),HOST:'127.0.0.1',BROWSER:'none'})
+    // A custom command, else the framework's own (vite, next dev...), else the project's vite script.
+    const command=(config.command||'').trim()||(config.launch||'').trim();
+    // Project binaries first, like `npm run` does.
+    const bins=[...new Set([config.cwd,config.installCwd].map(dir=>path.join(dir,'node_modules','.bin')))].join(path.delimiter);
+    child=command
+      ? launch(config.bash,['-c',command],config.cwd,{PORT:String(backendPort),HOST:'127.0.0.1',BROWSER:'none',PATH:bins+path.delimiter+(process.env.PATH||'')})
       : launch(config.manager,['run',config.script,...(config.manager==='npm'?['--']:[]),...flags],config.cwd,{BROWSER:'none'});
     child.once('error',error=>finish('Failed',error.message));
     child.once('exit',(code,signal)=> { if (!ending) finish('Failed',`Development server exited (${signal || code}). See terminal output.`); });
-    const deadline=Date.now()+90000;
+    // First compiles (Next.js on WebAssembly, Angular) can be slow on a phone.
+    const deadline=Date.now()+240000;
     while (!ending && Date.now()<deadline) {
       if (await backendReady()) { if (!ending) status('Running',`http://127.0.0.1:${config.port}`); return; }
       await new Promise(resolve=>setTimeout(resolve,400));
     }
-    if (!ending) finish('Failed','Server did not become ready within 90 seconds. Check terminal output.');
+    if (!ending) finish('Failed','Server did not become ready within 4 minutes. Check terminal output.');
   } catch(error) { finish('Failed',error.message); }
 });

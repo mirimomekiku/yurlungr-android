@@ -94,7 +94,7 @@ internal fun WebRunSheet(
     var script by remember(selectedPath) { mutableStateOf(stored?.get("script")?.jsonPrimitive?.contentOrNull
         ?.takeIf { it in project.scripts } ?: project.scripts.firstOrNull().orEmpty()) }
     var port by remember(selectedPath) { mutableStateOf(stored?.get("port")?.jsonPrimitive?.contentOrNull
-        ?: if (project.kind == WebKind.Static) "8080" else "5173") }
+        ?: WebQuickRun.defaultPort(project.kind).toString()) }
     var custom by remember(selectedPath) { mutableStateOf(stored?.get("command")?.jsonPrimitive?.contentOrNull.orEmpty()) }
     var install by remember(selectedPath) { mutableStateOf(!project.dependenciesPresent) }
     var openBrowser by remember(selectedPath) { mutableStateOf(stored?.get("openBrowser")?.jsonPrimitive?.booleanOrNull ?: true) }
@@ -115,20 +115,30 @@ internal fun WebRunSheet(
                     onClick = { selectedPath = candidate.directory.path; close() }) }
             }
             Text(project.framework, style = MaterialTheme.typography.titleMedium)
+            Text("Tip: tapping Run on the project starts it with these settings. Long-press Run to come back here.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            project.notes.forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary) }
             if (!project.supported) {
-                Text("Detected ${project.framework}, but this project's launch setup still needs device validation. This release supports Vite development scripts and plain static sites.")
-            } else {
+                Text("Couldn't tell how to start ${project.framework}. Enter the command that starts its development server below.")
+            }
+            run {
                 if (project.kind != WebKind.Static) {
                     MenuChip("Package manager: ${manager?.executable ?: "Choose"}") { close ->
                         WebPackageManager.entries.forEach { candidate -> DropdownMenuItem(text = { Text(candidate.executable) },
                             onClick = { manager = candidate; close() }) }
                     }
                     project.managerHint?.let { Text("Project declares $it", style = MaterialTheme.typography.bodySmall) }
-                    MenuChip("Script: $script") { close ->
-                        project.scripts.forEach { candidate -> DropdownMenuItem(text = { Text(candidate) }, onClick = { script = candidate; close() }) }
+                    when {
+                        project.kind == WebKind.Vite -> {
+                            MenuChip("Script: $script") { close ->
+                                project.scripts.forEach { candidate -> DropdownMenuItem(text = { Text(candidate) }, onClick = { script = candidate; close() }) }
+                            }
+                            Text("${manager?.executable ?: "<manager>"} run $script", style = MaterialTheme.typography.bodySmall)
+                        }
+                        project.launch != null -> Text("Starts with: ${project.launch}", style = MaterialTheme.typography.bodySmall,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
                     }
-                    Text("${manager?.executable ?: "<manager>"} run $script", style = MaterialTheme.typography.bodySmall)
-                    OutlinedTextField(custom, { custom = it }, label = { Text("Custom command (optional)") },
+                    OutlinedTextField(custom, { custom = it }, label = { Text(if (project.supported) "Custom command (optional)" else "Start command") },
                         supportingText = { Text("Custom servers must listen on 127.0.0.1 and the port supplied in \$PORT.") }, modifier = Modifier.fillMaxWidth())
                     Row(Modifier.fillMaxWidth().clickable { install = !install }, horizontalArrangement = Arrangement.SpaceBetween) {
                         Column(Modifier.weight(1f)) {

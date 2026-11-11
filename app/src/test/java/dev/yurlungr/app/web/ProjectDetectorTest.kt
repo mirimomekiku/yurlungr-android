@@ -34,12 +34,41 @@ class ProjectDetectorTest {
         assertEquals(File(root,"apps/client"),app.directory)
         assertEquals(root,app.installDirectory)
     }
-    @Test fun `Next and Vite build only projects are candidates instead of static sites`() {
+    @Test fun `known frameworks start with their own dev command instead of being static sites`() {
         val root=temp.newFolder()
         file(root,"index.html"); file(root,"package.json", """{"dependencies":{"next":"*"}}""")
-        assertEquals(WebKind.Candidate,ProjectDetector.detect(root).web.single().kind)
-        file(root,"package.json", """{"devDependencies":{"vite":"*"},"scripts":{"build":"vite build"}}""")
-        assertEquals(WebKind.Candidate,ProjectDetector.detect(root).web.single().kind)
+        val next=ProjectDetector.detect(root).web.single()
+        assertEquals(WebKind.Framework,next.kind); assertEquals("Next.js",next.framework)
+        assertTrue(next.launch!!.startsWith("next dev -H 127.0.0.1"))
+        assertTrue("warns about the WebAssembly compiler", next.notes.isNotEmpty())
+        // Vite without a plain `vite` dev script (e.g. "tsc && vite"): run Vite directly.
+        file(root,"package.json", """{"devDependencies":{"vite":"*"},"scripts":{"dev":"tsc && vite","build":"vite build"}}""")
+        val vite=ProjectDetector.detect(root).web.single()
+        assertEquals(WebKind.Framework,vite.kind)
+        assertEquals("vite --host 127.0.0.1 --port \"\$PORT\" --strictPort",vite.launch)
+    }
+    @Test fun `framework checks come before Vite, and every preset binds loopback and PORT`() {
+        val root=temp.newFolder()
+        file(root,"package.json", """{"devDependencies":{"vite":"*","@sveltejs/kit":"*","astro":"*"}}""")
+        assertEquals("Astro",ProjectDetector.detect(root).web.single().framework)
+        for (fw in listOf("Vite","SvelteKit","Next.js","Astro","Nuxt","Angular","Expo (web)")) {
+            val cmd=ProjectDetector.launchCommand(fw)!!
+            assertTrue(fw,cmd.contains("\$PORT"))
+        }
+        assertEquals("react-scripts start",ProjectDetector.launchCommand("Create React App"))
+        assertNull(ProjectDetector.launchCommand("Remix"))
+    }
+    @Test fun `an unknown setup runs once given a start command`() {
+        val root=temp.newFolder(); file(root,"index.html")
+        val project=ProjectDetector.detect(root).web.single().copy(kind=WebKind.Candidate)
+        val config=WebRunConfig(project,WebPackageManager.Npm,"",5173,false)
+        assertThrows(IllegalArgumentException::class.java) { config.validate() }
+        config.copy(customCommand="node server.js --port \$PORT").validate()
+    }
+    @Test fun `a taken port moves to the next free one`() {
+        java.net.ServerSocket(0,1,java.net.InetAddress.getByName("127.0.0.1")).use { taken ->
+            assertNotEquals(taken.localPort,WebQuickRun.freePort(taken.localPort))
+        }
     }
     @Test fun `static site and conflicting lock files require explicit manager selection`() {
         val root=temp.newFolder(); file(root,"index.html"); file(root,"package-lock.json"); file(root,"yarn.lock")
