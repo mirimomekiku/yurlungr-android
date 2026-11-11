@@ -105,6 +105,8 @@ private val Mono: EditorTheme get() = EditorPrefs.theme
 
 private const val MAX_EDIT_BYTES = 1L * 1024 * 1024
 private const val MAX_HIGHLIGHT_CHARS = 300_000
+/** Times a crashed language server is restarted automatically before it waits for a tap. */
+private const val LSP_RESTARTS = 3
 
 private sealed interface Load {
     data object Loading : Load
@@ -239,6 +241,18 @@ private fun Editor(
     val indentUnit = remember { detectIndent(initial.text, lang) }
     var readOnly by remember { mutableStateOf(false) }
     var wrap by remember { mutableStateOf(lang.kind == Language.Kind.Markdown || lang.kind == Language.Kind.Plain) }
+        lspNote = null
+    }
+    val lspRunning = lsp?.running
+    LaunchedEffect(lspRunning) {
+        val dead = lsp?.takeIf { lspRunning == false } ?: return@LaunchedEffect
+        lsp = null
+        LspManager.release(dead)
+        if (lspStart < LSP_RESTARTS) {
+            lspNote = "${dead.server.name} stopped · restarting…"
+            delay(2_000)
+            lspStart++
+        } else lspNote = "${dead.server.name} keeps stopping · tap to retry"
     val fontSp = EditorPrefs.fontSize
     var formatting by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
@@ -250,8 +264,14 @@ private fun Editor(
     var showProblems by remember { mutableStateOf(false) }
     var hoverText by remember { mutableStateOf<String?>(null) }
     var completions by remember { mutableStateOf<List<Pair<String, String>>?>(null) }
-    LaunchedEffect(file) {
-        val c = LspManager.acquire(context, file) ?: return@LaunchedEffect
+    // A server that crashes is restarted (a few times), with a note in the bar while it's down.
+    var lspNote by remember { mutableStateOf<String?>(null) }
+    var lspStart by remember { mutableIntStateOf(0) }
+    LaunchedEffect(file, lspStart) {
+        val c = LspManager.acquire(context, file) ?: run {
+            if (lspStart > 0) lspNote = "Language server didn't restart · tap to retry"
+            return@LaunchedEffect
+        }
         c.open(file, value.text)
         lsp = c
     }
@@ -712,6 +732,14 @@ private fun Editor(
                                     val smart = smartEdit(value, new, indentUnit, lang)
                                     val inserted = smart.text.length - value.text.length
                                     val boundary = inserted != 1 || smart.text.getOrNull(smart.selection.start - 1)?.isWhitespace() == true
+        lspNote?.let { note ->
+            Row(Modifier.fillMaxWidth().background(Mono.Bar).clickable(enabled = note.endsWith("retry")) { lspNote = null; lspStart++ }
+                .padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                PhIcon(Ph.Warning, null, size = 13.dp, tint = Mono.Modified)
+                Spacer(Modifier.width(6.dp))
+                Text(note, color = Mono.Dim, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
+            }
+        }
                                     set(smart, boundary)
                                 }
                             },

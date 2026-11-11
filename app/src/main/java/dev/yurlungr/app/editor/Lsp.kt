@@ -2,11 +2,14 @@ package dev.yurlungr.app.editor
 
 import android.content.Context
 import android.util.Log
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.setValue
 import dev.yurlungr.app.runtime.RuntimeEnv
 import dev.yurlungr.app.runtime.RuntimePaths
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
@@ -79,6 +82,10 @@ class LspClient(private val paths: RuntimePaths, val root: File, val server: Lsp
     @Volatile var alive = true
         private set
 
+    /** [alive] for Compose: the editor watches it to notice a crash and restart the server. */
+    var running by androidx.compose.runtime.mutableStateOf(true)
+        private set
+
     init {
         val script = "${RuntimeEnv.PROFILE_SNIPPET}; exec " + server.command.joinToString(" ") { "'" + it.replace("'", "'\\''") + "'" }
         process = ProcessBuilder(paths.bash.path, "-c", script).directory(root)
@@ -111,6 +118,7 @@ class LspClient(private val paths: RuntimePaths, val root: File, val server: Lsp
         } finally {
             alive = false
             pending.values.forEach { it.complete(null) }
+            android.os.Handler(android.os.Looper.getMainLooper()).post { running = false }
         }
     }
 
@@ -125,7 +133,8 @@ class LspClient(private val paths: RuntimePaths, val root: File, val server: Lsp
     }
 
     private fun handle(msg: JsonObject) {
-        val id = (msg["id"] as? JsonPrimitive)?.intOrNull
+        val rawId = msg["id"] as? JsonPrimitive
+        val id = rawId?.intOrNull
         val method = (msg["method"] as? JsonPrimitive)?.contentOrNull
         when {
             method == "textDocument/publishDiagnostics" -> {
@@ -138,10 +147,21 @@ class LspClient(private val paths: RuntimePaths, val root: File, val server: Lsp
                         o["severity"]?.jsonPrimitive?.intOrNull ?: 1, o["message"]?.jsonPrimitive?.contentOrNull.orEmpty(), o["source"]?.jsonPrimitive?.contentOrNull)
                 }
             }
-            // A request from the server (configuration, progress…): answer with nothing.
-            method != null && id != null -> send(buildJsonObject { put("jsonrpc", "2.0"); put("id", id); put("result", JsonNull) })
+            // A request from the server (configuration, progress…), with its id as given (a number or a string).
+            method != null && rawId != null -> send(buildJsonObject {
+                put("jsonrpc", "2.0")
+                put("id", rawId)
+                put("result", serverRequestResult(method, msg["params"] as? JsonObject))
+            })
             id != null -> pending.remove(id)?.complete(msg["result"])
         }
+    }
+
+    /** Default answers: settings are asked per item and need one (empty) answer each. */
+    internal fun serverRequestResult(method: String, params: JsonObject?): JsonElement = when (method) {
+        "workspace/configuration" -> JsonArray(List((params?.get("items") as? JsonArray)?.size ?: 0) { JsonNull })
+        "workspace/workspaceFolders" -> buildJsonArray { add(buildJsonObject { put("uri", uri(root)); put("name", root.name) }) }
+        else -> JsonNull
     }
 
     @Synchronized
@@ -254,27 +274,56 @@ class LspClient(private val paths: RuntimePaths, val root: File, val server: Lsp
     }
 }
 
-/** One server per project and language, shared by the editors that use it; stopped when the last closes. */
+/**
+ * One server per project and language, shared by the editors that use it; stopped when the last
+ * closes. Counted per client object: after a crash a new client replaces the old under the same
+ * key, and releasing the old one must not stop the new one.
+ */
 object LspManager {
-    private val clients = HashMap<String, Pair<LspClient, Int>>()
+    private class Entry(val client: LspClient, var users: Int)
+    private val clients = HashMap<String, Entry>()
+    /** One start at a time per project and language: two editors opening at once share one server. */
+    private val starting = HashMap<String, kotlinx.coroutines.sync.Mutex>()
 
-    suspend fun acquire(context: Context, file: File): LspClient? = withContext(Dispatchers.IO) {
-        val paths = RuntimePaths(context)
-        val server = LspServers.forFile(paths, file) ?: return@withContext null
-        val root = EditorTools.rootOf(file)
-        val key = root.path + "|" + server.name
-        synchronized(clients) {
-            clients[key]?.takeIf { it.first.alive }?.let { (c, n) -> clients[key] = c to n + 1; return@withContext c }
+    suspend fun acquire(context: Context, file: File): LspClient? {
+        // Set once this caller holds a use; if it's cancelled before getting the result, give it back.
+        val held = java.util.concurrent.atomic.AtomicReference<LspClient?>()
+        try {
+            return withContext(Dispatchers.IO) {
+                val paths = RuntimePaths(context)
+                val server = LspServers.forFile(paths, file) ?: return@withContext null
+                val root = EditorTools.rootOf(file)
+                val key = root.path + "|" + server.name
+                val lock = synchronized(clients) { starting.getOrPut(key) { kotlinx.coroutines.sync.Mutex() } }
+                lock.withLock {
+                    synchronized(clients) {
+                        clients[key]?.takeIf { it.client.alive }?.let { e -> e.users++; held.set(e.client); return@withContext e.client }
+                    }
+                    val client = runCatching { LspClient(paths, root, server) }.getOrNull() ?: return@withContext null
+                    val ok = try { client.initialize() } catch (e: Throwable) { client.stop(); throw e }
+                    if (!ok) { client.stop(); return@withContext null }
+                    synchronized(clients) {
+                        // A crashed predecessor under this key is replaced; its editors release it by identity.
+                        clients[key] = Entry(client, 1)
+                    }
+                    held.set(client)
+                    client
+                }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            held.get()?.let(::release)
+            throw e
         }
-        val client = runCatching { LspClient(paths, root, server) }.getOrNull() ?: return@withContext null
-        if (!client.initialize()) { client.stop(); return@withContext null }
-        synchronized(clients) { clients[key] = client to 1 }
-        client
     }
 
     fun release(client: LspClient) = synchronized(clients) {
-        val key = client.root.path + "|" + client.server.name
-        val (c, n) = clients[key] ?: return@synchronized
-        if (n <= 1) { clients.remove(key); c.stop() } else clients[key] = c to n - 1
+        val key = clients.entries.firstOrNull { it.value.client === client }?.key
+        if (key == null) {
+            // Not tracked any more (replaced after a crash): make sure its process is gone.
+            client.stop()
+            return@synchronized
+        }
+        val e = clients.getValue(key)
+        if (--e.users <= 0) { clients.remove(key); client.stop() }
     }
 }
