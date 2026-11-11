@@ -27,6 +27,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -85,19 +87,19 @@ private fun lanePalette(): List<Color> {
 private fun List<Color>.lane(i: Int) = this[i % size]
 
 private val LANE = 14.dp
-private val ROW = 58.dp
+private val ROW = 64.dp
 private const val MAX_LANES = 8
 
 private sealed interface HistoryItem {
     val key: String
-    data class Day(val label: String, val lanes: List<Int>) : HistoryItem { override val key get() = "day:$label" }
+    data class Day(val label: String, val lanes: List<Int>, val count: Int) : HistoryItem { override val key get() = "day:$label" }
     data class Entry(val commit: GitCommit, val row: GraphRow) : HistoryItem { override val key get() = commit.hash }
 }
 
 /**
- * History as a commit graph: colored lanes for branches and merges, grouped under day headings
- * (Today, Yesterday, weekday, date), branch and tag labels on their commits, and a "not pushed"
- * mark on local-only commits. Tap a commit for its message, files and diffs.
+ * History as a commit graph: a search bar and a filter sheet (author, date), this branch or all,
+ * coloured lanes for branches and merges, day headings with their commit counts, author avatars,
+ * branch and tag labels, and a mark on commits not pushed yet. Tap a commit for its details.
  */
 @Composable
 fun HistoryView(dir: java.io.File, git: Git, status: GitStatus?, refreshKey: Int) {
@@ -110,7 +112,7 @@ fun HistoryView(dir: java.io.File, git: Git, status: GitStatus?, refreshKey: Int
     var filterAuthor by rememberSaveable(dir.path) { mutableStateOf<String?>(null) }
     var filterPeriod by rememberSaveable(dir.path) { mutableStateOf(HistoryPeriod.Any) }
     var query by rememberSaveable(dir.path) { mutableStateOf("") }
-    var searching by rememberSaveable(dir.path) { mutableStateOf(false) }
+    var showFilters by remember { mutableStateOf(false) }
     // Typing shouldn't run git for every letter.
     var debouncedQuery by remember { mutableStateOf(query) }
     LaunchedEffect(query) { kotlinx.coroutines.delay(350); debouncedQuery = query }
@@ -134,65 +136,74 @@ fun HistoryView(dir: java.io.File, git: Git, status: GitStatus?, refreshKey: Int
         commits?.let { c -> buildItems(if (filter.isActive) c.map { it.copy(parents = emptyList()) } else c) }
     }
     val laneCount = remember(items) { items.orEmpty().filterIsInstance<HistoryItem.Entry>().maxOfOrNull { it.row.width }?.coerceIn(1, MAX_LANES) ?: 1 }
+    val colors = MaterialTheme.colorScheme
 
     LazyColumn(contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 16.dp), modifier = Modifier.fillMaxSize()) {
-        item(key = "filters") {
-            Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Chip(if (allBranches) "All branches" else "This branch", selected = allBranches, onClick = { allBranches = !allBranches })
-                    dev.yurlungr.app.ui.MenuChip(filterAuthor ?: "Author") { close ->
-                        androidx.compose.material3.DropdownMenuItem(text = { Text("Anyone") }, onClick = { filterAuthor = null; close() })
-                        for (a in authors.take(30)) {
-                            androidx.compose.material3.DropdownMenuItem(
-                                text = { Text(a, fontWeight = if (a == filterAuthor) FontWeight.SemiBold else null) },
-                                onClick = { filterAuthor = a; close() },
+        item(key = "toolbar") {
+            Column(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SearchPill(query, { query = it }, "Search messages or a hash", Modifier.weight(1f))
+                    val active = (if (filterAuthor != null) 1 else 0) + (if (filterPeriod != HistoryPeriod.Any) 1 else 0)
+                    Box(
+                        Modifier.size(44.dp).clip(CircleShape)
+                            .background(if (active > 0) colors.primaryContainer else colors.surfaceContainer)
+                            .clickable { showFilters = true },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        PhIcon(Ph.ListChecks, "Filters", size = 19.dp, tint = if (active > 0) colors.onPrimaryContainer else colors.onSurface)
+                        if (active > 0) {
+                            Text("$active", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = colors.onPrimary,
+                                modifier = Modifier.align(Alignment.TopEnd).size(16.dp).clip(CircleShape).background(colors.primary)
+                                    .wrapContentSize(Alignment.Center))
+                        }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Which history: the branch you're on, or every branch.
+                    Row(Modifier.clip(RoundedCornerShape(12.dp)).background(colors.surfaceContainer).padding(3.dp)) {
+                        for ((label, value) in listOf("This branch" to false, "All branches" to true)) {
+                            val on = allBranches == value
+                            Text(
+                                label, style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (on) colors.onSurface else colors.onSurfaceVariant,
+                                modifier = Modifier.clip(RoundedCornerShape(9.dp))
+                                    .background(if (on) colors.surfaceContainerHighest else Color.Transparent)
+                                    .clickable { allBranches = value }.padding(horizontal = 12.dp, vertical = 6.dp),
                             )
                         }
                     }
-                    dev.yurlungr.app.ui.MenuChip(if (filterPeriod == HistoryPeriod.Any) "Date" else filterPeriod.label) { close ->
-                        for (p in HistoryPeriod.entries) {
-                            androidx.compose.material3.DropdownMenuItem(
-                                text = { Text(p.label, fontWeight = if (p == filterPeriod) FontWeight.SemiBold else null) },
-                                onClick = { filterPeriod = p; close() },
+                    Spacer(Modifier.weight(1f))
+                    commits?.let { c ->
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                "${c.size}${if (c.size >= 300) "+" else ""} ${if (filter.isActive) "matching" else "commits"}",
+                                style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant,
                             )
+                            if (unpushed.isNotEmpty() && !filter.isActive) {
+                                Text("${unpushed.size} not pushed", style = MaterialTheme.typography.labelSmall, color = AppColors.status.warning)
+                            }
                         }
                     }
-                    Chip(if (query.isNotBlank()) "“${query.trim().take(12)}”" else "Search", selected = searching || query.isNotBlank(), onClick = { searching = !searching })
-                    if (filter.isActive || query.isNotBlank()) {
-                        Chip("Clear", onClick = { filterAuthor = null; filterPeriod = HistoryPeriod.Any; query = ""; searching = false })
+                }
+                if (filterAuthor != null || filterPeriod != HistoryPeriod.Any) {
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        filterAuthor?.let { a -> RemovableChip("By $a") { filterAuthor = null } }
+                        if (filterPeriod != HistoryPeriod.Any) RemovableChip(filterPeriod.label) { filterPeriod = HistoryPeriod.Any }
                     }
-                }
-                if (searching) {
-                    androidx.compose.material3.OutlinedTextField(
-                        query, { query = it },
-                        placeholder = { Text("Message or commit hash") },
-                        singleLine = true,
-                        leadingIcon = { PhIcon(Ph.MagnifyingGlass, null, size = 18.dp) },
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                commits?.let { c ->
-                    Text(
-                        (if (filter.isActive) "${c.size}${if (c.size >= 300) "+" else ""} matching commits" else "${c.size}${if (c.size >= 300) "+" else ""} commits") +
-                            if (unpushed.isNotEmpty() && !filter.isActive) " · ${unpushed.size} not pushed" else "",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 4.dp),
-                    )
                 }
             }
         }
         when {
             status == null || items == null -> items(6) { SkeletonListItem() }
-            !status.isRepo -> item { Note(status.error?.message ?: "Not a git repository.") }
-            logError != null -> item { Note("Couldn't read the history: $logError") }
-            items.isEmpty() && filter.isActive -> item { Note("No commits match these filters.") }
-            items.isEmpty() -> item { Note("No commits yet. Commit from the Changes tab.") }
+            !status.isRepo -> item { EmptyNote(Ph.GitBranch, "Not a git repository", status.error?.message ?: "Initialize git from the Changes tab.") }
+            logError != null -> item { EmptyNote(Ph.Warning, "Couldn't read the history", logError.orEmpty()) }
+            items.isEmpty() && filter.isActive -> item {
+                EmptyNote(Ph.MagnifyingGlass, "No matching commits", "Try another search, or clear the filters.") {
+                    TextButton(onClick = { filterAuthor = null; filterPeriod = HistoryPeriod.Any; query = "" }) { Text("Clear filters") }
+                }
+            }
+            items.isEmpty() -> item { EmptyNote(Ph.GitCommit, "No commits yet", "Commit from the Changes tab and it shows up here.") }
             else -> items(items, key = { it.key }) { item ->
                 when (item) {
                     is HistoryItem.Day -> DayHeader(item, laneCount)
@@ -202,18 +213,129 @@ fun HistoryView(dir: java.io.File, git: Git, status: GitStatus?, refreshKey: Int
         }
     }
 
+    if (showFilters) {
+        FilterSheet(
+            authors, filterAuthor, filterPeriod,
+            onApply = { a, p -> filterAuthor = a; filterPeriod = p; showFilters = false },
+            onDismiss = { showFilters = false },
+        )
+    }
     open?.let { c -> CommitSheet(dir, git, c, c.hash in unpushed) { open = null } }
+}
+
+@Composable
+private fun SearchPill(value: String, onChange: (String) -> Unit, placeholder: String, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    androidx.compose.foundation.text.BasicTextField(
+        value, onChange,
+        singleLine = true,
+        textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
+        cursorBrush = androidx.compose.ui.graphics.SolidColor(colors.primary),
+        modifier = modifier,
+        decorationBox = { field ->
+            Row(
+                Modifier.height(44.dp).clip(RoundedCornerShape(22.dp)).background(colors.surfaceContainer).padding(start = 14.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PhIcon(Ph.MagnifyingGlass, null, size = 17.dp, tint = colors.onSurfaceVariant)
+                Spacer(Modifier.width(8.dp))
+                Box(Modifier.weight(1f)) {
+                    if (value.isEmpty()) Text(placeholder, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant, maxLines = 1)
+                    field()
+                }
+                if (value.isNotEmpty()) {
+                    androidx.compose.material3.IconButton(onClick = { onChange("") }) { PhIcon(Ph.XCircle, "Clear search", size = 18.dp, tint = colors.onSurfaceVariant) }
+                } else Spacer(Modifier.width(10.dp))
+            }
+        },
+    )
+}
+
+@Composable
+private fun RemovableChip(label: String, onRemove: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        Modifier.height(30.dp).clip(CircleShape).background(colors.secondaryContainer).clickable(onClick = onRemove).padding(start = 12.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = colors.onSecondaryContainer, maxLines = 1)
+        Spacer(Modifier.width(4.dp))
+        PhIcon(Ph.XCircle, "Remove", size = 14.dp, tint = colors.onSecondaryContainer)
+    }
+}
+
+@Composable
+private fun EmptyNote(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, text: String, action: (@Composable () -> Unit)? = null) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        val lilac = AppColors.tiles.lilac
+        Box(Modifier.size(56.dp).clip(RoundedCornerShape(20.dp)).background(lilac.fill), contentAlignment = Alignment.Center) {
+            PhIcon(icon, null, size = 26.dp, tint = lilac.on)
+        }
+        Text(title, style = MaterialTheme.typography.titleMedium)
+        if (text.isNotBlank()) Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+        action?.invoke()
+    }
+}
+
+/** Author and date, chosen together and applied with Done. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun FilterSheet(authors: List<String>, author: String?, period: HistoryPeriod, onApply: (String?, HistoryPeriod) -> Unit, onDismiss: () -> Unit) {
+    var a by remember { mutableStateOf(author) }
+    var p by remember { mutableStateOf(period) }
+    val colors = MaterialTheme.colorScheme
+    dev.yurlungr.app.ui.AppSheet(
+        "Filter history", onDismiss = onDismiss, subtitle = "By author and date. Search works with them.", icon = Ph.ListChecks,
+        actions = {
+            androidx.compose.material3.OutlinedButton(onClick = { a = null; p = HistoryPeriod.Any }, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Reset") }
+            androidx.compose.material3.Button(onClick = { onApply(a, p) }, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Show commits") }
+        },
+    ) {
+        Text("When", style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant)
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (option in HistoryPeriod.entries) Chip(option.label, selected = p == option, onClick = { p = option })
+        }
+        Text("Author", style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
+        for (name in listOf<String?>(null) + authors.take(30)) {
+            val on = a == name
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(if (on) colors.secondaryContainer else Color.Transparent)
+                    .clickable { a = name }.padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (name == null) Box(Modifier.size(28.dp).clip(CircleShape).background(colors.surfaceContainerHighest), contentAlignment = Alignment.Center) {
+                    PhIcon(Ph.User, null, size = 15.dp, tint = colors.onSurfaceVariant)
+                } else Avatar(name, 28.dp)
+                Spacer(Modifier.width(10.dp))
+                Text(name ?: "Anyone", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (on) PhIcon(Ph.CheckCircle, null, size = 18.dp, tint = colors.primary)
+            }
+        }
+    }
+}
+
+/** A round badge with the author's initials, coloured by name so each person stays recognisable. */
+@Composable
+private fun Avatar(name: String, size: Dp) {
+    val t = AppColors.tiles
+    val tile = listOf(t.lime, t.lilac, t.peach, t.sky)[(name.lowercase().hashCode() and 0x7fffffff) % 4]
+    val initials = name.split(' ', '.', '_', '-').filter { it.isNotBlank() }.take(2).joinToString("") { it.take(1).uppercase() }.ifEmpty { "?" }
+    Box(Modifier.size(size).clip(CircleShape).background(tile.fill), contentAlignment = Alignment.Center) {
+        Text(initials, color = tile.on, fontSize = (size.value * 0.38f).sp, fontWeight = FontWeight.Bold, maxLines = 1)
+    }
 }
 
 private fun buildItems(commits: List<GitCommit>): List<HistoryItem> {
     val rows = GitGraph.layout(commits)
+    val perDay = commits.groupingBy { dayLabel(it.time) }.eachCount()
     val out = ArrayList<HistoryItem>()
     var lastDay: String? = null
     var active = emptyList<Int>() // lanes alive between the previous row and this one
     commits.forEachIndexed { i, c ->
         val day = dayLabel(c.time)
         if (day != lastDay) {
-            out += HistoryItem.Day(day, active)
+            out += HistoryItem.Day(day, active, perDay[day] ?: 0)
             lastDay = day
         }
         out += HistoryItem.Entry(c, rows[i])
@@ -229,7 +351,7 @@ private fun Note(text: String) {
 
 @Composable
 private fun DayHeader(day: HistoryItem.Day, laneCount: Int) {
-    Row(Modifier.fillMaxWidth().height(34.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
         val palette = lanePalette()
         Canvas(Modifier.width(graphWidth(laneCount)).fillMaxHeight()) {
             for (l in day.lanes) if (l < MAX_LANES) {
@@ -237,7 +359,11 @@ private fun DayHeader(day: HistoryItem.Day, laneCount: Int) {
                 drawLine(palette.lane(l), Offset(x, 0f), Offset(x, size.height), strokeWidth = 2.dp.toPx())
             }
         }
-        Text(day.label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(day.label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 10.dp, vertical = 3.dp))
+        Spacer(Modifier.width(8.dp))
+        Text("${day.count} commit${if (day.count == 1) "" else "s"}", style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -248,13 +374,14 @@ private fun DrawScope.laneX(lane: Int) = (LANE.toPx() * lane) + LANE.toPx() / 2 
 private fun CommitRow(entry: HistoryItem.Entry, laneCount: Int, notPushed: Boolean, onClick: () -> Unit) {
     val c = entry.commit
     val r = entry.row
-    val bg = MaterialTheme.colorScheme.background
+    val colors = MaterialTheme.colorScheme
+    val bg = colors.background
     Row(
         Modifier
             .fillMaxWidth()
             .height(IntrinsicSize.Min)
             .heightIn(min = ROW)
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onClick),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -281,25 +408,33 @@ private fun CommitRow(entry: HistoryItem.Entry, laneCount: Int, notPushed: Boole
                 drawCircle(color, radius, node)
             }
         }
-        Column(Modifier.weight(1f).padding(vertical = 6.dp, horizontal = 4.dp)) {
+        Column(Modifier.weight(1f).padding(vertical = 8.dp, horizontal = 4.dp)) {
             if (c.refs.isNotEmpty()) {
-                Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 3.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     for (ref in c.refs) RefChip(ref)
                 }
             }
-            Text(c.subject, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "${c.short} · ${c.author} · ${timeLabel(LocalContext.current, c.time)}" + if (c.parents.size > 1) " · merge" else "",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                if (notPushed) {
-                    Spacer(Modifier.width(6.dp))
-                    Text("not pushed", style = MaterialTheme.typography.labelSmall, color = AppColors.status.warning)
+                Avatar(c.author, 30.dp)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(c.subject, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        "${c.author} · ${timeLabel(LocalContext.current, c.time)}" + if (c.parents.size > 1) " · merge" else "",
+                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(c.short, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = colors.onSurfaceVariant)
+                    if (notPushed) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            PhIcon(Ph.CloudArrowUp, null, size = 12.dp, tint = AppColors.status.warning)
+                            Spacer(Modifier.width(3.dp))
+                            Text("to push", style = MaterialTheme.typography.labelSmall, color = AppColors.status.warning)
+                        }
+                    }
                 }
             }
         }
@@ -374,18 +509,46 @@ private fun CommitSheet(dir: java.io.File, git: Git, c: GitCommit, notPushed: Bo
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         LazyColumn(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp)) {
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (c.refs.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) { for (ref in c.refs) RefChip(ref) }
-                    Text(c.subject, style = MaterialTheme.typography.titleMedium)
-                    body?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    Text(
-                        "${c.author} · ${fullTime(context, c.time)}" + if (notPushed) " · not pushed" else "",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                val colors = MaterialTheme.colorScheme
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(c.hash, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        TextButton(onClick = { copy(context, c.hash) }) { Text("Copy hash") }
+                        Avatar(c.author, 44.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(c.author, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(fullTime(context, c.time), style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                        }
+                        if (notPushed) {
+                            Row(
+                                Modifier.clip(CircleShape).background(AppColors.status.warningContainer).padding(horizontal = 10.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                PhIcon(Ph.CloudArrowUp, null, size = 13.dp, tint = AppColors.status.onWarningContainer)
+                                Spacer(Modifier.width(4.dp))
+                                Text("Not pushed", style = MaterialTheme.typography.labelSmall, color = AppColors.status.onWarningContainer)
+                            }
+                        }
+                    }
+                    if (c.refs.isNotEmpty()) Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) { for (ref in c.refs) RefChip(ref) }
+                    Text(c.subject, style = MaterialTheme.typography.titleLarge)
+                    body?.takeIf { it.isNotBlank() }?.let {
+                        Text(it, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant,
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(colors.surfaceContainer).padding(12.dp))
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        // The hash: tap to copy.
+                        Row(
+                            Modifier.clip(CircleShape).background(colors.surfaceContainer).clickable { copy(context, c.hash) }
+                                .padding(horizontal = 12.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            PhIcon(Ph.GitCommit, null, size = 14.dp, tint = colors.onSurfaceVariant)
+                            Spacer(Modifier.width(6.dp))
+                            Text(c.hash.take(12), fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                            Spacer(Modifier.width(6.dp))
+                            PhIcon(Ph.Copy, "Copy hash", size = 13.dp, tint = colors.onSurfaceVariant)
+                        }
+                        TextButton(onClick = { copy(context, listOfNotNull(c.subject, body?.takeIf { it.isNotBlank() }).joinToString("\n\n")) }) { Text("Copy message") }
                     }
                     if (c.parents.size > 1) {
                         Text("Merge of ${c.parents.joinToString(" + ") { it.take(7) }} · files shown against the first parent", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -420,8 +583,17 @@ private fun CommitSheet(dir: java.io.File, git: Git, c: GitCommit, notPushed: Bo
                             'R' -> "R" to MaterialTheme.colorScheme.primary
                             else -> f.status.toString() to AppColors.status.warning
                         }
-                        Box(Modifier.width(22.dp)) { Text(letter, fontWeight = FontWeight.Bold, color = color, fontFamily = FontFamily.Monospace) }
-                        Text(f.path, fontFamily = FontFamily.Monospace, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Box(Modifier.size(22.dp).clip(RoundedCornerShape(7.dp)).background(color.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
+                            Text(letter, fontWeight = FontWeight.Bold, color = color, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(f.path.substringAfterLast('/'), fontFamily = FontFamily.Monospace, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            f.path.substringBeforeLast('/', "").takeIf { it.isNotEmpty() }?.let {
+                                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
                         PhIcon(if (openFile == f.path) Ph.CaretDown else Ph.CaretRight, null, size = 12.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (openFile == f.path) {
