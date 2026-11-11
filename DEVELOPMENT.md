@@ -31,7 +31,7 @@ losing the runtime and chats. Switching to a dedicated release key will require 
 ```sh
 ./gradlew testDebugUnitTest   # git, editor/Markdown, chat persistence/permissions, remote protocol, MOTD and web detection
 ./gradlew lintDebug
-node --test tools/test-web-runner.cjs  # static serving, proxy/HMR, conflicts, failures, process cleanup
+node --test tools/test-web-*.cjs  # launch adapters, readiness, SSR/HMR, failures, process cleanup
 # Explicit device smoke check (requires Node.js in the installed app's runtime):
 ./gradlew assembleDebug assembleDebugAndroidTest
 adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
@@ -42,9 +42,20 @@ adb uninstall com.termux.test
 
 The device smoke runner uses temporary app-cache fixtures. It checks static HTTP serving, loopback
 health requests, duplicate-run prevention and managed End/Restart/Close without unlocking the device.
-It also checks Vite when the optional `cache/web-vite-smoke/site` fixture is present. The 0.0.2 device
-validation included Vite 8.3.6 with transformed modules and HMR. To run the Node integration suite inside
-Termux, set `YURLUNGR_TEST_NODE`, `YURLUNGR_TEST_BASH` and `YURLUNGR_TEST_FALSE` to the corresponding
+It also checks framework launches and Close with optional fixtures at `cache/web-vite-smoke/site`,
+`cache/web-next-smoke/site`, and `cache/web-astro-smoke/site` (each must have its dependencies installed
+and a page containing `Yurlungr <Vite|Next|Astro> device check`; Vite needs `/main.js`, Next `/api/check`).
+
+On arm64 with Termux Node 24.22.2, local runtime checks cover Vite 8.3.6 module transformation/HMR,
+Next.js 16.4.5 Webpack with its matching WASM fallback (Pages/App Router HTTP, SSR public-origin
+headers, HMR and compiler recovery), and Astro 7.4.7 HTTP serving. An isolated copy of a Next 15.3.5/Tailwind 4.1.11/DaisyUI 5.0.43 repository
+also checks the missing Lightning CSS Android binding fallback with exact-version WASM and generated CSS.
+The optional `cache/web-project-regression/site` fixture is checked by Android instrumentation when
+present; omit credentials and `.env` files from copied fixtures. These checks do not guarantee every repo works.
+Nuxt, Angular, CRA, Parcel and Webpack launch adapters have automated recipe tests; their native
+packages and project setup still need device testing. Detection does not block Run pending validation.
+
+To run the Node integration suite inside Termux, set `YURLUNGR_TEST_NODE`, `YURLUNGR_TEST_BASH` and `YURLUNGR_TEST_FALSE` to the corresponding
 `$PREFIX/bin` executables; these avoid platform-specific executable-path assumptions in the test harness.
 
 Use the matching ABI debug APK for your device, or `app-universal-debug.apk` when unsure.
@@ -183,9 +194,9 @@ generator's `EVEN_ODD` set.
 1. Pull remote changes, finish feature commits, update docs/release notes, and bump `versionName` plus
    `versionCode` in `app/build.gradle.kts`. The ACP client reports the installed APK's version.
 2. Commit the release version and create a local annotated tag, for example
-   `git tag -a 0.0.2 -m "Yurlungr 0.0.2"`.
+   `git tag -a 0.0.4 -m "Yurlungr 0.0.4"`.
 3. From that clean tagged commit, run `./gradlew testDebugUnitTest lintDebug assembleRelease` and
-   `node --test tools/test-web-runner.cjs`. Keep the four ABI APKs and the universal APK, rename them to
+   `node --test tools/test-web-*.cjs`. Keep the four ABI APKs and the universal APK, rename them to
    `yurlungr-<version>-<abi>.apk`, and generate `SHA256SUMS.txt`. Check package version, included ABI and signatures.
 4. Push the branch and tag without force. Create the GitHub release with `gh release create <version>
    --verify-tag --title "Yurlungr <version>" --notes-file docs/releases/<version>.md`, passing all APKs and

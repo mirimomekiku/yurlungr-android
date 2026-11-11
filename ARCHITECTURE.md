@@ -126,24 +126,38 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
 
 ## Local web runs
 
-`web/ProjectDetector.kt` inspects bounded project folders and decides how each app starts:
-- a project `vite` dev script;
-- a framework's own dev command (`launch`: Vite, SvelteKit, Next.js, Astro, Nuxt, Angular, Create React
-  App, Expo web), run from `node_modules/.bin` on `127.0.0.1` and `$PORT`;
-- static files;
-- a custom command.
+`web/ProjectDetector.kt` inspects bounded project folders for framework dependencies, development
+scripts and static entry points. Framework identity, launch mode and runtime compatibility are separate.
+Adapters cover Vite/SvelteKit, Next.js, Astro, Nuxt, Angular, Create React App, Expo web, Parcel and Webpack.
+Package managers are npm, pnpm, Yarn and Bun. Project script mode preserves compound commands;
+Framework CLI resolves installed tools and their supported flags instead of evaluating shell presets.
 
-Package managers are npm, pnpm, Yarn and Bun. `PreviewScreen.kt` shows a running app in a WebView:
-only 127.0.0.1 and localhost load inside it; other links go to the browser. It also collects the
-page's console. `ServersScreen.kt` (the sidebar's Servers) lists runs, probes the usual development
-ports (Android blocks `/proc/net` for apps), and lists the runtime's processes from `ps`, stopping them
-with `Os.kill`. `WebQuickRun.kt` is the dock's one-tap Run: the last
-settings or defaults, dependencies installed when missing, a free port. `WebRunUi.kt` has the server card
-and the options sheet, and `WebRunSessions.kt` owns one run per project. Each run starts
+`PreviewScreen.kt` shows running apps in a WebView: only loopback addresses load inside it; other links
+open in the browser. It also collects the page's console. `ServersScreen.kt` lists runs, probes common
+ports (Android blocks `/proc/net` for apps) and lists runtime processes with Stop/Force kill.
+`WebQuickRun.kt` restores saved modes/profiles/readiness options and picks a free port for the dock's
+one-tap Run. The dock disables new attempts while a run is busy and becomes Open once it is running.
+`WebRunUi.kt` provides the server card, preview, recovery actions and options; `WebRunSessions.kt` owns
+one run per project. Each run starts
 `assets/web-runner.cjs` in a managed terminal without an idle-shell fallback. The Node supervisor owns a
-loopback HTTP listener, serves static files or proxies Vite HTTP/HMR, writes per-run atomic status, and
+loopback HTTP listener, serves static files or proxies framework HTTP/HMR, writes per-run atomic status, and
 stops its child process group on request. Browser readiness checks include a unique run ID. Android's
 network security configuration permits cleartext health checks only for loopback hosts.
+
+`assets/web-adapters.cjs` resolves installed framework CLIs and their version/engine requirements,
+probes supported flags, and builds launch recipes. Framework mode bypasses package scripts; script
+mode adds flags only to simple recognized launches, preserving compound commands. Custom mode gets
+HOST/PORT without command rewriting. Next's compatibility profile selects Webpack where supported;
+explicit repair downloads its exact WASM compiler via Next's downloader into generated dependencies.
+Compatibility preflight tests installed Lightning CSS bindings and downloads only missing versions'
+matching official WASM packages (install scripts disabled) into `cache/web-compat`. The inherited Node
+preload redirects only those resolved module entries for the run, including its workers. Project
+manifests, lockfiles and source are unchanged. Explicit Turbopack scripts get a targeted recovery action.
+Run reservations remain busy until supervisor cleanup is finalized, and disable both entry-point buttons.
+`web-node-preload.cjs` corrects Termux's linker execPath in forked Node workers without changing globals.
+Readiness probes compile the selected route and require HTTP 200–399 within a configurable timeout.
+Native compiler and setup failures are classified from bounded output; raw output remains in Logs.
+The proxy preserves the public Host and forwards host/protocol/port for SSR and authentication.
 
 Terminal lifecycle hooks route End/Close/Restart through the supervisor. A process exit changes run
 state even if its terminal remains visible. The registry is process-local; startup asks stale supervisors

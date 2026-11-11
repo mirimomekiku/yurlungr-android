@@ -35,11 +35,15 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
     val colors = MaterialTheme.colorScheme
     val tones = dev.yurlungr.app.ui.AppColors.status
     val tile = dev.yurlungr.app.ui.AppColors.tiles.lime
-    val busy = run.state == WebRunState.Installing || run.state == WebRunState.Starting || run.state == WebRunState.Stopping
+    val busy = run.busy && run.state != WebRunState.Running
+    val failed = run.state in setOf(WebRunState.Failed, WebRunState.NeedsSetup, WebRunState.CompatibilityFailure)
     val (stateLabel, stateColor) = when (run.state) {
         WebRunState.Running -> "Running" to tones.success
         WebRunState.Installing -> "Installing dependencies" to tones.warning
         WebRunState.Starting -> "Starting" to tones.warning
+        WebRunState.Compiling -> "Compiling" to tones.warning
+        WebRunState.NeedsSetup -> "Needs setup" to colors.error
+        WebRunState.CompatibilityFailure -> "Compatibility error" to colors.error
         WebRunState.Stopping -> "Stopping" to colors.onSurfaceVariant
         WebRunState.Stopped -> "Stopped" to colors.outline
         WebRunState.Failed -> "Failed" to colors.error
@@ -48,7 +52,7 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
     Column(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
             .clip(shape).background(colors.surfaceContainer)
-            .border(1.dp, if (run.state == WebRunState.Failed) colors.error.copy(alpha = 0.5f) else colors.outlineVariant, shape),
+            .border(1.dp, if (failed) colors.error.copy(alpha = 0.5f) else colors.outlineVariant, shape),
     ) {
         Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp, top = 12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
             androidx.compose.foundation.layout.Box(
@@ -97,7 +101,7 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
             detail,
             style = if (run.state == WebRunState.Running) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodySmall,
             fontFamily = if (run.state == WebRunState.Running) androidx.compose.ui.text.font.FontFamily.Monospace else null,
-            color = when (run.state) { WebRunState.Failed -> colors.error; WebRunState.Running -> colors.primary; else -> colors.onSurfaceVariant },
+            color = when (run.state) { WebRunState.Failed, WebRunState.NeedsSetup, WebRunState.CompatibilityFailure -> colors.error; WebRunState.Running -> colors.primary; else -> colors.onSurfaceVariant },
             maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             modifier = Modifier.padding(start = 66.dp, end = 14.dp, top = 2.dp)
                 .then(if (run.state == WebRunState.Running) Modifier.clickable {
@@ -112,6 +116,9 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
                 color = stateColor, trackColor = colors.surfaceContainerHighest,
             )
         }
+        if (!run.busy && run.state == WebRunState.CompatibilityFailure && run.config.project.kind == WebKind.Next) {
+            TextButton(onClick = { confirmation = "Repair compiler" }, modifier = Modifier.padding(start = 56.dp)) { Text("Try compatibility") }
+        }
         Row(Modifier.fillMaxWidth().padding(start = 66.dp, end = 12.dp, top = 10.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             when (run.state) {
                 WebRunState.Running -> Button(onClick = {
@@ -121,9 +128,12 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
                     dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Globe, null, size = 16.dp)
                     Spacer(Modifier.width(6.dp)); Text(if (onPreview != null) "Preview" else "Open")
                 }
-                WebRunState.Failed, WebRunState.Stopped -> Button(onClick = { WebRunSessions.restart(context, run) }, modifier = Modifier.weight(1f)) {
+                WebRunState.Failed, WebRunState.Stopped -> Button(enabled = !run.busy, onClick = { confirmation = "Restart" }, modifier = Modifier.weight(1f)) {
                     dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Play, null, size = 16.dp)
                     Spacer(Modifier.width(6.dp)); Text(if (run.state == WebRunState.Failed) "Try again" else "Start")
+                }
+                WebRunState.NeedsSetup, WebRunState.CompatibilityFailure -> onOptions?.let { options ->
+                    Button(enabled = !run.busy, onClick = options, modifier = Modifier.weight(1f)) { Text("Run setup") }
                 }
                 else -> Unit
             }
@@ -136,7 +146,12 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
     confirmation?.let { action ->
         WebRunConfirmation(action, run.config.project.directory.name, onDismiss = { confirmation = null }) {
             confirmation = null
-            if (action == "Stop") WebRunSessions.stop(context,run) else WebRunSessions.restart(context,run)
+            when (action) {
+                "Stop" -> WebRunSessions.stop(context,run)
+                "Repair compiler" -> WebRunSessions.start(context,root,run.config.copy(
+                    install = false, mode = WebLaunchMode.Framework, profile = WebProfile.Compatibility, repairNextCompiler = true))
+                else -> WebRunSessions.restart(context,run)
+            }
         }
     }
 }
@@ -146,12 +161,16 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
 private fun WebRunConfirmation(action: String, name: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("$action local server?", style = MaterialTheme.typography.titleLarge)
+            Text(if (action == "Repair compiler") "Install matching Next.js compiler?" else "$action local server?", style = MaterialTheme.typography.titleLarge)
             Text(name, style = MaterialTheme.typography.bodyLarge)
-            Text(if (action == "Stop") "Stop this project's server and its child processes. Logs stay available." else "Stop this server and start it again using the saved settings.")
+            Text(when (action) {
+                "Stop" -> "Stop this project's server and its child processes. Logs stay available."
+                "Repair compiler" -> "Download this Next.js version's WASM compiler and any missing matching Lightning CSS fallback, then retry with Webpack. Package manifests and lockfiles stay unchanged. Framework CLI skips project script setup steps."
+                else -> "Stop this server and start it again using the saved settings."
+            })
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = onDismiss) { Text("Cancel") }
-                Button(onClick = onConfirm) { Text(action) }
+                Button(onClick = onConfirm) { Text(if (action == "Repair compiler") "Install & retry" else action) }
             }
         }
     }
@@ -171,7 +190,7 @@ internal fun WebRunSheet(
     val saved = remember(root.path) { WebRunPreferences.read(context,root) }
     var selectedPath by remember(root.path) { mutableStateOf(saved?.get("cwd")?.jsonPrimitive?.contentOrNull
         ?.takeIf { path -> projects.any { it.directory.path == path } }
-        ?: projects.firstOrNull { it.supported }?.directory?.path ?: projects.first().directory.path) }
+        ?: projects.first().directory.path) }
     val project = projects.first { it.directory.path == selectedPath }
     val stored = saved?.takeIf { it["cwd"]?.jsonPrimitive?.contentOrNull == selectedPath }
     var manager by remember(selectedPath) { mutableStateOf(stored?.get("manager")?.jsonPrimitive?.contentOrNull
@@ -179,8 +198,17 @@ internal fun WebRunSheet(
     var script by remember(selectedPath) { mutableStateOf(stored?.get("script")?.jsonPrimitive?.contentOrNull
         ?.takeIf { it in project.scripts } ?: project.scripts.firstOrNull().orEmpty()) }
     var port by remember(selectedPath) { mutableStateOf(stored?.get("port")?.jsonPrimitive?.contentOrNull
-        ?: WebQuickRun.defaultPort(project.kind).toString()) }
+        ?: if (project.kind == WebKind.Static) "8080" else "5173") }
     var custom by remember(selectedPath) { mutableStateOf(stored?.get("command")?.jsonPrimitive?.contentOrNull.orEmpty()) }
+    var mode by remember(selectedPath) { mutableStateOf(stored?.get("mode")?.jsonPrimitive?.contentOrNull
+        ?.let { value -> WebLaunchMode.entries.firstOrNull { it.name == value } }
+        ?: if (custom.isNotBlank()) WebLaunchMode.Custom else project.defaultMode) }
+    var profile by remember(selectedPath) { mutableStateOf(stored?.get("profile")?.jsonPrimitive?.contentOrNull
+        ?.let { value -> WebProfile.entries.firstOrNull { it.name == value } }
+        ?: if (project.kind == WebKind.Next) WebProfile.Compatibility else WebProfile.Default) }
+    var healthPath by remember(selectedPath) { mutableStateOf(stored?.get("healthPath")?.jsonPrimitive?.contentOrNull ?: "/") }
+    var timeout by remember(selectedPath) { mutableStateOf(stored?.get("startupTimeoutSeconds")?.jsonPrimitive?.contentOrNull ?: "180") }
+    var advanced by remember(selectedPath) { mutableStateOf(false) }
     var install by remember(selectedPath) { mutableStateOf(!project.dependenciesPresent) }
     var openBrowser by remember(selectedPath) { mutableStateOf(stored?.get("openBrowser")?.jsonPrimitive?.booleanOrNull ?: true) }
     var tools by remember { mutableStateOf<Set<String>?>(null) }
@@ -189,7 +217,7 @@ internal fun WebRunSheet(
     LaunchedEffect(Unit) { tools = withContext(Dispatchers.IO) {
         listOf("node","npm","pnpm","yarn","bun").filter { File(paths.bin,it).canExecute() }.toSet()
     } }
-    val active = WebRunSessions.get(root)?.state?.active == true
+    val active = WebRunSessions.get(root)?.busy == true
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(start = 20.dp,end = 20.dp,bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -200,77 +228,97 @@ internal fun WebRunSheet(
                     onClick = { selectedPath = candidate.directory.path; close() }) }
             }
             Text(project.framework, style = MaterialTheme.typography.titleMedium)
-            Text("Tip: tapping Run on the project starts it with these settings. Long-press Run to come back here.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             project.notes.forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary) }
-            if (!project.supported) {
-                Text("Couldn't tell how to start ${project.framework}. Enter the command that starts its development server below.")
-            }
-            run {
-                if (project.kind != WebKind.Static) {
+            project.versionHint?.let { Text("Version: $it", style = MaterialTheme.typography.bodySmall) }
+            project.nodeRequirement?.let { Text("Requires Node $it", style = MaterialTheme.typography.bodySmall) }
+            Text("Detected project. Runtime compatibility is checked when you run it.", style = MaterialTheme.typography.bodySmall)
+            val needsManager = project.kind != WebKind.Static && (install || mode == WebLaunchMode.Script)
+            if (project.kind != WebKind.Static) {
+                MenuChip("Launch: ${mode.label}") { close ->
+                    WebLaunchMode.entries.filter { candidate -> when (candidate) {
+                        WebLaunchMode.Framework -> project.hasAdapter
+                        WebLaunchMode.Script -> project.scripts.isNotEmpty()
+                        WebLaunchMode.Custom -> true
+                    } }.forEach { candidate -> DropdownMenuItem(text = { Text(candidate.label) },
+                        onClick = { mode = candidate; close() }) }
+                }
+                when (mode) {
+                    WebLaunchMode.Framework -> {
+                        Text("Launch the installed ${project.framework} CLI directly. Project script setup steps (including predev) are skipped; choose Project script if needed.", style = MaterialTheme.typography.bodySmall)
+                        if (project.kind == WebKind.Next) {
+                            MenuChip(profile.label) { close ->
+                                WebProfile.entries.forEach { candidate -> DropdownMenuItem(text = { Text(candidate.label) }, onClick = { profile = candidate; close() }) }
+                            }
+                            Text("Compatibility uses Webpack and matching WASM fallbacks for Next.js and Lightning CSS. Missing CSS fallbacks download into the app cache. Native-only packages may still need project setup.", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    WebLaunchMode.Script -> {
+                        MenuChip("Script: $script") { close ->
+                            project.scripts.forEach { candidate -> DropdownMenuItem(text = { Text(candidate) }, onClick = { script = candidate; close() }) }
+                        }
+                        Text(project.scriptCommands[script].orEmpty(), style = MaterialTheme.typography.bodySmall)
+                        Text("Compound scripts keep their commands intact. They must honor HOST and PORT; choose Framework CLI if their launch flags conflict.", style = MaterialTheme.typography.bodySmall)
+                    }
+                    WebLaunchMode.Custom -> OutlinedTextField(custom, { custom = it }, label = { Text("Custom command") },
+                        supportingText = { Text("Listen on HOST=127.0.0.1 and the private port supplied in \$PORT. The public URL uses the local port below.") }, modifier = Modifier.fillMaxWidth())
+                }
+                if (needsManager) {
                     MenuChip("Package manager: ${manager?.executable ?: "Choose"}") { close ->
-                        WebPackageManager.entries.forEach { candidate -> DropdownMenuItem(text = { Text(candidate.executable) },
-                            onClick = { manager = candidate; close() }) }
+                        WebPackageManager.entries.forEach { candidate -> DropdownMenuItem(text = { Text(candidate.executable) }, onClick = { manager = candidate; close() }) }
                     }
                     project.managerHint?.let { Text("Project declares $it", style = MaterialTheme.typography.bodySmall) }
-                    when {
-                        project.kind == WebKind.Vite -> {
-                            MenuChip("Script: $script") { close ->
-                                project.scripts.forEach { candidate -> DropdownMenuItem(text = { Text(candidate) }, onClick = { script = candidate; close() }) }
-                            }
-                            Text("${manager?.executable ?: "<manager>"} run $script", style = MaterialTheme.typography.bodySmall)
-                        }
-                        project.launch != null -> Text("Starts with: ${project.launch}", style = MaterialTheme.typography.bodySmall,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                }
+                Row(Modifier.fillMaxWidth().clickable { install = !install }, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Install dependencies")
+                        Text(if (project.dependenciesPresent) "Dependencies detected" else "Dependencies not detected", style = MaterialTheme.typography.bodySmall)
                     }
-                    OutlinedTextField(custom, { custom = it }, label = { Text(if (project.supported) "Custom command (optional)" else "Start command") },
-                        supportingText = { Text("Custom servers must listen on 127.0.0.1 and the port supplied in \$PORT.") }, modifier = Modifier.fillMaxWidth())
-                    Row(Modifier.fillMaxWidth().clickable { install = !install }, horizontalArrangement = Arrangement.SpaceBetween) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Install dependencies")
-                            Text(if (project.dependenciesPresent) "Dependencies detected" else "Dependencies not detected", style = MaterialTheme.typography.bodySmall)
-                        }
-                        Switch(checked = install, onCheckedChange = { install = it })
-                    }
-                    if (project.installDirectory != project.directory) Text("Dependencies install at workspace root: ${project.installDirectory.name}", style = MaterialTheme.typography.bodySmall)
+                    Switch(checked = install, onCheckedChange = { install = it })
                 }
-                OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5) }, label = { Text("Local port") }, singleLine = true,
-                    supportingText = { Text("http://127.0.0.1:$port · this device only") }, modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Open browser when ready", modifier = Modifier.weight(1f))
-                    Switch(checked = openBrowser, onCheckedChange = { openBrowser = it })
+                if (project.installDirectory != project.directory) Text("Dependencies install at workspace root: ${project.installDirectory.name}", style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = { advanced = !advanced }) { Text(if (advanced) "Hide startup options" else "Startup options") }
+                if (advanced) {
+                    OutlinedTextField(healthPath, { healthPath = it }, label = { Text("Readiness path") }, singleLine = true,
+                        supportingText = { Text("A route that returns HTTP 200–399, such as / or /login. First compilation must succeed before the browser opens.") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(timeout, { timeout = it.filter(Char::isDigit).take(3) }, label = { Text("Startup timeout (seconds)") }, singleLine = true,
+                        supportingText = { Text("30–900 seconds; initial compilation can take longer on a phone.") }, modifier = Modifier.fillMaxWidth())
                 }
-                if (tools != null && "node" !in tools.orEmpty()) {
-                    Text("Node.js is required.", color = MaterialTheme.colorScheme.error)
-                    Button(onClick = { onDismiss(); runInTerminal("pkg install -y nodejs-lts", "Install Node.js") }) { Text("Install Node.js") }
-                } else if (project.kind != WebKind.Static && manager != null && tools != null && manager!!.executable !in tools.orEmpty()) {
-                    Text("${manager!!.executable} is not installed.", color = MaterialTheme.colorScheme.error)
-                    // pnpm, Yarn and Bun are Termux packages; a pinned packageManager version comes from npm.
-                    if (manager == WebPackageManager.Bun) Button(onClick = { onDismiss(); runInTerminal("pkg install -y bun", "Install bun") }) { Text("Install bun") }
-                    else if ("npm" in tools.orEmpty()) Button(onClick = {
-                        val declared = project.managerHint?.substringBefore('+')?.takeIf {
-                            it.startsWith(manager!!.executable + "@") && Regex("[a-z]+@[0-9][0-9A-Za-z.+-]*").matches(it)
-                        } ?: manager!!.executable
-                        onDismiss(); runInTerminal("npm install --global ${Git.shellQuote(declared)}", "Install ${manager!!.executable}")
-                    }) { Text("Install ${manager!!.executable}") }
-                }
-                if (active) Text("This project already has an active run. Use its server card for Logs, Stop or Restart.")
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                Button(
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !active && tools != null && "node" in tools.orEmpty() &&
-                        (project.kind == WebKind.Static || (manager != null && manager!!.executable in tools.orEmpty())),
-                    onClick = {
-                        scope.launch {
-                            val config = WebRunConfig(project, manager ?: WebPackageManager.Npm,script,port.toIntOrNull() ?: 0,install,custom,openBrowser)
-                            val validation = withContext(Dispatchers.IO) { runCatching { config.validate() } }
-                            if (validation.isFailure) error = validation.exceptionOrNull()?.message
-                            else { WebRunSessions.start(context,root,config); onDismiss(); onStarted() }
-                        }
-                    },
-                ) { Text(if (install && project.kind != WebKind.Static) "Install & Run" else "Run") }
             }
+            OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5) }, label = { Text("Local port") }, singleLine = true,
+                supportingText = { Text("http://127.0.0.1:$port · this device only") }, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Open browser when ready", modifier = Modifier.weight(1f))
+                Switch(checked = openBrowser, onCheckedChange = { openBrowser = it })
+            }
+            if (tools != null && "node" !in tools.orEmpty()) {
+                Text("Node.js is required.", color = MaterialTheme.colorScheme.error)
+                Button(onClick = { onDismiss(); runInTerminal("pkg install -y nodejs-lts", "Install Node.js") }) { Text("Install Node.js") }
+            } else if (needsManager && manager != null && tools != null && manager!!.executable !in tools.orEmpty()) {
+                Text("${manager!!.executable} is not installed.", color = MaterialTheme.colorScheme.error)
+                if (manager == WebPackageManager.Bun) Button(onClick = { onDismiss(); runInTerminal("pkg install -y bun", "Install bun") }) { Text("Install bun") }
+                else if ("npm" in tools.orEmpty()) Button(onClick = {
+                    val declared = project.managerHint?.substringBefore('+')?.takeIf {
+                        it.startsWith(manager!!.executable + "@") && Regex("[a-z]+@[0-9][0-9A-Za-z.+-]*").matches(it)
+                    } ?: manager!!.executable
+                    onDismiss(); runInTerminal("npm install --global ${Git.shellQuote(declared)}", "Install ${manager!!.executable}")
+                }) { Text("Install ${manager!!.executable}") }
+            }
+            if (active) Text("This project already has an active run. Use its server card for Logs, Stop or Restart.")
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            Button(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !active && tools != null && "node" in tools.orEmpty() &&
+                    (!needsManager || (manager != null && manager!!.executable in tools.orEmpty())),
+                onClick = {
+                    scope.launch {
+                        val config = WebRunConfig(project, manager ?: WebPackageManager.Npm,script,port.toIntOrNull() ?: 0,install,custom,openBrowser,mode,profile,healthPath,timeout.toIntOrNull() ?: 0)
+                        val validation = withContext(Dispatchers.IO) { runCatching { config.validate() } }
+                        if (validation.isFailure) error = validation.exceptionOrNull()?.message
+                        else { WebRunSessions.start(context,root,config); onDismiss(); onStarted() }
+                    }
+                },
+            ) { Text(if (install && project.kind != WebKind.Static) "Install & Run" else "Run") }
         }
     }
 }

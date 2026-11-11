@@ -78,3 +78,27 @@ test('managed backend readiness, proxy, WebSocket upgrade and process-group clea
 test('backend exits are failures instead of idle-shell running states',async()=> {
  const f=await fixture({kind:'Vite',command:'exit 17'});const status=await state(f,'Failed');assert.match(status.message,/17/);
 });
+
+test('first-route compilation and HTTP errors do not prematurely report Running',async()=> {
+ const code=`const http=require('http');let ready=false;setTimeout(()=>ready=true,2500);
+ http.createServer((req,res)=>{if(req.url!=='/login'){res.writeHead(404);return res.end('not here');}res.writeHead(ready?200:500);res.end(ready?'compiled':'compiling');}).listen(Number(process.env.PORT),'127.0.0.1');`;
+ const command=nodeBinary+' -e '+"'"+code.replaceAll("'","'\\''")+"'";
+ const f=await fixture({kind:'Script',mode:'Custom',command,healthPath:'/login'});
+ await state(f,'Compiling');assert.equal((await request(f.config.port)).code,503);
+ await state(f,'Running');assert.equal((await request(f.config.port,'/login')).body,'compiled');
+ assert.equal((await request(f.config.port)).code,404);
+});
+test('proxy preserves public origin headers for SSR and authentication redirects',async()=> {
+ const code=`require('http').createServer((req,res)=>res.end(JSON.stringify(req.headers))).listen(Number(process.env.PORT),'127.0.0.1')`;
+ const command=nodeBinary+' -e '+"'"+code.replaceAll("'","'\\''")+"'";
+ const f=await fixture({kind:'Script',mode:'Custom',command});await state(f,'Running');
+ const headers=JSON.parse((await request(f.config.port)).body);
+ assert.equal(headers.host,'127.0.0.1:'+f.config.port);assert.equal(headers['x-forwarded-host'],headers.host);
+ assert.equal(headers['x-forwarded-proto'],'http');assert.equal(headers['x-forwarded-port'],String(f.config.port));
+});
+test('compiler and environment failures have distinct recovery states',async()=> {
+ const native=await fixture({kind:'Next',mode:'Custom',command:"echo 'Failed to load SWC binary for android/arm64' >&2; exit 1"});
+ const failed=await state(native,'CompatibilityFailure');assert.equal(failed.recovery,'nextCompiler');
+ const missing=await fixture({kind:'Script',mode:'Custom',command:"echo 'DATABASE_URL environment variable is required' >&2; exit 1"});
+ assert.equal((await state(missing,'NeedsSetup')).code,'MISSING_ENV');
+});

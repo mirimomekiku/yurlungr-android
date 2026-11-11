@@ -4,6 +4,7 @@ import android.content.Context
 import dev.yurlungr.app.runtime.RuntimePaths
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -22,16 +23,20 @@ internal object WebQuickRun {
         val saved = WebRunPreferences.read(context, root)
         val savedCwd = saved?.get("cwd")?.jsonPrimitive?.contentOrNull
         val project = projects.firstOrNull { it.directory.canonicalPath == savedCwd }
-            ?: projects.firstOrNull { it.supported } ?: return "Choose how to start this app."
+            ?: projects.firstOrNull { it.hasAdapter || it.scripts.isNotEmpty() || it.kind == WebKind.Static } ?: projects.firstOrNull() ?: return "Choose how to start this app."
         val stored = saved?.takeIf { it["cwd"]?.jsonPrimitive?.contentOrNull == project.directory.canonicalPath }
         val custom = stored?.get("command")?.jsonPrimitive?.contentOrNull.orEmpty()
-        if (!project.supported && custom.isBlank()) return "Enter the command that starts this app."
         val manager = stored?.get("manager")?.jsonPrimitive?.contentOrNull
             ?.let { value -> WebPackageManager.entries.firstOrNull { it.executable == value } }
             ?: project.manager ?: return "Choose a package manager."
+        val mode = stored?.get("mode")?.jsonPrimitive?.contentOrNull?.let { value -> WebLaunchMode.entries.firstOrNull { it.name == value } }
+            ?: if (custom.isNotBlank()) WebLaunchMode.Custom else project.defaultMode
+        val profile = stored?.get("profile")?.jsonPrimitive?.contentOrNull?.let { value -> WebProfile.entries.firstOrNull { it.name == value } }
+            ?: if (project.kind == WebKind.Next) WebProfile.Compatibility else WebProfile.Default
+        val install = !project.dependenciesPresent && project.kind != WebKind.Static
         val ready = withContext(Dispatchers.IO) {
             File(paths.bin, "node").canExecute() &&
-                (project.kind == WebKind.Static || File(paths.bin, manager.executable).canExecute())
+                (!(install || mode == WebLaunchMode.Script) || project.kind == WebKind.Static || File(paths.bin, manager.executable).canExecute())
         }
         if (!ready) return "Install the tools this app needs."
         val script = stored?.get("script")?.jsonPrimitive?.contentOrNull?.takeIf { it in project.scripts } ?: project.scripts.firstOrNull().orEmpty()
@@ -39,9 +44,12 @@ internal object WebQuickRun {
         val config = WebRunConfig(
             project, manager, script,
             port = withContext(Dispatchers.IO) { freePort(preferred) },
-            install = !project.dependenciesPresent,
+            install = install,
             customCommand = custom,
             openBrowser = stored?.get("openBrowser")?.jsonPrimitive?.booleanOrNull ?: true,
+            mode = mode, profile = profile,
+            healthPath = stored?.get("healthPath")?.jsonPrimitive?.contentOrNull ?: "/",
+            startupTimeoutSeconds = stored?.get("startupTimeoutSeconds")?.jsonPrimitive?.intOrNull ?: 180,
         )
         withContext(Dispatchers.IO) { runCatching { config.validate() } }.exceptionOrNull()?.let { return it.message ?: "Check the run settings." }
         withContext(Dispatchers.Main) { WebRunSessions.start(context, root, config) }

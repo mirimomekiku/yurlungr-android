@@ -176,35 +176,38 @@ Then, on the phone:
 - Pull down to refresh project folders, Git status and GitHub repositories without clearing search
   or filters. **New project** and **Clone from URL** use keyboard-aware bottom sheets with folder
   previews and validation for invalid or existing names.
-- **Run** is one tap. It starts the web app with its last settings (or defaults), installs missing
-  dependencies first, moves to a free port if the usual one is taken, and opens the browser when the
-  server answers. While the app is starting, Run shows its logs; once it's up, the button becomes
-  **Open**. Long-press it for the options: app folder, package manager, script, port, dependency
-  installation and a custom command. If it can't decide alone (no Node.js, no start command), it opens
-  those options instead. Workspace packages install dependencies at the workspace root. Detection reads
-  manifests only and checks common app folders without scanning caches.
-- Supported web apps and how each is started (from the project's `node_modules/.bin`, on `127.0.0.1` and `$PORT`):
-  - **Vite**: the project's `vite` dev script, or `vite` directly when the script does more (for example `tsc && vite`);
-  - **SvelteKit**: `vite`;
-  - **Next.js**: `next dev`;
-  - **Astro**: `astro dev`;
-  - **Nuxt**: `nuxt dev`;
-  - **Angular**: `ng serve`;
-  - **Create React App**: `react-scripts start`;
-  - **Expo (web)**: `expo start --web`;
-  - **static HTML sites**: served directly.
-  - Anything else runs with a custom start command.
-  - Notes warn before Next.js (no native compiler on Android) or Expo without its web packages.
-- Each web run owns a loopback-only address (`127.0.0.1`) and a managed terminal with live logs. The
-  server card shows the framework and folder, a coloured status with progress while it installs or
-  starts, and the address (tap to copy). Its actions are **Open**, **Logs**, **Try again** after a
-  failure, and ⋮ for confirmed **Restart/Stop** and the run options.
-  Opening waits for that run's health endpoint; Vite HTTP and HMR are forwarded through its local listener.
-  The foreground runtime service keeps runs alive while you use the browser. Stop/Close ends the run's
-  process group, while preserving logs unless you close the terminal. App restarts stop stale runs;
-  servers do not automatically restart after process death.
-- Custom commands must use `127.0.0.1` and the supplied `$PORT`; project-specific native dependencies can still fail on
-  Android and their errors remain in Logs. Static serving blocks dotfiles and paths outside the app folder.
+- **Run** starts with saved settings (or defaults), installs missing project dependencies, chooses a
+  free port and opens the preview when ready. Long-press Run or choose **Run options** for setup.
+  Vite (including SvelteKit), Next.js, Astro, Nuxt, Angular, Create React App, Expo web, Parcel,
+  Webpack Dev Server, plain static sites and projects with development/start scripts are detected.
+  Detection reads manifests and common app folders without executing configuration. Android's Build
+  action remains available when both capabilities are present. Workspace installs use the workspace root.
+- Run setup offers **Framework CLI**, **Project script**, or **Custom command**, plus npm, pnpm, Yarn or Bun,
+  dependency installation, public port, readiness route and startup timeout. Framework CLI checks the
+  installed CLI's options and skips project script setup steps. Script mode preserves compound commands;
+  simple recognized dev commands receive routing flags. Custom/compound servers must honor the supplied
+  `HOST=127.0.0.1` and private `$PORT` (the browser uses the public port shown in the app).
+- Next.js defaults to **Framework CLI → Compatibility (Webpack)**. This avoids Turbopack's native-only
+  paths while allowing Next.js's matching WASM compiler fallback. Compatibility also detects missing
+  Lightning CSS bindings (including Tailwind/PostCSS) and caches the exact official `lightningcss-wasm`
+  version outside the project. Only that run's Node processes use the fallback; working native bindings
+  stay in use. Scripts that explicitly enable Turbopack show a direct compatibility action. A compiler failure
+  offers an explicit **Try compatibility** action to download the exact Next.js compiler into its generated cache and retry.
+  This does not rewrite package manifests, lockfiles or global runtime settings. Use Project script when
+  the repository requires `predev` or other setup commands; Default bundler is also available.
+- The **Run** tile stays disabled while preparing, installing, starting, compiling or stopping;
+  it becomes **Open** once the server is running, without starting a duplicate run.
+  Each run owns a loopback listener and a terminal with live logs. The card distinguishes installing,
+  starting, compiling, running, setup errors and compatibility failures. The preview opens only after
+  the initial route returns HTTP 200–399 and the unique run health check passes. HTTP and HMR WebSockets
+  are proxied with the public origin preserved for SSR and authentication.
+- The server card offers **Preview/Open**, **Logs**, **Run setup**, compiler recovery, and confirmed
+  **Stop/Restart**, with the framework, folder, progress and an address you can tap to copy. Stop/Close
+  ends its process group; logs remain unless the terminal is closed. The foreground runtime service
+  keeps runs alive while browsing. App restarts stop stale runs rather than adopting saved PIDs.
+  Static serving blocks dotfiles and paths outside the app folder. Native-only packages, required
+  environment variables, databases and incompatible Node requirements can still require project setup;
+  detection alone is not a compatibility guarantee and no framework is blocked pending validation.
 - **Terminal** from a project offers the terminals already open there, or a new one.
 - **Checks** (a project tab) runs the project's compile/lint checks and its tests in a terminal,
   then shows what they found. Their output is saved under `.yurlungr/` in the project, which is
@@ -527,9 +530,9 @@ credential-file presence; Antigravity's is not documented, so it shows as *Insta
 - The terminal JNI library is rebuilt from matching Termux sources with 16 KB alignment.
   APK alignment checks do not replace testing the embedded runtime and agents on a 16 KB device.
 - Sign-in detection is a credential-file heuristic; API-key setups show as not signed in.
-- Local web runs have been verified with Vite 8.3.6 on arm64. The other frameworks start with their own
-  dev commands but haven't all been tried on a phone (Next.js falls back to a slower WebAssembly
-  compiler). Project-specific native dependencies or other ABIs still need compatibility testing.
+- Web launch checks cover Vite 8.3.6, Next.js 16.4.5 with Webpack/WASM, Astro 7.4.7, and a
+  Next.js 15.3.5/Tailwind 4.1.11/DaisyUI repository on arm64. Other frameworks have launch tests;
+  project-specific native dependencies and other ABIs still need compatibility testing.
 - Optional packs install Termux packages; their version checks are confirmed against the package index,
   not on every device.
 - Alpha release APKs use the debug signing key; see [Development](DEVELOPMENT.md) before changing it.

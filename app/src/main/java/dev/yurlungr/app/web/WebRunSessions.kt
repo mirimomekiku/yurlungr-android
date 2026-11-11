@@ -15,16 +15,20 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
 
-internal enum class WebRunState { Installing, Starting, Running, Stopping, Stopped, Failed;
-    val active get() = this in setOf(Installing, Starting, Running, Stopping)
+internal enum class WebRunState(val label: String) {
+    Installing("Installing"), Starting("Starting"), Compiling("Compiling"), Running("Running"), Stopping("Stopping"),
+    Stopped("Stopped"), NeedsSetup("Needs setup"), CompatibilityFailure("Compatibility error"), Failed("Failed");
+    val active get() = this in setOf(Installing, Starting, Compiling, Running, Stopping)
 }
 internal class WebRun(val root: File, val config: WebRunConfig, val id: String, val directory: File) {
     var state by mutableStateOf(WebRunState.Starting)
     var message by mutableStateOf("")
+    var recovery by mutableStateOf("")
     var terminal: TerminalSession? = null
     var closeAfterStop = false
     var restartAfterStop = false
-    var finalized = false
+    var finalized by mutableStateOf(false)
+    val busy get() = !finalized || state.active
     val url get() = "http://127.0.0.1:${config.port}"
 }
 
@@ -57,7 +61,7 @@ internal object WebRunSessions {
 
     fun start(context: Context, root: File, config: WebRunConfig): WebRun {
         val app = context.applicationContext
-        get(root)?.takeIf { it.state.active }?.let { return it }
+        get(root)?.takeIf { it.busy }?.let { return it }
         val id = UUID.randomUUID().toString()
         val run = WebRun(root.canonicalFile, config, id, File(app.cacheDir,"web-runs/$id"))
         runs[root.canonicalPath] = run // reserve before any asynchronous work
@@ -67,13 +71,16 @@ internal object WebRunSessions {
                 withContext(Dispatchers.IO) {
                     config.validate()
                     check(File(paths.bin,"node").canExecute()) { "Node.js isn't installed. Use Install Node.js in Run setup." }
-                    // canExecute, like node: a file that's there but can't run is just as unusable.
-                    if (config.project.kind != WebKind.Static) check(File(paths.bin,config.manager.executable).canExecute()) {
+                    if (config.project.kind != WebKind.Static && (config.install || config.mode == WebLaunchMode.Script)) check(File(paths.bin,config.manager.executable).canExecute()) {
                         "${config.manager.executable} isn't installed. Use the package-manager setup action."
                     }
                     run.directory.mkdirs()
-                    app.assets.open("web-runner.cjs").use { input -> File(run.directory,"runner.cjs").outputStream().use { input.copyTo(it) } }
-                    File(run.directory,"config.json").writeText(config.toJson(id,File(paths.bin,"node"),paths.bash).toString())
+                    for ((asset,destination) in mapOf("web-runner.cjs" to "runner.cjs", "web-adapters.cjs" to "web-adapters.cjs", "web-node-preload.cjs" to "web-node-preload.cjs")) {
+                        app.assets.open(asset).use { input -> File(run.directory,destination).outputStream().use { input.copyTo(it) } }
+                    }
+                    val json = config.toJson(id,File(paths.bin,"node"),paths.bash).toMutableMap()
+                    json["compatibilityCache"] = JsonPrimitive(File(app.cacheDir,"web-compat").path)
+                    File(run.directory,"config.json").writeText(JsonObject(json).toString())
                 }
                 if (run.state == WebRunState.Stopping) { finish(app,run); return@launch }
                 WebRunPreferences.save(app,root,config)
@@ -108,7 +115,7 @@ internal object WebRunSessions {
                         }
                     }
                     if (!terminal.isRunning) { finish(app,run); break }
-                    if (System.currentTimeMillis()-startTime > 20*60_000 && run.state in setOf(WebRunState.Starting, WebRunState.Installing)) {
+                    if (System.currentTimeMillis()-startTime > 20*60_000 && run.state in setOf(WebRunState.Starting, WebRunState.Installing, WebRunState.Compiling)) {
                         run.message = "Setup took too long. Check Logs and retry."
                         run.closeAfterStop = false
                         stop(app,run)
@@ -117,7 +124,8 @@ internal object WebRunSessions {
                 }
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
-                run.state = WebRunState.Failed
+                run.state = WebRunState.NeedsSetup
+                run.recovery = "setup"
                 run.message = error.message ?: "Couldn't start local server."
                 run.finalized = true
             }
@@ -138,7 +146,7 @@ internal object WebRunSessions {
     }
 
     fun restart(context: Context, run: WebRun) {
-        get(run.root)?.takeIf { it !== run && it.state.active }?.let { existing ->
+        get(run.root)?.takeIf { it !== run && it.busy }?.let { existing ->
             existing.terminal?.let(TerminalSessions::select)
             return
         }
@@ -146,7 +154,7 @@ internal object WebRunSessions {
         run.closeAfterStop = true
         if (run.finalized) {
             run.terminal?.let { TerminalSessions.closeDirect(context,it) }
-            start(context,run.root,run.config.copy(install = false))
+            start(context,run.root,run.config.copy(install = false, repairNextCompiler = false))
         } else stop(context,run)
     }
 
@@ -175,6 +183,7 @@ internal object WebRunSessions {
         if (run.state != WebRunState.Stopping || !state.active) run.state = state
         if (run.state != before) appContext?.let(dev.yurlungr.app.widgets.OpenIn::refresh)
         run.message = status["message"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        run.recovery = status["recovery"]?.jsonPrimitive?.contentOrNull.orEmpty()
     }
 
     private fun finish(context: Context, run: WebRun) {
@@ -186,7 +195,7 @@ internal object WebRunSessions {
             if (run.state == WebRunState.Failed && run.message.isBlank()) run.message = "Server process exited. Check Logs."
         }
         if (run.closeAfterStop) run.terminal?.let { TerminalSessions.closeDirect(context,it) }
-        if (run.restartAfterStop) start(context,run.root,run.config.copy(install = false))
+        if (run.restartAfterStop) start(context,run.root,run.config.copy(install = false, repairNextCompiler = false))
     }
 
     private fun ownsListener(run: WebRun): Boolean = runCatching {

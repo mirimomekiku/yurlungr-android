@@ -12,8 +12,12 @@ class ProjectDetectorTest {
 
     @Test fun `package json alone and development libraries do not imply web app`() {
         val root=temp.newFolder()
-        file(root,"package.json", """{"scripts":{"dev":"node server.js"},"devDependencies":{"typescript":"*"}}""")
+        file(root,"package.json", """{"devDependencies":{"typescript":"*"}}""")
         assertTrue(ProjectDetector.detect(root).web.isEmpty())
+        file(root,"package.json", """{"scripts":{"dev":"node server.js"},"devDependencies":{"typescript":"*"}}""")
+        val app = ProjectDetector.detect(root).web.single()
+        assertEquals(WebKind.Script,app.kind)
+        assertEquals(WebLaunchMode.Script,app.defaultMode)
     }
     @Test fun `Vite runnable script and Android build coexist`() {
         val root=temp.newFolder()
@@ -34,36 +38,48 @@ class ProjectDetectorTest {
         assertEquals(File(root,"apps/client"),app.directory)
         assertEquals(root,app.installDirectory)
     }
-    @Test fun `known frameworks start with their own dev command instead of being static sites`() {
+    @Test fun `Next and Vite build only projects are candidates instead of static sites`() {
         val root=temp.newFolder()
         file(root,"index.html"); file(root,"package.json", """{"dependencies":{"next":"*"}}""")
-        val next=ProjectDetector.detect(root).web.single()
-        assertEquals(WebKind.Framework,next.kind); assertEquals("Next.js",next.framework)
-        assertTrue(next.launch!!.startsWith("next dev -H 127.0.0.1"))
-        assertTrue("warns about the WebAssembly compiler", next.notes.isNotEmpty())
-        // Vite without a plain `vite` dev script (e.g. "tsc && vite"): run Vite directly.
-        file(root,"package.json", """{"devDependencies":{"vite":"*"},"scripts":{"dev":"tsc && vite","build":"vite build"}}""")
-        val vite=ProjectDetector.detect(root).web.single()
-        assertEquals(WebKind.Framework,vite.kind)
-        assertEquals("vite --host 127.0.0.1 --port \"\$PORT\" --strictPort",vite.launch)
+        assertEquals(WebKind.Next,ProjectDetector.detect(root).web.single().kind)
+        file(root,"package.json", """{"devDependencies":{"vite":"*"},"scripts":{"build":"vite build"}}""")
+        assertEquals(WebKind.Vite,ProjectDetector.detect(root).web.single().kind)
     }
-    @Test fun `framework checks come before Vite, and every preset binds loopback and PORT`() {
-        val root=temp.newFolder()
-        file(root,"package.json", """{"devDependencies":{"vite":"*","@sveltejs/kit":"*","astro":"*"}}""")
-        assertEquals("Astro",ProjectDetector.detect(root).web.single().framework)
-        for (fw in listOf("Vite","SvelteKit","Next.js","Astro","Nuxt","Angular","Expo (web)")) {
-            val cmd=ProjectDetector.launchCommand(fw)!!
-            assertTrue(fw,cmd.contains("\$PORT"))
+    @Test fun `framework detection takes precedence over underlying Vite dependency`() {
+        for ((dependency,kind) in listOf("astro" to WebKind.Astro,"nuxt" to WebKind.Nuxt,"@angular/cli" to WebKind.Angular,
+            "react-scripts" to WebKind.Cra,"next" to WebKind.Next)) {
+            val root=temp.newFolder()
+            file(root,"package.json", """{"dependencies":{"$dependency":"1.2.3","vite":"*"},"scripts":{"dev":"prepare && launch"},"engines":{"node":">=22"}}""")
+            val app=ProjectDetector.detect(root).web.single()
+            assertEquals(kind,app.kind); assertTrue(app.hasAdapter)
+            assertEquals(">=22",app.nodeRequirement); assertEquals("1.2.3",app.versionHint)
+            assertEquals("prepare && launch",app.scriptCommands["dev"])
         }
-        assertEquals("react-scripts start",ProjectDetector.launchCommand("Create React App"))
-        assertNull(ProjectDetector.launchCommand("Remix"))
     }
-    @Test fun `an unknown setup runs once given a start command`() {
-        val root=temp.newFolder(); file(root,"index.html")
-        val project=ProjectDetector.detect(root).web.single().copy(kind=WebKind.Candidate)
-        val config=WebRunConfig(project,WebPackageManager.Npm,"",5173,false)
-        assertThrows(IllegalArgumentException::class.java) { config.validate() }
-        config.copy(customCommand="node server.js --port \$PORT").validate()
+    @Test fun `readiness paths timeouts and launch modes are validated`() {
+        val root=temp.newFolder()
+        file(root,"package.json", """{"scripts":{"dev":"node server.js"}}""")
+        val app=ProjectDetector.detect(root).web.single()
+        val config=WebRunConfig(app,WebPackageManager.Npm,"dev",3000,false)
+        config.validate()
+        config.copy(mode=WebLaunchMode.Custom,customCommand="node server.js",healthPath="/login",startupTimeoutSeconds=900).validate()
+        for (invalid in listOf(config.copy(mode=WebLaunchMode.Framework), config.copy(mode=WebLaunchMode.Custom),
+            config.copy(script="missing"), config.copy(healthPath="//example.com"),config.copy(healthPath="/\r\nHost: invalid"),
+            config.copy(startupTimeoutSeconds=0),config.copy(startupTimeoutSeconds=901))) {
+            assertThrows(IllegalArgumentException::class.java) { invalid.validate() }
+        }
+    }
+    @Test fun `Expo and SvelteKit retain framework identity and Bun lock detection`() {
+        val root=temp.newFolder()
+        file(root,"package.json", """{"dependencies":{"expo":"54.0.0"},"scripts":{"dev":"expo start --web"}}""")
+        file(root,"bun.lock")
+        val expo=ProjectDetector.detect(root).web.single()
+        assertEquals(WebKind.Expo,expo.kind); assertEquals(WebPackageManager.Bun,expo.manager)
+        assertEquals(WebLaunchMode.Framework,expo.defaultMode); assertTrue(expo.notes.isNotEmpty())
+        file(root,"package.json", """{"dependencies":{"@sveltejs/kit":"*"}}""")
+        assertEquals("SvelteKit",ProjectDetector.detect(root).web.single().framework)
+        file(root,"package.json", """{"devDependencies":{"vite":"*"},"scripts":{"dev":"tsc && vite"}}""")
+        assertEquals(WebLaunchMode.Framework,ProjectDetector.detect(root).web.single().defaultMode)
     }
     @Test fun `a taken port moves to the next free one`() {
         java.net.ServerSocket(0,1,java.net.InetAddress.getByName("127.0.0.1")).use { taken ->

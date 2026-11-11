@@ -69,15 +69,23 @@ class WebRunSmokeInstrumentation : Instrumentation() {
             File(fixture,"index.html").writeText("<h1>Yurlungr instrumentation preview</h1>")
             roots += fixture
             val config = WebRunConfig(WebProject(fixture,fixture,WebKind.Static,"Static site"),WebPackageManager.Npm,"",freePort(),false,openBrowser=false)
-            val first = main { WebRunSessions.start(targetContext,fixture,config) }
+            val first = main {
+                val run = WebRunSessions.start(targetContext,fixture,config)
+                check(run.busy) { "Run wasn't reserved while preparing" }
+                check(WebRunSessions.start(targetContext,fixture,config) === run) { "Starting allowed a duplicate" }
+                run
+            }
             waitFor("static server running") { first.state == WebRunState.Running }
             check(fetch(first.url).contains("instrumentation preview"))
             check(fetch("${first.url}/.yurlungr/health/${first.id}").contains(first.id)) // exercises Android cleartext policy
             val duplicate = main { WebRunSessions.start(targetContext,fixture,config) }
-            check(first === duplicate) { "Duplicate run created a second server" }
+            check(first === duplicate && first.busy) { "Running allowed a duplicate" }
             val firstTerminal = main { checkNotNull(first.terminal) }
-            main { TerminalSessions.endProcess(firstTerminal) }
-            waitFor("managed End") { first.state == WebRunState.Stopped && !firstTerminal.isRunning }
+            main {
+                TerminalSessions.endProcess(firstTerminal)
+                check(first.busy && WebRunSessions.start(targetContext,fixture,config) === first) { "Stopping allowed a duplicate" }
+            }
+            waitFor("managed End") { first.state == WebRunState.Stopped && !firstTerminal.isRunning && !first.busy }
             check(main { firstTerminal in TerminalSessions.sessions }) { "End removed the log terminal" }
             main { TerminalSessions.restart(targetContext,firstTerminal) }
             waitFor("managed Restart") { WebRunSessions.get(fixture)?.let { it.id != first.id && it.state == WebRunState.Running } == true }
@@ -88,22 +96,54 @@ class WebRunSmokeInstrumentation : Instrumentation() {
             waitFor("managed Close") { second.state == WebRunState.Stopped && secondTerminal !in TerminalSessions.sessions }
             check(runCatching { fetch(second.url) }.isFailure) { "Closed server still accepts requests" }
 
-            var viteResult = "not present (optional fixture)"
-            val vite = File(targetContext.cacheDir,"web-vite-smoke/site")
-            if (File(vite,"node_modules/vite/package.json").isFile) {
-                roots += vite
-                val project = WebProject(vite,vite,WebKind.Vite,"Vite",listOf("dev"),WebPackageManager.Npm)
-                val vitePort = freePort()
-                val run = main { WebRunSessions.start(targetContext,vite,WebRunConfig(project,WebPackageManager.Npm,"dev",vitePort,false,openBrowser=false)) }
-                waitFor("Vite running",90000) { run.state == WebRunState.Running }
-                check(fetch(run.url).contains("Yurlungr Vite device check"))
-                check(fetch("${run.url}/main.js").contains("ready"))
+            val frameworkResults = mutableListOf<String>()
+            for ((fixtureName,marker,asset) in listOf(
+                Triple("vite","Yurlungr Vite device check","/main.js"),
+                Triple("next","Yurlungr Next device check","/api/check"),
+                Triple("astro","Yurlungr Astro device check",null))) {
+                val site = File(targetContext.cacheDir,"web-$fixtureName-smoke/site")
+                val packageName = if (fixtureName == "next") "next" else fixtureName
+                if (!File(site,"node_modules/$packageName/package.json").isFile) {
+                    frameworkResults += "$fixtureName: not present (optional fixture)"
+                    continue
+                }
+                roots += site
+                val project = ProjectDetector.detect(site).web.single()
+                val run = main { WebRunSessions.start(targetContext,site,WebRunConfig(project,WebPackageManager.Npm,"dev",freePort(),false,
+                    openBrowser=false,mode=WebLaunchMode.Framework,startupTimeoutSeconds=300)) }
+                waitFor("$fixtureName running",320000) {
+                    check(run.state !in setOf(WebRunState.Failed,WebRunState.NeedsSetup,WebRunState.CompatibilityFailure)) { "$fixtureName: ${run.message}" }
+                    run.state == WebRunState.Running
+                }
+                check(fetch(run.url).contains(marker))
+                asset?.let { check(fetch("${run.url}$it").isNotBlank()) }
                 val terminal = main { checkNotNull(run.terminal) }
                 main { TerminalSessions.close(targetContext,terminal) }
-                waitFor("Vite Close") { run.state == WebRunState.Stopped && terminal !in TerminalSessions.sessions }
-                viteResult = "passed"
+                waitFor("$fixtureName Close") { run.state == WebRunState.Stopped && terminal !in TerminalSessions.sessions }
+                check(runCatching { fetch(run.url) }.isFailure) { "$fixtureName server still accepts requests" }
+                frameworkResults += "$fixtureName: passed"
             }
-            output.putString("stream","PASS: static preview, loopback health, duplicate prevention, managed End/Restart/Close; Vite: $viteResult\n")
+            val regression = File(targetContext.cacheDir,"web-project-regression/site")
+            if (File(regression,"node_modules/next/package.json").isFile) {
+                roots += regression
+                val project = ProjectDetector.detect(regression).web.single()
+                val run = main { WebRunSessions.start(targetContext,regression,WebRunConfig(project,WebPackageManager.Npm,"dev",freePort(),false,
+                    openBrowser=false,mode=WebLaunchMode.Framework,startupTimeoutSeconds=300)) }
+                waitFor("Next + Tailwind compiling",320000) {
+                    check(run.busy)
+                    check(WebRunSessions.start(targetContext,regression,run.config) === run) { "Compilation allowed a duplicate" }
+                    check(run.state !in setOf(WebRunState.Failed,WebRunState.NeedsSetup,WebRunState.CompatibilityFailure)) { run.message }
+                    run.state == WebRunState.Running
+                }
+                val html = fetch(run.url)
+                val css = Regex("""href=["]([^"]+[.]css(?:[?][^"]*)?)["]""").findAll(html).map { it.groupValues[1] }.toList()
+                check(css.isNotEmpty()) { "No CSS stylesheet generated" }
+                check(css.joinToString("\n") { fetch(run.url + it.replace("&amp;","&")) }.contains("tailwindcss")) { "Tailwind CSS compilation failed" }
+                main { run.closeAfterStop = true; WebRunSessions.stop(targetContext,run) }
+                waitFor("Next + Tailwind Close") { !run.busy }
+                frameworkResults += "Next 15 + Tailwind/DaisyUI: passed"
+            }
+            output.putString("stream","PASS: static preview, loopback health, duplicate prevention, managed End/Restart/Close; ${frameworkResults.joinToString("; ")}\n")
             output.putString("result","PASS")
         } catch (error: Throwable) {
             output.putString("stream","FAIL: ${error.stackTraceToString()}\n")

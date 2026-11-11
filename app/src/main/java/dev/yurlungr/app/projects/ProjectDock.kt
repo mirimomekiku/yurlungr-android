@@ -115,6 +115,7 @@ internal class DockTool(
     val description: String,
     val dot: Color? = null,
     val onLongClick: (() -> Unit)? = null,
+    val enabled: Boolean = true,
     val onClick: () -> Unit,
 )
 
@@ -137,7 +138,8 @@ internal fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit
             agentStatuses(RuntimePaths(context)).filter { it.installed }.map { it.agent }
         }
     }
-    val webState = dev.yurlungr.app.web.WebRunSessions.get(dir)?.state
+    val webRun = dev.yurlungr.app.web.WebRunSessions.get(dir)
+    val webState = webRun?.state
     // The project's chosen agent starts with a tap; long-press (or none chosen) picks.
     val preferred = remember(installed) { ProjectAgentPrefs.defaultAgent(context, dir)?.takeIf { it in installed } }
     var agentMenu by remember { mutableStateOf(false) }
@@ -146,13 +148,13 @@ internal fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit
     val newHere = { runInTerminal("cd ${shellQuote(dir.path)}", dir.name) }
 
     val running = webState == dev.yurlungr.app.web.WebRunState.Running
-    val starting = webState?.active == true && !running
+    val starting = webRun?.busy == true && !running
     val run = if (hasWeb) DockTool(
         when { running -> "Open"; starting -> "Starting"; else -> "Run" },
         if (running) Ph.Globe else Ph.Play, tiles.lime,
-        when { running -> "Open the app in the browser"; starting -> "Show the server's logs"; else -> "Start the web app and open it" },
+        when { running -> "Open the app in the browser"; starting -> "Server is busy; use the server card for logs"; else -> "Start the web app and open it" },
         dot = when { running -> AppColors.status.success; starting -> AppColors.status.warning; else -> null },
-        onLongClick = onRunWebOptions, onClick = onRunWeb,
+        onLongClick = onRunWebOptions, enabled = !starting, onClick = onRunWeb,
     ) else null
     val build = if (isAndroid) DockTool("Build", Ph.Hammer, tiles.lime, "Build the debug APK and install it") {
         runInTerminal(
@@ -276,8 +278,8 @@ internal fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit
 @Composable
 private fun PrimaryDockButton(tool: DockTool, modifier: Modifier) {
     val colors = MaterialTheme.colorScheme
-    val fill = tool.tile?.fill ?: colors.surfaceContainerHighest
-    val on = tool.tile?.on ?: colors.onSurface
+    val fill = if (tool.enabled) tool.tile?.fill ?: colors.surfaceContainerHighest else colors.surfaceContainerHigh
+    val on = if (tool.enabled) tool.tile?.on ?: colors.onSurface else colors.outline
     Box(modifier) {
         Row(
             Modifier
@@ -285,7 +287,7 @@ private fun PrimaryDockButton(tool: DockTool, modifier: Modifier) {
                 .height(56.dp)
                 .clip(RoundedCornerShape(20.dp))
                 .background(fill)
-                .combinedClickable(onClickLabel = tool.label, onLongClickLabel = tool.onLongClick?.let { "${tool.label} options" },
+                .combinedClickable(enabled = tool.enabled, onClickLabel = tool.label, onLongClickLabel = tool.onLongClick?.let { "${tool.label} options" },
                     onLongClick = tool.onLongClick, onClick = tool.onClick),
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,

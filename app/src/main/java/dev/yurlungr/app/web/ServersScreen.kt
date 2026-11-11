@@ -149,7 +149,7 @@ fun ServersScreen(onBack: () -> Unit, onPreview: (url: String, title: String) ->
                         val title = "${run.config.project.framework} · ${run.config.project.directory.name}"
                         GroupRow(
                             title,
-                            subtitle = run.state.name + if (run.state == WebRunState.Running) " · ${run.url}" else run.message.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty(),
+                            subtitle = run.state.label + if (run.state == WebRunState.Running) " · ${run.url}" else run.message.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty(),
                             subtitleLines = 2,
                             icon = Ph.Globe,
                             tile = if (run.state == WebRunState.Running) AppColors.tiles.lime else null,
