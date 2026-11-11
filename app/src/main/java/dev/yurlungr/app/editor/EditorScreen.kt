@@ -170,12 +170,20 @@ private class History {
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun EditorScreen(file: File, onBack: () -> Unit) {
+fun EditorScreen(
+    file: File,
+    onBack: () -> Unit,
+    /** Line to show and put the cursor on (1-based), e.g. from search or a problem. */
+    line: Int? = null,
+    /** Opens another file at a line (Find definition). */
+    onOpenAt: ((File, Int) -> Unit)? = null,
+) {
     val context = LocalContext.current
     val paths = remember { RuntimePaths(context) }
     val scope = rememberCoroutineScope()
     val lang = remember(file) { Languages.forFile(file.name) }
     LaunchedEffect(context) { EditorPrefs.load(context) }
+    LaunchedEffect(file) { RecentFiles.record(context, file) }
 
     var load by remember(file) { mutableStateOf<Load>(Load.Loading) }
     LaunchedEffect(file) {
@@ -192,13 +200,16 @@ fun EditorScreen(file: File, onBack: () -> Unit) {
             EditorTopBar(file, dirty = false, onBack = onBack)
             Text(l.reason, color = Mono.Dim, modifier = Modifier.padding(24.dp))
         }
-        is Load.Ready -> Editor(file, l, lang, paths, onBack, scope)
+        is Load.Ready -> Editor(file, l, lang, paths, onBack, scope, line, onOpenAt)
     }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun Editor(file: File, initial: Load.Ready, lang: Language, paths: RuntimePaths, onBack: () -> Unit, scope: kotlinx.coroutines.CoroutineScope) {
+private fun Editor(
+    file: File, initial: Load.Ready, lang: Language, paths: RuntimePaths, onBack: () -> Unit, scope: kotlinx.coroutines.CoroutineScope,
+    startLine: Int? = null, onOpenAt: ((File, Int) -> Unit)? = null,
+) {
     val context = LocalContext.current
     val density = LocalDensity.current
     var value by remember { mutableStateOf(TextFieldValue(initial.text)) }
@@ -223,6 +234,8 @@ private fun Editor(file: File, initial: Load.Ready, lang: Language, paths: Runti
     var formatting by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
+    var showBlame by remember { mutableStateOf(false) }
+    var definitionOf by remember { mutableStateOf<String?>(null) }
 
     // Find & replace
     var findOpen by remember { mutableStateOf(false) }
@@ -321,6 +334,17 @@ private fun Editor(file: File, initial: Load.Ready, lang: Language, paths: Runti
         if (!wrap) scope.launch { hScroll.animateScrollTo((x - 120f).toInt().coerceAtLeast(0)) }
     }
 
+    /** Puts the cursor at the start of [line] (1-based) and scrolls it into view. */
+    fun goToLine(line: Int) {
+        val starts = lineStarts(value.text)
+        val offset = starts.getOrElse((line - 1).coerceIn(0, starts.lastIndex.coerceAtLeast(0))) { 0 }
+        value = value.copy(selection = TextRange(offset))
+        reveal(offset)
+    }
+    // Opened at a line: jump once the text is laid out.
+    var jumped by remember { mutableStateOf(startLine == null) }
+    LaunchedEffect(layout != null) { if (!jumped && layout != null) { jumped = true; goToLine(startLine!!) } }
+
     fun goToMatch(i: Int) {
         if (matches.isEmpty()) return
         currentMatch = ((i % matches.size) + matches.size) % matches.size
@@ -353,6 +377,13 @@ private fun Editor(file: File, initial: Load.Ready, lang: Language, paths: Runti
         }
     }
     BackHandler(onBack = ::tryBack)
+    if (showBlame) BlameSheet(file, onDismiss = { showBlame = false }) { showBlame = false; goToLine(it) }
+    definitionOf?.let { word ->
+        DefinitionSheet(EditorTools.rootOf(file), word, onDismiss = { definitionOf = null }) { target, line ->
+            definitionOf = null
+            if (target.canonicalPath == file.canonicalPath) goToLine(line) else onOpenAt?.invoke(target, line)
+        }
+    }
 
     Column(
         Modifier
@@ -392,6 +423,19 @@ private fun Editor(file: File, initial: Load.Ready, lang: Language, paths: Runti
                             val all = EditorThemes.all
                             EditorPrefs.setTheme(context, all[(all.indexOf(Mono) + 1) % all.size])
                         },
+                    )
+                    HorizontalDivider()
+                    val word = EditorTools.wordAt(value.text, value.selection.start)
+                    DropdownMenuItem(
+                        leadingIcon = { PhIcon(Ph.MagnifyingGlass, null, size = 18.dp) },
+                        text = { Text(word?.let { "Find definition of $it" } ?: "Find definition (put the cursor on a name)") },
+                        enabled = word != null,
+                        onClick = { menu = false; definitionOf = word },
+                    )
+                    DropdownMenuItem(
+                        leadingIcon = { PhIcon(Ph.GitCommit, null, size = 18.dp) },
+                        text = { Text("Blame") },
+                        onClick = { menu = false; showBlame = true },
                     )
                     HorizontalDivider()
                     DropdownMenuItem(
