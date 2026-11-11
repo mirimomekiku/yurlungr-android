@@ -251,7 +251,7 @@ fun ProjectScreen(
                 onRetry = { reload++ },
             )
         }
-        dev.yurlungr.app.web.WebRunCard(dir, onLogs = onOpenTerminal)
+        dev.yurlungr.app.web.WebRunCard(dir, onLogs = onOpenTerminal, onOptions = { showWebRun = true })
         AnimatedVisibility(headerVisible, enter = reveal, exit = collapse) {
             SectionTabs(tab, changeCount = status?.changes?.size ?: 0) { tab = it }
         }
@@ -502,10 +502,22 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
     }
 }
 
+/** One tool in the project dock (and its More sheet). */
+private class DockTool(
+    val label: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val tile: dev.yurlungr.app.ui.Tile?,
+    /** Shown in the More sheet. */
+    val description: String,
+    val dot: Color? = null,
+    val onLongClick: (() -> Unit)? = null,
+    val onClick: () -> Unit,
+)
+
 /**
- * The project dock: Chat (pick an agent) as the main button, then compact tools (Build for
- * Android, Run for web, Setup, Git, Terminal) with a dot when one needs you (dependencies
- * missing) or is live (a web server running).
+ * The project dock. Chat, then the project's main action: Run/Open for web apps, Build for Android,
+ * otherwise Terminal. With more than three buttons the rest (Setup, Git, Terminal…) go into a
+ * **More** sheet, which carries a dot when one of them needs you.
  */
 @Composable
 private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit, runInTerminal: (String, String) -> Unit,
@@ -521,6 +533,45 @@ private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit,
     }
     val webState = dev.yurlungr.app.web.WebRunSessions.get(dir)?.state
     var agentMenu by remember { mutableStateOf(false) }
+    var terminalMenu by remember { mutableStateOf(false) }
+    var more by remember { mutableStateOf(false) }
+    val newHere = { runInTerminal("cd ${shellQuote(dir.path)}", dir.name) }
+
+    val running = webState == dev.yurlungr.app.web.WebRunState.Running
+    val starting = webState?.active == true && !running
+    val run = if (hasWeb) DockTool(
+        when { running -> "Open"; starting -> "Starting"; else -> "Run" },
+        if (running) Ph.Globe else Ph.Play, tiles.lime,
+        when { running -> "Open the app in the browser"; starting -> "Show the server's logs"; else -> "Start the web app and open it" },
+        dot = when { running -> AppColors.status.success; starting -> AppColors.status.warning; else -> null },
+        onLongClick = onRunWebOptions, onClick = onRunWeb,
+    ) else null
+    val build = if (isAndroid) DockTool("Build", Ph.Hammer, tiles.lime, "Build the debug APK and install it") {
+        runInTerminal(
+            "cd ${shellQuote(dir.path)} && bash ./gradlew assembleDebug && " +
+                "yurlungr-install \"\$(ls -t app/build/outputs/apk/debug/*.apk | head -1)\"",
+            "Build ${dir.name}",
+        )
+    } else null
+    val terminal = DockTool("Terminal", Ph.TerminalWindow, null, "Open a shell in this project, or switch to an open one") {
+        // With terminals already open, ask: reuse one (those in this project first) or start fresh.
+        if (TerminalSessions.sessions.isEmpty()) newHere() else terminalMenu = true
+    }
+    val others = listOfNotNull(
+        if (hasStacks) DockTool("Setup", Ph.Wrench, tiles.sky, if (setupNeeded) "Dependencies are missing: install them" else "Detected stacks and their dependencies",
+            dot = if (setupNeeded) AppColors.status.warning else null, onClick = onSetup) else null,
+        if (hasGit) DockTool("Git", Ph.GitBranch, tiles.lilac, "Get latest, sync, branches and AI fixes", onClick = onGitActions) else null,
+    )
+    // The main action for this kind of project; everything else is secondary.
+    val primary = run ?: build ?: terminal
+    val secondary = listOfNotNull(build.takeIf { primary !== it }) + others + listOfNotNull(terminal.takeIf { primary !== it }) +
+        listOfNotNull(run?.let { DockTool("Run options", Ph.GearSix, null, "App folder, script, port and start command", onClick = onRunWebOptions) })
+    // Chat + primary + one more fits; past three buttons, the rest move to the More sheet.
+    // Run options don't count: long-pressing Run (or the server card's menu) reaches them.
+    val counted = secondary.filterNot { it.label == "Run options" }
+    val inline = if (counted.size <= 1) counted else emptyList()
+    val overflow = if (inline.isEmpty()) secondary else emptyList()
+
     val shape = RoundedCornerShape(26.dp)
     Row(
         Modifier
@@ -531,9 +582,9 @@ private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit,
             .border(1.dp, colors.outlineVariant, shape)
             .padding(6.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Box(Modifier.weight(1.7f)) {
+        Box(Modifier.weight(1.5f)) {
             val enabled = installed.isNotEmpty()
             Row(
                 Modifier
@@ -563,41 +614,79 @@ private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit,
                 }
             }
         }
-        Spacer(Modifier.width(4.dp))
-        if (isAndroid) {
-            DockButton("Build", Ph.Hammer, tiles.lime, Modifier.weight(1f)) {
-                runInTerminal(
-                    "cd ${shellQuote(dir.path)} && bash ./gradlew assembleDebug && " +
-                        "yurlungr-install \"\$(ls -t app/build/outputs/apk/debug/*.apk | head -1)\"",
-                    "Build ${dir.name}",
-                )
+        // The main action is a wide pill with its label beside the icon.
+        PrimaryDockButton(primary, Modifier.weight(1.3f))
+        for (tool in inline) DockButton(tool.label, tool.icon, tool.tile, Modifier.weight(0.8f), dot = tool.dot, onLongClick = tool.onLongClick, onClick = tool.onClick)
+        Box(if (overflow.isNotEmpty()) Modifier.weight(0.8f) else Modifier) {
+            if (overflow.isNotEmpty()) {
+                DockButton("More", Ph.DotsThreeVertical, null, Modifier.fillMaxWidth(),
+                    dot = overflow.firstNotNullOfOrNull { it.dot.takeIf { _ -> it.label == "Setup" } }) { more = true }
             }
-        }
-        if (hasWeb) {
-            // Says what a tap does now: start it, or open the app once it's up.
-            val running = webState == dev.yurlungr.app.web.WebRunState.Running
-            val starting = webState?.active == true && !running
-            DockButton(
-                when { running -> "Open"; starting -> "Starting"; else -> "Run" },
-                if (running) Ph.Globe else Ph.Play, tiles.lime, Modifier.weight(1f),
-                dot = when { running -> AppColors.status.success; starting -> AppColors.status.warning; else -> null },
-                onLongClick = onRunWebOptions, onClick = onRunWeb,
-            )
-        }
-        if (hasStacks) DockButton("Setup", Ph.Wrench, tiles.sky, Modifier.weight(1f), dot = if (setupNeeded) AppColors.status.warning else null, onClick = onSetup)
-        if (hasGit) DockButton("Git", Ph.GitBranch, tiles.lilac, Modifier.weight(1f), onClick = onGitActions)
-        Box(Modifier.weight(1f)) {
-            var terminalMenu by remember { mutableStateOf(false) }
-            val newHere = { runInTerminal("cd ${shellQuote(dir.path)}", dir.name) }
-            DockButton("Terminal", Ph.TerminalWindow, null, Modifier.fillMaxWidth()) {
-                // With terminals already open, ask: reuse one (those in this project first) or start fresh.
-                if (TerminalSessions.sessions.isEmpty()) newHere() else terminalMenu = true
-            }
+            // Anchored here so it opens above the dock, from the main button or the sheet.
             TerminalMenu(dir, terminalMenu, onDismiss = { terminalMenu = false }, onNew = { terminalMenu = false; newHere() }) { s ->
                 terminalMenu = false
                 TerminalSessions.select(s)
                 onOpenTerminal()
             }
+        }
+    }
+
+    if (more) {
+        dev.yurlungr.app.ui.AppSheet("Project tools", onDismiss = { more = false }, subtitle = dir.name, icon = Ph.Wrench) {
+            for (tool in overflow) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(colors.surfaceContainerHigh)
+                        .clickable { more = false; tool.onClick() }
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(tool.tile?.fill ?: colors.surfaceContainerHighest),
+                        contentAlignment = Alignment.Center,
+                    ) { PhIcon(tool.icon, null, size = 20.dp, tint = tool.tile?.on ?: colors.onSurface) }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(tool.label, style = MaterialTheme.typography.titleSmall)
+                        Text(tool.description, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                    }
+                    tool.dot?.let { Box(Modifier.size(9.dp).clip(CircleShape).background(it)) }
+                    Spacer(Modifier.width(4.dp))
+                    PhIcon(Ph.CaretRight, null, size = 14.dp, tint = colors.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PrimaryDockButton(tool: DockTool, modifier: Modifier) {
+    val colors = MaterialTheme.colorScheme
+    val fill = tool.tile?.fill ?: colors.surfaceContainerHighest
+    val on = tool.tile?.on ?: colors.onSurface
+    Box(modifier) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(fill)
+                .combinedClickable(onClickLabel = tool.label, onLongClickLabel = tool.onLongClick?.let { "${tool.label} options" },
+                    onLongClick = tool.onLongClick, onClick = tool.onClick),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PhIcon(tool.icon, null, size = 18.dp, tint = on)
+            Spacer(Modifier.width(6.dp))
+            Text(tool.label, style = MaterialTheme.typography.titleSmall, color = on, maxLines = 1, softWrap = false)
+        }
+        tool.dot?.let {
+            Box(
+                Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 8.dp).size(11.dp).clip(CircleShape)
+                    .background(fill).padding(2.dp).clip(CircleShape).background(it),
+            )
         }
     }
 }
