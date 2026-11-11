@@ -89,6 +89,17 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
   JUnit XML, Jest JSON and `go`/`cargo` test output into problems and test results.
 - `editor/EditorTools.kt`: recent files, `git blame --line-porcelain` ranges, and "Find definition"
   (a ripgrep regex for definition-like lines). The editor opens at `Route.FileView.line`.
+- `editor/Lsp.kt` is a small LSP client (Content-Length JSON-RPC over the server's stdio): diagnostics,
+  definition, hover and completion. There's one server per project and language (`LspManager`), started
+  with the runtime's environment and stopped when the last editor using it closes. `OpenFiles` keeps
+  tabs and unsaved buffers; `MergeScreen.kt` parses conflict markers (diff3 bases included);
+  `Snippets.kt` holds snippets and new-file templates; `DatabaseScreen.kt` opens SQLite with Android's
+  `SQLiteDatabase`.
+- `chat/Checkpoints.kt` snapshots a chat's project before and after each prompt into a shadow bare repository under
+  `files/checkpoints/` (per-chat index file, `refs/chats/<id>/…`, its own excludes), and restores from one.
+  Turn records double as usage statistics.
+- `ui/Feedback.kt`: vibration, sounds, and the battery/heat check `MainActivity.runInTerminal` makes before
+  heavy commands. Accent and pure black are in `ThemePrefs`/`AppTheme`. `ui/TourScreen.kt` is the first-run tour.
 - `ui/CommandPalette.kt` (Search everything) ranks actions, projects, recent files, chats, and the
   last project's tasks and files (`rg --files`). It opens through `LocalOpenPalette`.
 - `ui/ShareSheet.kt` takes `ACTION_SEND` / `SEND_MULTIPLE` into a project chat or folder.

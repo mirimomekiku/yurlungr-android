@@ -111,7 +111,19 @@ Then, on the phone:
   remote file links aren't opened on the client. Markdown previews also resolve relative links.
 - Chats are saved after every turn and restored as history after a restart; opening one restarts the
   agent and reloads its session (`session/load`).
-- Code: `chat/` (`ChatSession`, `ChatScreen`, `Composer`, `AcpExtras`, `Attachments`, `ChatStore`),
+- **Checkpoints:** before and after every prompt, the chat's project is snapshotted into a separate
+  repository kept in the app's files. It works in folders that aren't git repos and never touches
+  the project's own `.git`; build and dependency folders are left out. Chat ⋮ → **Checkpoints**
+  lists each prompt with what it changed:
+  - **Diff:** what the prompt changed;
+  - **Restore to before:** puts the files back, removes files added since, and takes a snapshot
+    first so the restore can be undone too. The agent isn't told, so mention it in your next message.
+
+  Chats in the home folder itself aren't snapshotted.
+- **Usage:** Chat ⋮ → **Usage** shows prompts, time working and files changed, plus the context window
+  and cost when the agent reports them over ACP (nothing is estimated). A project's Chats tab adds
+  them up.
+- Code: `chat/` (`ChatSession`, `ChatScreen`, `Composer`, `AcpExtras`, `Attachments`, `ChatStore`, `Checkpoints`),
   `acp/AcpConnection.kt`.
 
 </details>
@@ -291,9 +303,27 @@ Then, on the phone:
 - Images in the project folder are shown downscaled. Remote images load only after a tap, so opening
   a file doesn't contact their server. SVG images show their alternative text.
 - **Open at a line:** search results, problems and test failures open the editor at their line.
-- **Find definition** (⋮ menu, with the cursor on a name) searches the project for lines that look
-  like its definition (`fun`, `class`, `def`, `function`, `const x =`…) and opens the one you pick.
-  It's a text search, not a language server, so it can show more than one match.
+- **Language servers.** When one is installed for the file type, the editor starts it for the
+  project: rust-analyzer, gopls, clangd, lua-language-server (the Language servers and Build tools
+  packs), and typescript-language-server, Pyright, pylsp, ruff or bash-language-server.
+  - **Problems:** a dot in the gutter on lines with problems, and a line above the status bar with the
+    count; tap it for the list.
+  - **Find definition:** goes straight to the definition.
+  - **Show info:** the type or documentation of what's under the cursor.
+  - **Complete:** in the ⋮ menu, or the **Complete** chip above the keyboard.
+- **Find definition** without a language server searches the project for lines that look like a
+  definition (`fun`, `class`, `def`, `function`, `const x =`…) and opens the one you pick.
+- **Tabs:** files you open show as tabs above the editor. Switching keeps unsaved edits in memory
+  (a dot marks them); closing another tab drops its edits.
+- **Resolve conflicts:** a file with conflict markers opens a merge view, from Changes or the
+  editor's ⋮ menu. It shows each conflict as ours, the common base (when git recorded it) and
+  theirs, with **Use ours**, **Use theirs**, **Both** or **Edit**. **Save & mark resolved** stages it.
+- **Snippets** (⋮ → Insert snippet) for Kotlin, TypeScript/JavaScript, Python, Go, Rust, HTML,
+  shell and Markdown. In the Files tab, **+** creates a new file (folders included) from a template
+  for its type.
+- **SQLite databases** (`.db`, `.sqlite`, or any file with the SQLite header) open in a browser:
+  tables and views with rows 100 at a time, the schema, and SQL. Read-only unless you turn on
+  *Allow changes*.
 - **Blame** (⋮ menu): who last changed each part of the file, with the commit and when; tap to jump there.
 - Recently opened files appear in **Search everything**.
 - Code: `editor/`.
@@ -333,6 +363,14 @@ Then, on the phone:
 - **Share to Yurlungr** from any app: text, links, images or files. Pick a project and an agent, edit
   the message, then **Ask** (files go as attachments, up to 10 MB each) or **Save to project**.
 - **Wide screens** (tablets, unfolded foldables): a file opened from a project shows beside it.
+- **Themes:** Settings → Appearance adds an **accent colour** (Default, Lime, Lilac, Sky, Peach,
+  Rose) and **Pure black** for dark mode on OLED screens.
+- **Feedback** (Settings): vibration and sound when a task finishes, fails or an agent needs you,
+  each switchable. **Battery and heat warnings** ask before builds, installs, tests and setups when
+  the battery is under 20% and not charging, or the phone is over 42 °C.
+- **Launcher shortcuts:** long-press the app icon for New chat, your last project, Servers and Terminal.
+- **Tour:** a first-run walkthrough (also in Settings) with a sample project to try Run, Preview and
+  an agent on.
 - **Accessibility:** section labels are headings, tabs announce their selection, Git status letters
   are read as words ("Modified"), and dock dots say what they mean. Terminal and diff text follow
   Android's font size.
