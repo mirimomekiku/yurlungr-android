@@ -105,7 +105,7 @@ if [ -x "$GLIBC_LD" ] && command -v patchelf >/dev/null 2>&1; then
   ok "already installed"
 elif apt_prepare; then
   install_pkgs patchelf glibc-repo
-  if run_logged apt-get "${APT_LOCK[@]}" update; then install_pkgs glibc-runner; else bad "glibc package index update"; fi
+  if run_logged with_timeout 600 apt-get "${APT_LOCK[@]}" update; then install_pkgs glibc-runner; else bad "glibc package index update"; fi
 fi
 [ -x "$GLIBC_LD" ] || { bad "glibc loader missing ($GLIBC_LD)"; setup_finish ""; }
 
@@ -162,16 +162,27 @@ for url in "${URLS[@]}"; do
 done
 
 step "Install"
+# Copilot, Goose and OpenCode are single programs, kept at $DEST/<agent> as before (the app checks
+# that path, and installs from earlier versions have it).
+case "$AGENT" in
+  copilot|goose|opencode)
+    main=$(find "$NEW" -type f -name "$AGENT" | head -n1)
+    [ -n "$main" ] || fail "the archive has no $AGENT program"
+    [ "$main" = "$NEW/$AGENT" ] || mv -f "$main" "$NEW/$AGENT" || fail "move $AGENT"
+    ;;
+esac
 # Every glibc program in the bundle runs on Termux's glibc. Node single-file builds (Copilot, and
 # Cursor's unused *-sea files) are left untouched.
 if [ "$AGENT" != copilot ]; then
-  patched=0
+  patched=0 unpatched=0
   while IFS= read -r -d '' f; do
     case "$f" in *-sea) continue ;; esac
     if [ "$(patchelf --print-interpreter "$f" 2>/dev/null)" = /lib/ld-linux-aarch64.so.1 ]; then
-      if run_logged patchelf --set-interpreter "$GLIBC_LD" "$f"; then patched=$((patched + 1)); else bad "patch $(basename "$f")"; fi
+      if run_logged patchelf --set-interpreter "$GLIBC_LD" "$f"; then patched=$((patched + 1)); else unpatched=$((unpatched + 1)); bad "patch $(basename "$f")"; fi
     fi
   done < <(find "$NEW" -type f -perm -u+x -print0)
+  # A half-patched bundle won't run: keep the working version instead of swapping it in.
+  [ "$unpatched" -eq 0 ] || fail "$unpatched program(s) couldn't be patched; the installed version is unchanged"
   ok "$patched program(s) set to Termux's glibc"
 fi
 chmod -R u+rwX "$NEW" 2>/dev/null
@@ -183,22 +194,34 @@ rm -rf "$WORK"
 
 # glibc programs: no Bionic preload, and Termux's CA bundle for those that don't carry their own.
 GLIBC="unset LD_PRELOAD; [ -f \"\$PREFIX/etc/tls/cert.pem\" ] && export SSL_CERT_FILE=\"\$PREFIX/etc/tls/cert.pem\""
+# A wrapper that runs [target] (found in the bundle), optionally through the glibc loader.
+wrap() { # NAME TARGET [loader]
+  [ -n "$2" ] && [ -x "$2" ] || fail "$1: program not found in the download (${2:-nothing matched})"
+  if [ "${3:-}" = loader ]; then
+    write_wrapper "$1" "$GLIBC; exec /system/bin/env \"$GLIBC_LD\" \"$2\" \"\$@\""
+  else
+    write_wrapper "$1" "$GLIBC; exec \"$2\" \"\$@\""
+  fi
+}
 case "$AGENT" in
-  copilot) write_wrapper copilot "$GLIBC; exec /system/bin/env \"$GLIBC_LD\" \"$DEST/package/copilot\" \"\$@\""; CHECK=copilot ;;
-  goose) write_wrapper goose "$GLIBC; exec /system/bin/env \"$GLIBC_LD\" \"$(find "$DEST" -type f -name goose | head -n1)\" \"\$@\""; CHECK=goose ;;
-  opencode) write_wrapper opencode "$GLIBC; exec \"$(find "$DEST" -type f -name opencode | head -n1)\" \"\$@\""; CHECK=opencode ;;
-  cline) write_wrapper cline "$GLIBC; exec \"$DEST/package/bin/cline\" \"\$@\""; CHECK=cline ;;
-  kilo) write_wrapper kilo "$GLIBC; exec \"$(find "$DEST" -maxdepth 2 -type f -name kilo | head -n1)\" \"\$@\""; CHECK=kilo ;;
+  copilot) wrap copilot "$DEST/copilot" loader; CHECK=copilot ;;
+  goose) wrap goose "$DEST/goose" loader; CHECK=goose ;;
+  opencode) wrap opencode "$DEST/opencode"; CHECK=opencode ;;
+  cline) wrap cline "$DEST/package/bin/cline"; CHECK=cline ;;
+  kilo) wrap kilo "$(find "$DEST" -maxdepth 2 -type f -name kilo | head -n1)"; CHECK=kilo ;;
   # Cursor's launcher is a bash script that starts its own Node with index.js; do the same here.
   # Credentials go in a file: Android has no keyring.
-  cursor) write_wrapper cursor-agent "$GLIBC
+  cursor)
+    [ -x "$DEST/dist-package/node" ] && [ -f "$DEST/dist-package/index.js" ] || fail "cursor: node or index.js missing from the download"
+    write_wrapper cursor-agent "$GLIBC
 export CURSOR_INVOKED_AS=cursor-agent AGENT_CLI_CREDENTIAL_STORE=file NODE_COMPILE_CACHE=\"\${XDG_CACHE_HOME:-\$HOME/.cache}/cursor-compile-cache\"
-exec \"$DEST/dist-package/node\" \"$DEST/dist-package/index.js\" \"\$@\""; CHECK=cursor-agent ;;
-  vibe) write_wrapper vibe-acp "$GLIBC; exec \"$(find "$DEST" -maxdepth 2 -type f -name vibe-acp | head -n1)\" \"\$@\""; CHECK=vibe-acp ;;
-  kiro) write_wrapper kiro-cli "$GLIBC; exec \"$DEST/kirocli/bin/kiro-cli\" \"\$@\""; CHECK=kiro-cli ;;
+exec \"$DEST/dist-package/node\" \"$DEST/dist-package/index.js\" \"\$@\""
+    CHECK=cursor-agent ;;
+  vibe) wrap vibe-acp "$(find "$DEST" -maxdepth 2 -type f -name vibe-acp | head -n1)"; CHECK=vibe-acp ;;
+  kiro) wrap kiro-cli "$DEST/kirocli/bin/kiro-cli"; CHECK=kiro-cli ;;
   amp)
-    write_wrapper amp "$GLIBC; exec \"$(find "$DEST/cli" -type f -name amp | head -n1)\" \"\$@\""
-    write_wrapper amp-acp "$GLIBC; exec \"$(find "$DEST/acp" -type f -name amp-acp | head -n1)\" \"\$@\""
+    wrap amp "$(find "$DEST/cli" -type f -name amp | head -n1)"
+    wrap amp-acp "$(find "$DEST/acp" -type f -name amp-acp | head -n1)"
     CHECK="amp amp-acp" ;;
 esac
 # shellcheck disable=SC2086
