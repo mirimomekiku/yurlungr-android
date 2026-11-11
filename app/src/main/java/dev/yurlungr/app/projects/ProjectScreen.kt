@@ -165,6 +165,17 @@ fun ProjectScreen(
     /** A git command running in the terminal sheet: its title and arguments. */
     var gitTerminal by remember { mutableStateOf<Pair<String, List<String>>?>(null) }
 
+    // Automatic setup (opt-in, in the Setup sheet): once the stacks are known, install what's
+    // missing in a terminal, once per need, so reopening the project doesn't repeat it.
+    LaunchedEffect(stacks) {
+        val needs = stacks.orEmpty().filter { it.needsSetup(paths.prefix) }
+        if (needs.isEmpty() || !SetupBannerPrefs.auto(context)) return@LaunchedEffect
+        val signature = needs.joinToString("|") { it.id + ":" + it.dir.path + ":" + it.missingPackages(paths.prefix).joinToString(",") + ":" + it.installed }
+        if (SetupBannerPrefs.autoRan(context, dir, signature)) return@LaunchedEffect
+        SetupBannerPrefs.markAutoRan(context, dir, signature)
+        runInTerminal(installCommand(dir, needs), "Set up ${dir.name}")
+    }
+
     LaunchedEffect(dir, refreshTick, reload) {
         launch { status = git.status(dir) }
         launch { stacks = withContext(Dispatchers.IO) { runCatching { StackDetector.detect(dir) }.getOrDefault(emptyList()) } }
@@ -235,10 +246,10 @@ fun ProjectScreen(
         }
         }
         // Right after cloning (or creating) a project: offer to install what it needs.
-        val missing = stacks.orEmpty().filter { it.canInstall && it.installed == false }
+        val missing = stacks.orEmpty().filter { it.needsSetup(paths.prefix) }
         if (missing.isNotEmpty() && !setupBannerDismissed) {
             SetupBanner(
-                missing,
+                missing, paths.prefix,
                 onInstall = { runInTerminal(installCommand(dir, missing), "Install dependencies · ${dir.name}") },
                 onDetails = { showSetup = true },
                 onDismiss = { setupBannerDismissed = true; SetupBannerPrefs.dismiss(context, dir) },
@@ -309,8 +320,12 @@ fun ProjectScreen(
                     run?.state?.active == true -> { dev.yurlungr.app.web.WebRunSessions.logs(run); onOpenTerminal() }
                     else -> capabilities?.web?.takeIf { it.isNotEmpty() }?.let { projects ->
                         scope.launch {
-                            // Anything it can't decide alone (no Node.js, no start command…) opens the options.
-                            if (dev.yurlungr.app.web.WebQuickRun.start(context, dir, projects) != null) showWebRun = true
+                            // Anything it can't decide alone opens the options; a missing runtime (Node.js,
+                            // pnpm, Bun…) is installed first, with the dependencies, then Run works.
+                            if (dev.yurlungr.app.web.WebQuickRun.start(context, dir, projects) != null) {
+                                val web = stacks.orEmpty().filter { (it.id == "node" || it.id == "deno") && it.missingPackages(paths.prefix).isNotEmpty() }
+                                if (web.isNotEmpty()) runInTerminal(installCommand(dir, web), "Set up ${dir.name}") else showWebRun = true
+                            }
                         }
                     }
                 }
@@ -318,7 +333,7 @@ fun ProjectScreen(
             onRunWebOptions = { showWebRun = true },
             hasGit = status?.isRepo == true, onGitActions = { showGitActions = true },
             hasStacks = stacks.orEmpty().isNotEmpty(), onSetup = { showSetup = true },
-            setupNeeded = stacks.orEmpty().any { it.canInstall && it.installed == false })
+            setupNeeded = stacks.orEmpty().any { it.needsSetup(paths.prefix) })
     }
 
     if (showSetup) {
