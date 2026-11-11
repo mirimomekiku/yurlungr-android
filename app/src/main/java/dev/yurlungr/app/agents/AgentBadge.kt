@@ -30,11 +30,20 @@ private val Agent.logo: Int?
         Agent.Copilot -> R.drawable.agent_copilot
         Agent.Goose -> R.drawable.agent_goose
         Agent.OpenCode -> R.drawable.agent_opencode
+        Agent.MiniMax -> R.drawable.agent_minimax
+        Agent.Qoder -> R.drawable.agent_qoder
+        Agent.Cline -> R.drawable.agent_cline
+        Agent.Kilo -> R.drawable.agent_kilo
+        Agent.Cursor -> R.drawable.agent_cursor
+        Agent.Amp -> R.drawable.agent_amp
+        Agent.MistralVibe -> R.drawable.agent_mistral
+        Agent.Kiro -> R.drawable.agent_kiro
+        Agent.Pi, Agent.FastAgent, Agent.MinionCode -> null
     }
 
 /** Single-colour logos: tinted with the text colour so they show in light and dark mode. */
 private val Agent.monochrome: Boolean
-    get() = this == Agent.Copilot || this == Agent.Goose || this == Agent.OpenCode || this == Agent.CommandCode
+    get() = this in setOf(Agent.Copilot, Agent.Goose, Agent.OpenCode, Agent.CommandCode, Agent.Cline, Agent.Kilo, Agent.Cursor)
 
 /** The agent's logo on its own, no tile behind it; a monogram when there's no logo. [size] is the logo's box. */
 @Composable

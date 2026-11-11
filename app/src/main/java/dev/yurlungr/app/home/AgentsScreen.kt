@@ -182,7 +182,11 @@ private fun AgentCard(status: AgentStatus, onNewChat: () -> Unit, onLogin: () ->
                 status.signedIn == false -> FilledTonalButton(onClick = onLogin, modifier = wide) { Text(signInLabel(agent)) }
                 else -> {
                     Button(onClick = onNewChat, modifier = wide) { Text("New chat") }
-                    OutlinedButton(onClick = onLogin, modifier = wide) { Text(if (status.signedIn == true) "Account" else "Sign in") }
+                    OutlinedButton(onClick = onLogin, modifier = wide) { Text(when {
+                        agent in setOf(Agent.MistralVibe, Agent.FastAgent, Agent.MinionCode) -> "API key"
+                        status.signedIn == true -> "Account"
+                        else -> "Sign in"
+                    }) }
                 }
             }
         }
@@ -199,7 +203,11 @@ private fun signInLabel(agent: Agent) = when (agent) {
     Agent.CommandCode -> "Sign in"
     Agent.Copilot -> "Sign in with GitHub"
     Agent.Goose -> "Set up a provider"
-    Agent.OpenCode -> "Sign in"
+    Agent.OpenCode, Agent.Qoder, Agent.Cline, Agent.Kilo, Agent.Kiro, Agent.Pi -> "Sign in"
+    Agent.MiniMax -> "Sign in with MiniMax"
+    Agent.Cursor -> "Sign in with Cursor"
+    Agent.Amp -> "Sign in with Amp"
+    Agent.MistralVibe, Agent.FastAgent, Agent.MinionCode -> "Add an API key"
 }
 
 private fun relativeTime(millis: Long): String =

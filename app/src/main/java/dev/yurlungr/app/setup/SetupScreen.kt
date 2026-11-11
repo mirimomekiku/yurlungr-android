@@ -91,6 +91,8 @@ private val AREAS = listOf(
     "Tools" to listOf(
         "agents", "tool-gemini", "tool-codex", "tool-codex-acp", "tool-claude", "tool-claude-agent-acp", "tool-agy", "setup-agents-setup",
         "tool-qwen", "tool-kimi", "tool-auggie", "tool-commandcode", "tool-copilot", "tool-goose", "tool-opencode",
+        "tool-mcode", "tool-pi", "tool-pi-acp", "tool-qodercli", "tool-cline", "tool-kilo", "tool-cursor-agent", "tool-amp", "tool-amp-acp",
+        "tool-vibe-acp", "tool-kiro-cli", "tool-fast-agent-acp", "tool-minion-code",
         "android-sdk", "tool-java", "jdk", "tool-aapt2", "updates", "setup-android-sdk-setup", "cli-report",
     ),
     // One group per optional pack, each with its own Install button.

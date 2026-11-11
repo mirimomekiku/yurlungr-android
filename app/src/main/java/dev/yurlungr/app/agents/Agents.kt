@@ -22,9 +22,10 @@ enum class Agent(
     /**
      * For optional agents: the npm package that installs it on its own (from the Agents screen),
      * instead of with the agents setup. Null for the core agents that setup always installs.
+     * Space-separated when it takes more than one (an ACP adapter and the CLI it drives).
      */
     val npmPackage: String? = null,
-    /** For optional agents shipped as native Linux binaries: the `agent-install.sh` recipe. */
+    /** For optional agents shipped as native Linux binaries or Python packages: the `agent-install.sh` recipe. */
     val installRecipe: String? = null,
 ) {
     Claude(
@@ -112,6 +113,39 @@ enum class Agent(
         loginHint = "Sign in with your Command Code account in the browser that opens. It exits when done.",
         npmPackage = "command-code",
     ),
+    // https://agent.minimax.io/docs/cli/quick-start
+    MiniMax(
+        displayName = "MiniMax Code",
+        vendor = "MiniMax · MiniMax Code (mcode)",
+        acpCommand = "mcode acp",
+        requiredFiles = listOf("bin/mcode"),
+        credentialFiles = emptyList(),
+        loginCommand = "mcode login --region global",
+        loginHint = "Sign in with your MiniMax account in the browser that opens (mainland China accounts: run mcode login instead). To use your own key, run mcode provider add.",
+        npmPackage = "@minimax-ai/code",
+    ),
+    // https://github.com/svkozak/pi-acp: an ACP adapter for the Pi coding agent, which it starts.
+    Pi(
+        displayName = "Pi",
+        vendor = "Mario Zechner · Pi coding agent",
+        acpCommand = "pi-acp",
+        requiredFiles = listOf("bin/pi-acp", "bin/pi"),
+        credentialFiles = listOf(".pi/agent/auth.json"),
+        loginCommand = "pi",
+        loginHint = "Type /login and pick a provider (a Claude or ChatGPT plan, or an API key). Then press Ctrl+C twice to exit.",
+        npmPackage = "pi-acp @mariozechner/pi-coding-agent",
+    ),
+    // https://docs.qoder.com/cli/quick-start
+    Qoder(
+        displayName = "Qoder",
+        vendor = "Qoder · Qoder CLI",
+        acpCommand = "qodercli --acp",
+        requiredFiles = listOf("bin/qodercli"),
+        credentialFiles = emptyList(),
+        loginCommand = "qodercli",
+        loginHint = "Type /login and finish in the browser that opens (or paste a personal access token). Then type /quit.",
+        npmPackage = "@qoder-ai/qodercli",
+    ),
 
     // Optional native agents: glibc builds run on Termux's glibc (see assets/agent-install.sh).
     // https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server
@@ -146,15 +180,107 @@ enum class Agent(
         loginCommand = "opencode auth login",
         loginHint = "Pick a provider and sign in or paste its API key. It exits when done.",
         installRecipe = "opencode",
+    ),
+    // https://docs.cline.bot/cline-cli. The npm package is a glibc Bun build, so it's a recipe.
+    Cline(
+        displayName = "Cline",
+        vendor = "Cline · Cline CLI",
+        acpCommand = "cline --acp",
+        requiredFiles = listOf("bin/cline", "libexec/yurlungr/cline/package/bin/cline"),
+        credentialFiles = emptyList(),
+        loginCommand = "cline auth",
+        loginHint = "Choose how to sign in: a Cline account, a ChatGPT plan, or your own provider's API key. It exits when done.",
+        installRecipe = "cline",
+    ),
+    // https://kilo.ai/docs/cli: an OpenCode fork.
+    Kilo(
+        displayName = "Kilo Code",
+        vendor = "Kilo · Kilo Code CLI",
+        acpCommand = "kilo acp",
+        requiredFiles = listOf("bin/kilo", "libexec/yurlungr/kilo/kilo"),
+        credentialFiles = emptyList(),
+        loginCommand = "kilo auth login",
+        loginHint = "Pick Kilo Gateway (or another provider) and sign in or paste its API key. It exits when done.",
+        installRecipe = "kilo",
+    ),
+    // https://cursor.com/docs/cli/acp
+    Cursor(
+        displayName = "Cursor",
+        vendor = "Anysphere · Cursor Agent CLI",
+        acpCommand = "cursor-agent acp",
+        requiredFiles = listOf("bin/cursor-agent", "libexec/yurlungr/cursor/dist-package/index.js"),
+        credentialFiles = emptyList(),
+        loginCommand = "cursor-agent login",
+        loginHint = "Open the link shown and sign in with your Cursor account. It exits when you're signed in.",
+        installRecipe = "cursor",
+    ),
+    // https://github.com/tao12345666333/amp-acp: an ACP adapter that drives the Amp CLI.
+    Amp(
+        displayName = "Amp",
+        vendor = "Amp · Amp CLI",
+        acpCommand = "amp-acp",
+        requiredFiles = listOf("bin/amp", "bin/amp-acp"),
+        credentialFiles = emptyList(),
+        loginCommand = "amp login",
+        loginHint = "Open the link shown and sign in with your Amp account. It exits when you're signed in.",
+        installRecipe = "amp",
+    ),
+    // https://docs.mistral.ai/vibe/code/use-vibe-in-other-ides. Its key normally goes in the OS
+    // keyring, which Android lacks: ~/.vibe/.env is the documented fallback.
+    MistralVibe(
+        displayName = "Mistral Vibe",
+        vendor = "Mistral AI · Vibe",
+        acpCommand = "vibe-acp",
+        requiredFiles = listOf("bin/vibe-acp"),
+        credentialFiles = listOf(".vibe/.env"),
+        loginCommand = agentKeyCommand("vibe"),
+        loginHint = "Paste your Mistral API key. It's saved to ~/.vibe/.env, readable only by you.",
+        installRecipe = "vibe",
+    ),
+    // https://kiro.dev/docs/cli/acp
+    Kiro(
+        displayName = "Kiro",
+        vendor = "Amazon · Kiro CLI",
+        acpCommand = "kiro-cli acp --agent-engine=v3",
+        requiredFiles = listOf("bin/kiro-cli", "libexec/yurlungr/kiro/kirocli/bin/kiro-cli"),
+        credentialFiles = emptyList(),
+        loginCommand = "kiro-cli login --use-device-flow",
+        loginHint = "Pick a sign-in method, open the link shown and enter the code. It exits when you're signed in.",
+        installRecipe = "kiro",
+    ),
+
+    // Optional Python agents (uv, on Termux's Python; see assets/agent-install.sh). Their own
+    // sign-ins keep tokens in an OS keyring, so they use your provider's key instead (agent-key.sh).
+    // https://fast-agent.ai/acp
+    FastAgent(
+        displayName = "fast-agent",
+        vendor = "fast-agent · Python",
+        acpCommand = "fast-agent-acp -x",
+        requiredFiles = listOf("bin/fast-agent-acp"),
+        credentialFiles = listOf(".config/yurlungr/fast-agent.env"),
+        loginCommand = agentKeyCommand("fast-agent"),
+        loginHint = "Pick a provider, paste its API key and choose a model. They're saved readable only by you.",
+        installRecipe = "fast-agent",
+    ),
+    // https://github.com/femto/minion-code
+    MinionCode(
+        displayName = "Minion Code",
+        vendor = "Minion · Python",
+        acpCommand = "minion-code acp",
+        requiredFiles = listOf("bin/minion-code"),
+        credentialFiles = listOf(".minion/config.yaml"),
+        loginCommand = agentKeyCommand("minion"),
+        loginHint = "Enter an OpenAI-compatible endpoint, its API key and a model. They're saved to ~/.minion/config.yaml, readable only by you.",
+        installRecipe = "minion",
     );
 
     /** Installed on its own (see [npmPackage], [installRecipe]) rather than by the agents setup. */
     val isOptional: Boolean get() = npmPackage != null || installRecipe != null
 
     /** The terminal command that installs (or updates) an optional agent. */
-    fun installCommand(): String? = installRecipe?.let { dev.yurlungr.app.runtime.agentInstallCommand(it) } ?: npmPackage?.let { pkg ->
+    fun installCommand(): String? = installRecipe?.let { dev.yurlungr.app.runtime.agentInstallCommand(it) } ?: npmPackage?.let { pkgs ->
         "command -v npm >/dev/null || { echo 'npm is missing: install the developer tools first (Settings → System runtime).'; exit 1; }; " +
-            "npm install -g --loglevel=http '$pkg@latest' && echo && echo '$displayName installed. Sign in from ☰ → Agents.'"
+            "npm install -g --loglevel=http ${pkgs.split(' ').joinToString(" ") { "'$it@latest'" }} && echo && echo '$displayName installed. Sign in from ☰ → Agents.'"
     }
 
     /** Antigravity exposes its approval override as a launch flag, separately from ACP modes.
@@ -170,7 +296,8 @@ enum class Agent(
             "DISABLE_AUTOUPDATER" to "1",
         )
         Codex -> mapOf("CODEX_PATH" to File(paths.bin, "codex").path)
-        Gemini, Antigravity, Qwen, Kimi, Auggie, CommandCode, Copilot, Goose, OpenCode -> emptyMap()
+        Gemini, Antigravity, Qwen, Kimi, Auggie, CommandCode, MiniMax, Pi, Qoder, Copilot, Goose, OpenCode,
+        Cline, Kilo, Cursor, Amp, MistralVibe, Kiro, FastAgent, MinionCode -> emptyMap()
     }
 
     fun isInstalled(paths: RuntimePaths): Boolean = requiredFiles.all { File(paths.prefix, it).exists() }
@@ -182,6 +309,9 @@ enum class Agent(
     fun isSignedIn(paths: RuntimePaths): Boolean? =
         if (credentialFiles.isEmpty()) null else credentialFiles.any { File(paths.home, it).isFile }
 }
+
+/** Asks for an API key in the terminal and saves it where the agent reads it (assets/agent-key.sh). */
+private fun agentKeyCommand(agent: String) = "bash \"\$PREFIX/libexec/yurlungr/agent-key.sh\" $agent"
 
 data class AgentStatus(val agent: Agent, val installed: Boolean, val signedIn: Boolean?)
 

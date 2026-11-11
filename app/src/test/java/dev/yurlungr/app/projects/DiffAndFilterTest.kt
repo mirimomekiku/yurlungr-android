@@ -83,15 +83,20 @@ class DiffAndFilterTest {
 
     @Test fun `optional agents install on their own with npm, core ones don't`() {
         val optional = Agent.entries.filter { it.isOptional }
-        assertEquals(setOf(Agent.Qwen, Agent.Kimi, Agent.Auggie, Agent.CommandCode, Agent.Copilot, Agent.Goose, Agent.OpenCode), optional.toSet())
+        assertEquals(setOf(Agent.Qwen, Agent.Kimi, Agent.Auggie, Agent.CommandCode, Agent.MiniMax, Agent.Pi, Agent.Qoder,
+            Agent.Copilot, Agent.Goose, Agent.OpenCode, Agent.Cline, Agent.Kilo, Agent.Cursor, Agent.Amp, Agent.MistralVibe, Agent.Kiro,
+            Agent.FastAgent, Agent.MinionCode), optional.toSet())
         for (a in optional.filter { it.npmPackage != null }) {
             val cmd = a.installCommand()!!
-            assertTrue(cmd.contains("npm install -g") && cmd.contains("'${a.npmPackage}@latest'"))
+            assertTrue(cmd.contains("npm install -g"))
+            for (pkg in a.npmPackage!!.split(' ')) assertTrue(cmd, cmd.contains("'$pkg@latest'"))
             assertTrue("checks npm is there first", cmd.startsWith("command -v npm"))
         }
+        // Pi's adapter and the CLI it drives install together.
+        assertTrue(Agent.Pi.installCommand()!!.contains("'pi-acp@latest' '@mariozechner/pi-coding-agent@latest'"))
         assertNull(Agent.Claude.installCommand())
-        // Native ones go through the agent-install.sh recipe, parsed before it runs.
-        for (a in listOf(Agent.Copilot, Agent.Goose, Agent.OpenCode)) {
+        // Native and Python ones go through the agent-install.sh recipe, parsed before it runs.
+        for (a in optional.filter { it.installRecipe != null }) {
             val cmd = a.installCommand()!!
             assertTrue(cmd.startsWith("bash -n ") && cmd.endsWith("agent-install.sh\" ${a.installRecipe}"))
         }
@@ -102,5 +107,18 @@ class DiffAndFilterTest {
         assertEquals("kimi acp", Agent.Kimi.launchCommand(false))
         assertEquals("auggie --acp", Agent.Auggie.launchCommand(false))
         assertEquals("not Android's /system/bin/cmd", "commandcode acp", Agent.CommandCode.launchCommand(false))
+        assertEquals("cline --acp", Agent.Cline.launchCommand(false))
+        assertEquals("kiro-cli acp --agent-engine=v3", Agent.Kiro.launchCommand(false))
+        assertEquals("not Minion's mcode", "mcode acp", Agent.MiniMax.launchCommand(false))
+        assertEquals("minion-code acp", Agent.MinionCode.launchCommand(false))
+        // Key-based agents set up through agent-key.sh, with a recipe it knows.
+        for (a in listOf(Agent.MistralVibe, Agent.FastAgent, Agent.MinionCode)) {
+            assertTrue(a.loginCommand, a.loginCommand.startsWith("bash \"\$PREFIX/libexec/yurlungr/agent-key.sh\" "))
+        }
+        assertEquals(dev.yurlungr.app.runtime.AGENT_RECIPES, optional.mapNotNull { it.installRecipe }.toSet())
+        // The installer accepts exactly those recipes.
+        val accepted = java.io.File("src/main/assets/agent-install.sh").readLines()
+            .first { it.trimStart().startsWith("copilot|") }.substringBefore(')').trim().split('|').toSet()
+        assertEquals(dev.yurlungr.app.runtime.AGENT_RECIPES, accepted)
     }
 }
