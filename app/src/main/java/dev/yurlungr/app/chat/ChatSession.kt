@@ -147,6 +147,15 @@ class ChatSession(
     /** While loading a saved session the agent replays history we already show; drop it. */
     private var replaying = false
 
+    /**
+     * Stop was pressed during this turn. Checked just before `session/prompt` goes out: a Stop
+     * during the checkpoint snapshot (before there's a prompt to cancel) must still stop the turn.
+     */
+    @Volatile private var stopRequested = false
+
+    /** A pending save of the transcript while a turn streams (see [saveSoon]). */
+    private var saveJob: kotlinx.coroutines.Job? = null
+
     /** Persist hook (set by the registry). */
     var onChanged: ((ChatSession) -> Unit)? = null
     /** Process started/stopped (the registry keeps the foreground service in sync). */
@@ -440,6 +449,7 @@ class ChatSession(
         val conn = connection ?: return
         val sid = sessionId ?: return
         val gen = generation
+        stopRequested = false
         state = ChatState.Running
         changed()
         promptJob = scope.launch {
@@ -448,6 +458,14 @@ class ChatSession(
                 // A checkpoint of the project before the agent works, so this turn can be undone.
                 turn = runCatching { Checkpoints.begin(appContext, id, cwd, text) }.getOrNull()
                 val blocks = withContext(Dispatchers.IO) { Attachments.toPromptBlocks(cwd, attachments, caps) }
+                if (stopRequested) {
+                    // Stopped before it was sent: the agent never sees this turn.
+                    if (gen == generation) {
+                        add(ChatItem.Notice("Stopped before sending"))
+                        state = ChatState.Ready
+                    }
+                    return@launch
+                }
                 val result = conn.request("session/prompt", buildJsonObject {
                     put("sessionId", sid)
                     put("prompt", buildJsonArray {
@@ -492,14 +510,16 @@ class ChatSession(
             } finally {
                 // And after, whatever happened (done, stopped, failed): what the turn changed.
                 turn?.let { t -> withContext(kotlinx.coroutines.NonCancellable) { runCatching { Checkpoints.end(appContext, id, cwd, t) } } }
+                saveJob?.cancel()
+                changed()
             }
-            changed()
         }
     }
 
     override fun cancel() {
         val conn = connection ?: return
         val sid = sessionId ?: return
+        if (state == ChatState.Running) stopRequested = true
         // Pending permission prompts are answered "cancelled" as the protocol requires.
         resolvePendingPermissions()
         scope.launch {
@@ -649,6 +669,7 @@ class ChatSession(
             else -> return
         }
         listeners.forEach { it.onTextAppended(this, item, text) }
+        saveSoon()
     }
 
     private fun upsertToolCall(update: JsonObject) {
@@ -667,6 +688,7 @@ class ChatSession(
             }
         }
         if (existing == null) add(item) else updated(item)
+        saveSoon()
     }
 
     private fun parseToolContent(el: JsonElement): ToolContent? {
@@ -689,6 +711,7 @@ class ChatSession(
         val plan = existing ?: ChatItem.Plan()
         plan.entries = entries
         if (existing == null) add(plan) else updated(plan)
+        saveSoon()
     }
 
     private fun readModes(obj: JsonObject?) {
@@ -761,6 +784,19 @@ class ChatSession(
         onChanged?.invoke(this)
     }
 
+    /**
+     * Saves what a running turn has streamed so far, at most every [STREAM_SAVE_MS]. Without it
+     * a turn's output existed only in memory until the turn ended, and if Android killed the app
+     * mid-turn, resuming dropped the agent's replay of it too (the transcript "already had" it).
+     */
+    private fun saveSoon() {
+        if (saveJob?.isActive == true) return
+        saveJob = scope.launch {
+            kotlinx.coroutines.delay(STREAM_SAVE_MS)
+            changed()
+        }
+    }
+
     private fun lastAgentText(): String =
         (items.lastOrNull { it is ChatItem.AgentText } as? ChatItem.AgentText)?.text?.trim()?.lineSequence()
             ?.firstOrNull { it.isNotBlank() }.orEmpty()
@@ -773,6 +809,7 @@ class ChatSession(
     private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
 
     companion object {
+        private const val STREAM_SAVE_MS = 2_000L
         private const val TAG = "ChatSession"
         private const val MAX_READ_BYTES = 16L * 1024 * 1024
         private val URL_REGEX = Regex("""https://\S+""")
