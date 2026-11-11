@@ -17,6 +17,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 
+/** An added line that opens or closes a conflict, as git writes them (7 marks, then a space or nothing). */
+internal val CONFLICT_MARKER = Regex("^\\+(<{7}|>{7})( |$)")
+
 data class GitChange(
     val path: String,
     /** Porcelain status letters: [index] (staged) and [worktree]. '?' = untracked. */
@@ -26,13 +29,18 @@ data class GitChange(
 ) {
     val untracked: Boolean get() = index == '?'
 
+    /** Unmerged (porcelain): U in either column, or both sides added (AA) or deleted (DD). */
+    val isConflict: Boolean
+        get() = index == 'U' || worktree == 'U' || (index == 'A' && worktree == 'A') || (index == 'D' && worktree == 'D')
+
     val label: String
         get() = when {
+            // Before "added"/"deleted": AU, UD, AA, DD... are conflicts, not ordinary changes.
+            isConflict -> "conflict"
             untracked -> "new"
             index == 'R' || worktree == 'R' -> "renamed"
             index == 'A' -> "added"
             index == 'D' || worktree == 'D' -> "deleted"
-            index == 'U' || worktree == 'U' -> "conflict"
             else -> "modified"
         }
 }
@@ -53,9 +61,7 @@ data class GitStatus(
 ) {
     /** Paths with unresolved merge conflicts (porcelain "unmerged": U in either column, AA or DD). */
     val conflicts: List<String>
-        get() = changes.filter { c ->
-            c.index == 'U' || c.worktree == 'U' || (c.index == 'A' && c.worktree == 'A') || (c.index == 'D' && c.worktree == 'D')
-        }.map { it.path }
+        get() = changes.filter { it.isConflict }.map { it.path }
 
     companion object {
         val NotARepo = GitStatus(isRepo = false)
@@ -246,13 +252,37 @@ class Git(private val paths: RuntimePaths) {
     }
 
     suspend fun commitAll(dir: File, message: String): CommandResult {
+        // `add -A` would mark conflicted files resolved, markers and all.
+        unresolved(dir)?.let { return it }
         val add = run(dir, "add", "-A")
         if (!add.ok) return add
+        markersStaged(dir)?.let { return it }
         return run(dir, "commit", "-m", message)
     }
 
     /** Commits only what's staged. */
-    suspend fun commitStaged(dir: File, message: String): CommandResult = run(dir, "commit", "-m", message)
+    suspend fun commitStaged(dir: File, message: String): CommandResult =
+        markersStaged(dir) ?: run(dir, "commit", "-m", message)
+
+    /** A failure naming the files git still has as unmerged, or null when there are none. */
+    private suspend fun unresolved(dir: File): CommandResult? {
+        val names = runParsed(dir, "diff", "--name-only", "--diff-filter=U").output.lines().filter { it.isNotBlank() }
+        return if (names.isEmpty()) null
+        else CommandResult(exitCode = 1, output = "Resolve the conflicts first (open each in the merge view): ${names.joinToString()}")
+    }
+
+    /** A failure when the staged changes add conflict markers, or null when they don't. */
+    private suspend fun markersStaged(dir: File): CommandResult? {
+        val diff = runParsed(dir, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff").output
+        var file: String? = null
+        val hits = LinkedHashSet<String>()
+        for (line in diff.lineSequence()) {
+            if (line.startsWith("+++ ")) file = line.removePrefix("+++ ").removePrefix("b/")
+            else if (CONFLICT_MARKER.containsMatchIn(line)) file?.let(hits::add)
+        }
+        return if (hits.isEmpty()) null
+        else CommandResult(exitCode = 1, output = "These files still have conflict markers (<<<<<<< / >>>>>>>): ${hits.joinToString()}. Resolve them, then commit.")
+    }
 
     /** Stages [paths] (including deletions). */
     suspend fun stage(dir: File, paths: List<String>): CommandResult =
@@ -268,6 +298,8 @@ class Git(private val paths: RuntimePaths) {
 
     /** Throws away a file's changes: untracked files are deleted, others go back to HEAD. */
     suspend fun discard(dir: File, change: GitChange): CommandResult = when {
+        // "Discard" of a conflict has no single meaning (ours? theirs?): resolve it in the merge view.
+        change.isConflict -> CommandResult(exitCode = 1, output = "${change.path} has a merge conflict: resolve it in the merge view instead.")
         change.untracked -> run(dir, "clean", "-f", "-q", "--", change.path)
         change.index == 'A' -> run(dir, "rm", "-f", "-q", "--", change.path)
         else -> run(dir, "restore", "--source=HEAD", "--staged", "--worktree", "--", change.path)
