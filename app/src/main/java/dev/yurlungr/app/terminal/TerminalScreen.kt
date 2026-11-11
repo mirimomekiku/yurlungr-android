@@ -1,5 +1,6 @@
 package dev.yurlungr.app.terminal
 
+import androidx.core.content.edit
 import dev.yurlungr.app.ui.PhIcon
 import dev.yurlungr.app.ui.Motion
 import dev.yurlungr.app.ui.AppColors
@@ -149,7 +150,7 @@ fun TerminalScreen(onBack: () -> Unit) {
             extraKeysVisible = extraKeysVisible,
             onToggleExtraKeys = {
                 extraKeysVisible = !extraKeysVisible
-                prefs.edit().putBoolean("extra_keys", extraKeysVisible).apply()
+                prefs.edit { putBoolean("extra_keys", extraKeysVisible) }
                 modifiers.ctrl = false
                 modifiers.alt = false
             },

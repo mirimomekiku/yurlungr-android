@@ -1,5 +1,6 @@
 package dev.yurlungr.app.editor
 
+import androidx.core.content.edit
 import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -145,11 +146,11 @@ object EditorPrefs {
 
     fun setTheme(context: Context, t: EditorTheme) {
         theme = t
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("theme", t.id).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { putString("theme", t.id) }
     }
 
     fun setFontSize(context: Context, size: Float) {
         fontSize = size.coerceIn(9f, 22f)
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putFloat("font", fontSize).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { putFloat("font", fontSize) }
     }
 }

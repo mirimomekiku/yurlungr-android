@@ -1,5 +1,6 @@
 package dev.yurlungr.app.chat
 
+import androidx.core.graphics.scale
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -119,7 +120,7 @@ object Attachments {
             ?: return bytes to mime
         val scale = MAX_IMAGE_SIDE.toFloat() / maxOf(decoded.width, decoded.height)
         val bitmap = if (scale < 1f) {
-            Bitmap.createScaledBitmap(decoded, (decoded.width * scale).toInt(), (decoded.height * scale).toInt(), true)
+            decoded.scale((decoded.width * scale).toInt(), (decoded.height * scale).toInt())
         } else {
             decoded
         }

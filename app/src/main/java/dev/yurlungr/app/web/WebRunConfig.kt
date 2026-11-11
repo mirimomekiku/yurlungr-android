@@ -1,5 +1,6 @@
 package dev.yurlungr.app.web
 
+import androidx.core.content.edit
 import android.content.Context
 import kotlinx.serialization.json.*
 import java.io.File
@@ -37,6 +38,6 @@ internal object WebRunPreferences {
     }.getOrNull()
     fun save(context: Context, root: File, config: WebRunConfig) {
         val json = config.toJson("", File(""), File("")).toMutableMap().apply { put("openBrowser", JsonPrimitive(config.openBrowser)) }
-        context.getSharedPreferences("web_runs", Context.MODE_PRIVATE).edit().putString(key(root), JsonObject(json).toString()).apply()
+        context.getSharedPreferences("web_runs", Context.MODE_PRIVATE).edit { putString(key(root), JsonObject(json).toString()) }
     }
 }

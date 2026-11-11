@@ -62,7 +62,8 @@ class RuntimeService : Service() {
         super.onDestroy()
     }
 
-    @SuppressLint("WakelockTimeout") // held deliberately until the user turns it off
+    // Held deliberately until the user turns it off (a toggle), and released in onDestroy.
+    @SuppressLint("WakelockTimeout", "Wakelock")
     private fun toggleWakeLock() {
         val held = wakeLock?.isHeld == true
         if (held) {

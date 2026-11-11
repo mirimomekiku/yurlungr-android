@@ -1,5 +1,6 @@
 package dev.yurlungr.app.projects
 
+import androidx.core.net.toUri
 import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -188,7 +189,7 @@ fun GitActionsSheet(
         if (status.hasOrigin && !status.unborn) {
             val current = pr
             fun openUrl(url: String) = runCatching {
-                context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, url.toUri()).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
             }
             when {
                 current != null -> ActionRow(
