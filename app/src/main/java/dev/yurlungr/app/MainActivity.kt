@@ -1,5 +1,6 @@
 package dev.yurlungr.app
 
+import androidx.compose.material3.Text
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -72,6 +73,8 @@ sealed interface Route {
     data object Servers : Route
     data class Preview(val url: String, val title: String) : Route
     data class ProjectAgents(val path: String) : Route
+    data object Tour : Route
+    data class Merge(val path: String) : Route
     data object Terminal : Route
     data object Agents : Route
     data object Devices : Route
@@ -118,6 +121,13 @@ class Navigator(start: Route) {
     fun pop() {
         direction = NavDirection.Pop
         if (stack.size > 1) stack.removeAt(stack.lastIndex) else stack[0] = Route.NewChat
+    }
+
+    /** Shows [route] in place of the current one (switching editor tabs). */
+    fun replace(route: Route) {
+        if (current == route) return
+        direction = NavDirection.Replace
+        stack[stack.lastIndex] = route
     }
 
     fun reset(route: Route) {
@@ -178,6 +188,12 @@ class MainActivity : ComponentActivity() {
                     nav.reset(target)
                 }
 
+                // The tour, once, the first time the app opens with the Linux environment ready.
+                LaunchedEffect(Unit) {
+                    if (RuntimePaths(context).isBootstrapInstalled && !dev.yurlungr.app.ui.TourPrefs.seen(context) && pendingScreen == null && pendingShare == null) {
+                        nav.push(Route.Tour)
+                    }
+                }
                 LaunchedEffect(pendingScreen) {
                     pendingScreen?.let(nav::reset)
                     pendingScreen = null
@@ -238,6 +254,22 @@ class MainActivity : ComponentActivity() {
                         onOpen = { nav.reset(Route.Chat(it)) },
                         modifier = Modifier.align(Alignment.TopCenter).systemBarsPadding(),
                     )
+                    }
+                    pendingRun?.let { (command, name, reason) ->
+                        dev.yurlungr.app.ui.AppSheet(
+                            "Run $name now?", onDismiss = { pendingRun = null }, subtitle = reason, icon = dev.yurlungr.app.ui.Ph.Lightning,
+                            actions = {
+                                androidx.compose.material3.OutlinedButton(onClick = { pendingRun = null }, modifier = Modifier.weight(1f)) { Text("Later") }
+                                androidx.compose.material3.Button(onClick = {
+                                    pendingRun = null
+                                    runInTerminal(context, nav, command, name, confirmed = true)
+                                }, modifier = Modifier.weight(1f)) { Text("Run anyway") }
+                            },
+                        ) {
+                            Text("Plugging in, or letting the phone cool down, keeps builds fast. Turn these warnings off in Settings → Feedback.",
+                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                     pendingShare?.let { shared ->
                         dev.yurlungr.app.ui.ShareSheet(shared, onDismiss = { pendingShare = null }, onOpenChat = { nav.reset(Route.Chat(it.id)) })
@@ -332,6 +364,7 @@ class MainActivity : ComponentActivity() {
                 onAgents = { nav.reset(Route.Agents) },
                 runInTerminal = { command, name -> runInTerminal(context, nav, command, name) },
                 onDevEnvironment = { nav.push(Route.DevEnvironment) },
+                onTour = { nav.push(Route.Tour) },
             )
             Route.DevEnvironment -> dev.yurlungr.app.setup.DevEnvironmentScreen(
                 refreshTick = resumeTick,
@@ -378,6 +411,7 @@ class MainActivity : ComponentActivity() {
                 onPreview = { url, title -> nav.push(Route.Preview(url, title)) },
                 onAgentSettings = { nav.push(Route.ProjectAgents(route.path)) },
                 onOpenFileAt = { f, line -> nav.push(Route.FileView(f.path, edit = line != null, line = line)) },
+                onResolveConflict = { nav.push(Route.Merge(it.path)) },
             )
             Route.Servers -> dev.yurlungr.app.web.ServersScreen(
                 onBack = back,
@@ -385,6 +419,15 @@ class MainActivity : ComponentActivity() {
                 onOpenTerminal = { nav.push(Route.Terminal) },
             )
             is Route.Preview -> dev.yurlungr.app.web.PreviewScreen(route.url, route.title, onBack = back)
+            is Route.Merge -> dev.yurlungr.app.editor.MergeScreen(File(route.path), onBack = back,
+                onOpenEditor = { nav.replace(Route.FileView(route.path, edit = true)) })
+            Route.Tour -> dev.yurlungr.app.ui.TourScreen(
+                onDone = back,
+                onSample = { dir ->
+                    dev.yurlungr.app.projects.LastProject.set(context, dir)
+                    nav.reset(Route.Project(dir.path))
+                },
+            )
             is Route.ProjectAgents -> dev.yurlungr.app.projects.ProjectAgentsScreen(
                 File(route.path),
                 onBack = back,
@@ -392,11 +435,15 @@ class MainActivity : ComponentActivity() {
             )
             is Route.FileView -> {
                 val file = File(route.path)
-                if (!route.edit && route.line == null && dev.yurlungr.app.editor.isMarkdownFile(file.name)) {
+                if (dev.yurlungr.app.editor.Sqlite.isDatabase(file)) {
+                    dev.yurlungr.app.editor.DatabaseScreen(file, onBack = back)
+                } else if (!route.edit && route.line == null && dev.yurlungr.app.editor.isMarkdownFile(file.name)) {
                     dev.yurlungr.app.editor.MarkdownScreen(file, resumeTick, onBack = back,
                         onEdit = { nav.push(Route.FileView(route.path, edit = true)) })
                 } else {
-                    EditorScreen(file, onBack = back, line = route.line, onOpenAt = { f, l -> nav.push(Route.FileView(f.path, edit = true, line = l)) })
+                    EditorScreen(file, onBack = back, line = route.line, onOpenAt = { f, l -> nav.push(Route.FileView(f.path, edit = true, line = l)) },
+                        onSwitch = { nav.replace(Route.FileView(it.path, edit = true)) },
+                        onResolveConflicts = { nav.replace(Route.Merge(it.path)) })
                 }
             }
         }
@@ -496,7 +543,14 @@ class MainActivity : ComponentActivity() {
     private fun openDevToolsSetup(context: Context, nav: Navigator) =
         runInTerminal(context, nav, dev.yurlungr.app.runtime.setupScriptCommand("dev-tools-setup.sh"), "Developer tools")
 
-    private fun runInTerminal(context: Context, nav: Navigator, command: String, name: String) {
+    /** A long job waiting for the battery/heat confirmation: command, name, and why. */
+    private var pendingRun by mutableStateOf<Triple<String, String, String>?>(null)
+
+    private fun runInTerminal(context: Context, nav: Navigator, command: String, name: String, confirmed: Boolean = false) {
+        val ui = dev.yurlungr.app.ui.Feedback
+        if (!confirmed && ui.powerWarnings && ui.isHeavy(command)) {
+            ui.powerConcern(ui.power(context))?.let { reason -> pendingRun = Triple(command, name, reason); return }
+        }
         lifecycleScope.launch {
             runCatching {
                 val paths = RuntimePaths(context)

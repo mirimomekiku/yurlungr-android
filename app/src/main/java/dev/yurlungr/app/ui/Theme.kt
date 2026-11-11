@@ -142,7 +142,18 @@ private val DarkColors = darkColorScheme(
 fun AppTheme(content: @Composable () -> Unit) {
     // The user's choice (Settings → Appearance), or the system's when following it.
     val dark = ThemePrefs.isDark()
-    MaterialTheme(colorScheme = if (dark) DarkColors else LightColors, typography = AppTypography, shapes = AppShapes) {
+    val accent = ThemePrefs.accent
+    val black = ThemePrefs.black
+    val scheme = androidx.compose.runtime.remember(dark, accent, black) {
+        var s = if (dark) DarkColors else LightColors
+        val main = if (dark) accent.dark else accent.light
+        val on = if (dark) accent.onDark else accent.onLight
+        if (main != null && on != null) s = s.copy(primary = Color(main), onPrimary = Color(on))
+        // OLED: the ground is pure black; cards stay a step up so they still read as cards.
+        if (dark && black) s = s.copy(background = Color.Black, surface = Color.Black, surfaceContainerLowest = Color.Black, surfaceContainerLow = Color(0xFF07070A))
+        s
+    }
+    MaterialTheme(colorScheme = scheme, typography = AppTypography, shapes = AppShapes) {
         CompositionLocalProvider(
             LocalStatusColors provides if (dark) DarkStatus else LightStatus,
             LocalTiles provides if (dark) DarkTiles else LightTiles,

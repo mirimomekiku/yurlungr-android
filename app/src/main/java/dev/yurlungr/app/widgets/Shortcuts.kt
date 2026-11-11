@@ -34,9 +34,24 @@ object OpenIn {
     /** Running web apps, for the tile and widget. */
     fun runningServers(): Int = WebRunSessions.all().count { it.state == WebRunState.Running }
 
-    /** Refreshes the widget and the servers tile after something they show changed. */
+    /** Long-press the launcher icon: New chat, the last project, Servers, Terminal. */
+    fun updateShortcuts(context: Context) = runCatching {
+        val icon = androidx.core.graphics.drawable.IconCompat.createWithResource(context, R.mipmap.ic_launcher)
+        fun shortcut(id: String, label: String, place: String) =
+            androidx.core.content.pm.ShortcutInfoCompat.Builder(context, id).setShortLabel(label).setIcon(icon).setIntent(intent(context, place)).build()
+        val project = LastProject.get(context)
+        androidx.core.content.pm.ShortcutManagerCompat.setDynamicShortcuts(context, listOfNotNull(
+            shortcut("new_chat", "New chat", NEW_CHAT),
+            project?.let { shortcut("last_project", it.name.take(24), PROJECT + it.path) },
+            shortcut("servers", "Servers", SERVERS),
+            shortcut("terminal", "Terminal", TERMINAL),
+        ))
+    }
+
+    /** Refreshes the widget, the servers tile and the launcher shortcuts after something they show changed. */
     fun refresh(context: Context) {
         HomeWidget.update(context)
+        updateShortcuts(context)
         runCatching { TileService.requestListeningState(context, ComponentName(context, ServersTileService::class.java)) }
     }
 }

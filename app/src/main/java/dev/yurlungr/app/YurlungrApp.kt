@@ -20,6 +20,8 @@ class YurlungrApp : Application() {
         super.onCreate()
         // Before any UI: the first frame must already use the chosen light/dark theme.
         dev.yurlungr.app.ui.ThemePrefs.load(this)
+        dev.yurlungr.app.ui.Feedback.load(this)
+        dev.yurlungr.app.widgets.OpenIn.updateShortcuts(this)
         TerminalSessions.init(this)
         dev.yurlungr.app.web.WebRunSessions.init(this)
         ChatSessions.init(this)

@@ -1,5 +1,8 @@
 package dev.yurlungr.app.setup
 
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.material3.Switch
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -77,6 +80,7 @@ fun SettingsScreen(
     onAgents: () -> Unit,
     runInTerminal: (command: String, name: String) -> Unit,
     onDevEnvironment: () -> Unit = {},
+    onTour: () -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -225,6 +229,59 @@ fun SettingsScreen(
                             )
                         }
                     }
+                    val accent = dev.yurlungr.app.ui.ThemePrefs.accent
+                    GroupRow("Accent colour", subtitle = accent.label + " · buttons, selections and links", icon = Ph.CircleHalf, tile = tiles.peach, trailing = {})
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        val dark = dev.yurlungr.app.ui.ThemePrefs.isDark()
+                        for (a in dev.yurlungr.app.ui.Accent.entries) {
+                            val fill = androidx.compose.ui.graphics.Color((if (dark) a.dark else a.light) ?: if (dark) 0xFFF4F4F5 else 0xFF0F172A)
+                            androidx.compose.foundation.layout.Box(
+                                Modifier.size(34.dp).clip(androidx.compose.foundation.shape.CircleShape).background(fill)
+                                    .then(if (a == accent) Modifier.border(3.dp, MaterialTheme.colorScheme.outline, androidx.compose.foundation.shape.CircleShape) else Modifier)
+                                    .clickable(onClickLabel = a.label) { dev.yurlungr.app.ui.ThemePrefs.setAccent(context, a) }
+                                    .semantics { contentDescription = a.label + if (a == accent) ", selected" else "" },
+                            )
+                        }
+                    }
+                    GroupRow(
+                        "Pure black",
+                        subtitle = "Black backgrounds in dark mode, for OLED screens",
+                        icon = Ph.Moon,
+                        tile = tiles.lilac,
+                        onClick = { dev.yurlungr.app.ui.ThemePrefs.setBlack(context, !dev.yurlungr.app.ui.ThemePrefs.black) },
+                        trailing = { Switch(dev.yurlungr.app.ui.ThemePrefs.black, { dev.yurlungr.app.ui.ThemePrefs.setBlack(context, it) }) },
+                    )
+                }
+            }
+
+            item { SectionLabel("Feedback") }
+            item {
+                Group {
+                    GroupRow(
+                        "Vibration",
+                        subtitle = "A short buzz when a task finishes or an agent needs you",
+                        icon = Ph.DeviceMobile, tile = tiles.sky,
+                        onClick = { dev.yurlungr.app.ui.Feedback.setHaptics(context, !dev.yurlungr.app.ui.Feedback.haptics) },
+                        trailing = { Switch(dev.yurlungr.app.ui.Feedback.haptics, { dev.yurlungr.app.ui.Feedback.setHaptics(context, it) }) },
+                    )
+                    GroupRow(
+                        "Sounds",
+                        subtitle = "The notification sound for the same moments, while the app is open",
+                        icon = Ph.Bell, tile = tiles.lime,
+                        onClick = { dev.yurlungr.app.ui.Feedback.setSounds(context, !dev.yurlungr.app.ui.Feedback.sounds) },
+                        trailing = { Switch(dev.yurlungr.app.ui.Feedback.sounds, { dev.yurlungr.app.ui.Feedback.setSounds(context, it) }) },
+                    )
+                    GroupRow(
+                        "Battery and heat warnings",
+                        subtitle = "Ask before builds, installs and tests when the battery is low or the phone is hot",
+                        icon = Ph.Lightning, tile = tiles.peach,
+                        onClick = { dev.yurlungr.app.ui.Feedback.setPowerWarnings(context, !dev.yurlungr.app.ui.Feedback.powerWarnings) },
+                        trailing = { Switch(dev.yurlungr.app.ui.Feedback.powerWarnings, { dev.yurlungr.app.ui.Feedback.setPowerWarnings(context, it) }) },
+                    )
+                    GroupRow("Tour", subtitle = "A quick look at what's where", icon = Ph.BookOpen, tile = tiles.lilac, onClick = onTour)
                 }
             }
 

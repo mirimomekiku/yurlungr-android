@@ -26,7 +26,8 @@ object TaskNotifications {
         val index = TerminalSessions.sessions.indexOfFirst { TerminalSessions.statusId(it) == id }
         val name = TerminalSessions.sessions.getOrNull(index)?.let { TerminalSessions.title(it, index) } ?: "Command"
         val took = if (seconds >= 60) "${seconds / 60} min ${seconds % 60} s" else "$seconds s"
-        post(context, if (exit == 0) "$name finished" else "$name failed (exit $exit)", "Took $took. Tap to see the output.", id)
+        post(context, if (exit == 0) "$name finished" else "$name failed (exit $exit)", "Took $took. Tap to see the output.", id,
+            if (exit == 0) dev.yurlungr.app.ui.Feedback.Kind.Done else dev.yurlungr.app.ui.Feedback.Kind.Failed)
     }
 
     /** `yurlungr-notify "title" "text"`: first line is the title. */
@@ -36,9 +37,10 @@ object TaskNotifications {
     }
 
     @SuppressLint("MissingPermission") // targetSdk 28: notifications need no runtime grant
-    private fun post(context: Context, title: String, text: String, terminalId: String?) {
+    private fun post(context: Context, title: String, text: String, terminalId: String?, kind: dev.yurlungr.app.ui.Feedback.Kind = dev.yurlungr.app.ui.Feedback.Kind.Done) {
         if (ChatSessions.appVisible) {
             Toast.makeText(context, title, Toast.LENGTH_SHORT).show()
+            dev.yurlungr.app.ui.Feedback.signal(context, kind)
             return
         }
         val intent = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
