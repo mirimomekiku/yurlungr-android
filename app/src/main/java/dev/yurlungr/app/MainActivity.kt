@@ -152,7 +152,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         pendingChatId = intent?.getStringExtra(EXTRA_CHAT_ID)
         pendingScreen = debugScreen(intent) ?: terminalFrom(intent) ?: openFrom(intent)
-        pendingShare = dev.yurlungr.app.ui.SharedContent.from(intent)
+        pendingShare = dev.yurlungr.app.ui.SharedContent.from(intent, packageName)
         val nav = Navigator(if (RuntimePaths(this).isBootstrapInstalled) Route.NewChat else Route.Setup)
 
         setContent {
@@ -472,7 +472,7 @@ class MainActivity : ComponentActivity() {
         debugScreen(intent)?.let { pendingScreen = it }
         terminalFrom(intent)?.let { pendingScreen = it }
         openFrom(intent)?.let { pendingScreen = it }
-        dev.yurlungr.app.ui.SharedContent.from(intent)?.let { pendingShare = it }
+        dev.yurlungr.app.ui.SharedContent.from(intent, packageName)?.let { pendingShare = it }
     }
 
     /**
@@ -485,7 +485,10 @@ class MainActivity : ComponentActivity() {
         dev.yurlungr.app.widgets.OpenIn.SERVERS -> Route.Servers
         dev.yurlungr.app.widgets.OpenIn.TERMINAL -> Route.Terminal
         dev.yurlungr.app.widgets.OpenIn.NEW_CHAT -> Route.NewChat
+        // This activity is exported, so any app can send this: only folders under ~/projects, or the
+        // last project (which shortcuts and the widget point at), never the runtime's own folders.
         else -> place.removePrefix(dev.yurlungr.app.widgets.OpenIn.PROJECT).takeIf { it.isNotEmpty() && File(it).isDirectory }
+            ?.takeIf { dev.yurlungr.app.projects.LastProject.isOpenable(this, File(it)) }
             ?.let { Route.Project(it) } ?: Route.Projects
     }
 

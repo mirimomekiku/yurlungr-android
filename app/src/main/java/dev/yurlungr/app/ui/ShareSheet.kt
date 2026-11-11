@@ -43,16 +43,26 @@ import java.io.File
 /** What another app shared with Yurlungr: text (or a link) and files. */
 data class SharedContent(val text: String?, val subject: String?, val uris: List<Uri>) {
     companion object {
-        fun from(intent: Intent?): SharedContent? {
+        fun from(intent: Intent?, ownPackage: String): SharedContent? {
             if (intent == null) return null
             val uris: List<Uri> = when (intent.action) {
-                Intent.ACTION_SEND -> listOfNotNull(intent.getParcelableExtra(Intent.EXTRA_STREAM))
+                Intent.ACTION_SEND -> listOfNotNull(intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
                 Intent.ACTION_SEND_MULTIPLE -> intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
                 else -> return null
-            }
+            }.filter { isForeign(it, ownPackage) }
             val text = intent.getStringExtra(Intent.EXTRA_TEXT)
             if (text.isNullOrBlank() && uris.isEmpty()) return null
             return SharedContent(text, intent.getStringExtra(Intent.EXTRA_SUBJECT), uris)
+        }
+
+        /**
+         * Only content another app actually owns. The app opens shared links with its own access,
+         * so a `file:` link or one to its own provider would hand out its private files (~/.ssh...).
+         */
+        internal fun isForeign(uri: Uri, ownPackage: String): Boolean {
+            if (uri.scheme != "content") return false
+            val authority = uri.authority ?: return false
+            return authority.split(';').none { it == ownPackage || it.startsWith("$ownPackage.") }
         }
     }
 }
@@ -98,10 +108,10 @@ fun ShareSheet(content: SharedContent, onDismiss: () -> Unit, onOpenChat: (ChatS
         subtitle = if (names.isEmpty()) "Text from another app" else names.joinToString(),
         actions = {
             if (content.uris.isNotEmpty()) OutlinedButton(
-                enabled = project != null,
+                enabled = project?.let { dev.yurlungr.app.projects.LastProject.acceptsSharedFiles(context, it) } == true,
                 modifier = Modifier.weight(1f).heightIn(min = 52.dp),
                 onClick = {
-                    val target = project ?: return@OutlinedButton
+                    val target = project?.takeIf { dev.yurlungr.app.projects.LastProject.acceptsSharedFiles(context, it) } ?: return@OutlinedButton
                     scope.launch {
                         val saved = withContext(Dispatchers.IO) {
                             content.uris.zip(names).mapNotNull { (uri, name) ->
