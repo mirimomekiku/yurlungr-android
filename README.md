@@ -197,12 +197,28 @@ Then, on the phone:
 - **Setup** detects the project's tech stacks from their manifest files, in the root and common app
   folders (`app/`, `frontend/`, `apps/*`…), and installs their dependencies in a terminal with a log
   (`~/project-setup.log`). Each stack card shows the Termux packages and commands it will run:
-  - Node.js with npm, yarn or pnpm (Expo, React Native, Vite, Next.js… are named); workspaces install once at the root;
+  - Node.js with npm, pnpm, Yarn (Yarn 2+ through corepack) or Bun, picked from `packageManager` and
+    the lockfile (Expo, React Native, Vite, Next.js… are named); workspaces install once at the root;
+  - Deno (`deno install`);
   - Android/Kotlin and Jetpack Compose (Gradle wrapper: downloads Gradle, plugins and dependencies without building);
-  - Dart (`dart pub get`), Python (a project `.venv`), Rust, Go, Ruby, PHP, Java (Maven) and Swift.
-  Flutter is detected but can't be installed: its SDK isn't available for Android's Linux environment.
-  Notes explain what else won't work on the phone (Expo native builds, Bun, native add-ons).
-  Right after cloning, a banner offers **Install** when dependencies are missing; **Not now** hides it for that project.
+  - Python in a project `.venv`, with uv (`uv sync`) or Poetry when the project uses them. The venv
+    is made with system site-packages, so the prebuilt packages from *Python data & science* are
+    used instead of compiled; pip still installs into the venv;
+  - Dart (`dart pub get`), Rust, Go, Ruby, PHP, Java (Maven), Swift, Elixir (`mix deps.get`), Zig,
+    .NET (`dotnet restore`), Crystal, Nim and Lua (LuaRocks).
+  Each card lists the **runtimes** the stack needs (Node.js, pnpm, Bun, JDK…), each marked installed
+  or missing. Install sets up missing runtimes first, then the dependencies. Flutter is detected but
+  can't be installed: its SDK isn't available for Android's Linux environment. Node projects with
+  native add-ons that compile on install (sharp, bcrypt, canvas, sqlite3, better-sqlite3, node-pty,
+  node-sass) also get Python, Clang, make, pkg-config and the libraries those add-ons link (libvips,
+  cairo…). These install only when you tap Install. Notes explain what
+  else won't work on the phone (Expo native builds, native add-ons).
+  - **Banner:** when a project needs runtimes or dependencies (right after cloning, say), it says
+    which ("Needs Node.js and pnpm · dependencies not installed") and offers **Install**. **Not now**
+    hides it for that project.
+  - **Automatic setup** (a switch in the Setup sheet, off by default): opening a project that needs
+    something starts the install by itself, once per need, so reopening it doesn't repeat it.
+  - **Run** on a web app whose runtime is missing installs it first instead of stopping.
 - **Git** (next to Terminal) opens one-tap routines:
   - **Get latest changes:** saves your uncommitted work, pulls (merging if the branches diverged), then puts your work back (stash → pull → stash pop).
   - **Sync:** the same, then pushes.
@@ -333,7 +349,44 @@ credential-file presence; Antigravity's is not documented, so it shows as *Insta
   steps and a link to its log.
 - *Developer tools* setup installs only git, gh, Node.js, ripgrep and termux-exec, without the ~1 GB
   of agents.
-- Code: `setup/`.
+- **Optional packs**, each with its own **Install** button, log and version checks:
+  - Python (pip, uv), Go, Rust, Ruby;
+  - **Build tools**: clang, make, cmake, ninja, autoconf/automake/libtool, bison, flex, gettext, ccache, pkg-config, protoc;
+  - **Utilities**: jq, ssh, zip, wget, rsync, which, file, tree;
+  - **Editors**: nano, vim, Neovim, Helix, micro, Emacs;
+  - **JavaScript runtimes** (pnpm, Yarn, Bun, Deno), **Java & Kotlin** (JDK 21, Kotlin, Maven, Gradle), **PHP** (Composer), **Dart**, **.NET 8**;
+  - **Databases** (SQLite, PostgreSQL, MariaDB, Redis), **Swift**, **Zig**, **Elixir** (Erlang/OTP), **Lua** (LuaRocks);
+  - **Crystal**, **Nim**, **Haskell** (GHC and cabal, about 3 GB), **Scala**, **D** (LDC), **Perl**;
+  - **Shell & terminal** (tmux, htop, zsh, fish, starship) and **CLI tools** (fd, bat, eza, hyperfine, lazygit, gitui, git-lfs, shellcheck, shfmt, tree-sitter);
+  - **Servers & tunnels** (nginx, Caddy, cloudflared, Mosquitto), **DevOps** (kubectl, Helm, adb/fastboot);
+  - **Media & docs** (ffmpeg, ImageMagick, Graphviz, the TeX Live installer), **Local AI** (Ollama, llama.cpp), **Linux distros** (proot-distro);
+  - **Native libraries** (libvips, cairo, pango, libjpeg, libpng, libxml2, libxslt, libffi, SQLite), what native npm and pip packages link against;
+  - **Python data & science**: prebuilt numpy, pandas, scipy, Pillow, cryptography, lxml and matplotlib, so nothing is compiled;
+  - **Debugging** (gdb, lldb, strace, ltrace, valgrind), **Language servers** (rust-analyzer, gopls, lua-language-server, ruff);
+  - **Networking** (dig, ip, nc, socat, nmap, xh, HTTPie, openssl), **Security & signing** (GnuPG, age, git-crypt);
+  - **Data tools** (yq, xmlstarlet, Miller), **Task runners & watchers** (just, direnv, watchexec, entr, inotify-tools);
+  - **Docs & static sites** (pandoc, Hugo, Zola, mdBook, man pages), **Archives** (7-Zip, xz, zstd, brotli), **OCR & PDF** (Tesseract, poppler, qpdf);
+  - **CLI tools** also include fzf, zoxide, ncdu and delta;
+  - **Headless browser**: Chromium from Termux's x11 repository (which it enables), for Puppeteer
+    (`executablePath`) and Selenium. Playwright doesn't support Android.
+  JVM tools (Kotlin, Scala, Maven) get a longer time limit in the checks, because starting a JVM on a phone takes seconds.
+- **Development environment** (Settings, or **Change** on System checks' *Default JDK*):
+  - **Java (JDK):** pick the default JDK (17, 21, 25), or *Automatic* (the newest installed), and
+    install any version. Switching uses `update-alternatives`, so `java`, `javac` and `JAVA_HOME`
+    change together. JDK 21 is what the SDK setup and the Java pack install, because Termux's
+    Gradle, Kotlin, Maven, d8 and apksigner need it.
+  - **Gradle toolchains:** `~/.gradle/gradle.properties` lists every installed JDK
+    (`org.gradle.java.installations.paths`) with auto-download off, so projects that pin a JDK
+    (`jvmToolchain(17)`) find it. The app keeps it current on every launch.
+  - **Environment:** what every process gets (`JAVA_HOME`, `ANDROID_HOME`, `PNPM_HOME`, `GOPATH`,
+    `CARGO_HOME`, `DOTNET_ROOT`, and PATH entry by entry), with *Copy exports*.
+  - **Runtime packs:** installed or not, with Install.
+- **The environment is the same everywhere:** agents, command terminals, setups and web runs get
+  `JAVA_HOME` (the default JDK) and the per-user tool folders on PATH, after the runtime's own bin:
+  `~/.local/bin`, `~/.cargo/bin`, `~/go/bin`, `~/.bun/bin`, `~/.deno/bin`, `~/.dotnet/tools`,
+  `~/.pub-cache/bin` and others. They also load the packages' `$PREFIX/etc/profile.d` scripts
+  (silently, so agents' output stays clean), like login terminals do.
+- Code: `setup/`, `runtime/Jdks.kt`, `runtime/RuntimeEnv.kt`.
 
 </details>
 
