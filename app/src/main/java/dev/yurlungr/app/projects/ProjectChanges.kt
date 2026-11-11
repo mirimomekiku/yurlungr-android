@@ -93,6 +93,7 @@ internal fun ChangesTab(
     onOpenFile: (File) -> Unit,
     /** Runs a quick git operation (stage, discard…), then refreshes. */
     onGit: (label: String, block: suspend () -> CommandResult) -> Unit,
+    onResolveConflict: (File) -> Unit = onOpenFile,
 ) {
     val expanded = remember(dir) { mutableStateMapOf<String, String?>() } // key -> diff (null = loading)
     var fullScreen by remember { mutableStateOf<Pair<GitChange, String>?>(null) }
@@ -150,7 +151,8 @@ internal fun ChangesTab(
                                             },
                                             onToggleDiff = { toggleDiff(key, change) },
                                             onFullScreen = { showFull(change) },
-                                            onOpen = File(dir, change.path).takeIf { it.isFile }?.let { f -> { onOpenFile(f) } },
+                                            // A conflicted file opens in the merge view.
+                                            onOpen = File(dir, change.path).takeIf { it.isFile }?.let { f -> { if (prefix == "c") onResolveConflict(f) else onOpenFile(f) } },
                                             onDiscard = if (prefix == "c" || change.label == "renamed") null else ({ discarding = change }),
                                             modifier = Modifier.animateItem(),
                                         )

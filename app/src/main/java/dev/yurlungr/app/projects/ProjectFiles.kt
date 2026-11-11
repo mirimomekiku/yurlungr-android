@@ -178,6 +178,8 @@ internal fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair
     }
 
     var searching by remember { mutableStateOf(false) }
+    var creating by remember { mutableStateOf(false) }
+    if (creating) dev.yurlungr.app.editor.NewFileSheet(root, onDismiss = { creating = false }) { creating = false; treeReload++; onOpenFile(it) }
     if (searching) ProjectSearchSheet(root, onDismiss = { searching = false }) { f, line -> searching = false; onOpenFileAt(f, line) }
     Column(Modifier.fillMaxSize()) {
         // Search across every file (ripgrep), above the tree.
@@ -189,7 +191,10 @@ internal fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair
         ) {
             PhIcon(Ph.MagnifyingGlass, null, size = 16.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.width(8.dp))
-            Text("Search in files", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Search in files", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+            Box(Modifier.size(32.dp).clip(RoundedCornerShape(16.dp)).clickable { creating = true }, contentAlignment = Alignment.Center) {
+                PhIcon(Ph.Plus, "New file", size = 16.dp, tint = MaterialTheme.colorScheme.primary)
+            }
         }
         if (isRepo) {
             val changes = treeStatus?.changes.orEmpty()

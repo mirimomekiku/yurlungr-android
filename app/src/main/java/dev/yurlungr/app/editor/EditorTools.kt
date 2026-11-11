@@ -37,6 +37,26 @@ import dev.yurlungr.app.ui.Ph
 import dev.yurlungr.app.ui.SkeletonListItem
 import java.io.File
 
+/**
+ * The editor's open files (tabs) and their unsaved text: switching tabs keeps edits in memory
+ * instead of asking to save. Lost when the app's process ends, like any unsaved edit.
+ */
+object OpenFiles {
+    val tabs = androidx.compose.runtime.mutableStateListOf<String>()
+    val dirty = androidx.compose.runtime.mutableStateMapOf<String, Boolean>()
+    private val buffers = HashMap<String, String>()
+
+    fun open(path: String) { if (path !in tabs) tabs += path }
+    fun close(path: String) { tabs.remove(path); buffers.remove(path); dirty.remove(path) }
+    fun buffer(path: String): String? = buffers[path]
+
+    /** Unsaved [text] for [path], or null once it's saved or discarded. */
+    fun keep(path: String, text: String?) {
+        if (text == null) buffers.remove(path) else buffers[path] = text
+        dirty[path] = text != null
+    }
+}
+
 /** Files opened recently, newest first (for the command palette). */
 object RecentFiles {
     private const val PREFS = "recent_files"

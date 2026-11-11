@@ -1,5 +1,6 @@
 package dev.yurlungr.app.editor
 
+import androidx.compose.foundation.lazy.items
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -177,13 +178,17 @@ fun EditorScreen(
     line: Int? = null,
     /** Opens another file at a line (Find definition). */
     onOpenAt: ((File, Int) -> Unit)? = null,
+    /** Shows another open file in this place (a tab). */
+    onSwitch: ((File) -> Unit)? = null,
+    /** Opens the merge view for a file with conflict markers. */
+    onResolveConflicts: ((File) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val paths = remember { RuntimePaths(context) }
     val scope = rememberCoroutineScope()
     val lang = remember(file) { Languages.forFile(file.name) }
     LaunchedEffect(context) { EditorPrefs.load(context) }
-    LaunchedEffect(file) { RecentFiles.record(context, file) }
+    LaunchedEffect(file) { RecentFiles.record(context, file); OpenFiles.open(file.path) }
 
     var load by remember(file) { mutableStateOf<Load>(Load.Loading) }
     LaunchedEffect(file) {
@@ -200,7 +205,7 @@ fun EditorScreen(
             EditorTopBar(file, dirty = false, onBack = onBack)
             Text(l.reason, color = Mono.Dim, modifier = Modifier.padding(24.dp))
         }
-        is Load.Ready -> Editor(file, l, lang, paths, onBack, scope, line, onOpenAt)
+        is Load.Ready -> Editor(file, l, lang, paths, onBack, scope, line, onOpenAt, onSwitch, onResolveConflicts)
     }
 }
 
@@ -208,11 +213,13 @@ fun EditorScreen(
 @Composable
 private fun Editor(
     file: File, initial: Load.Ready, lang: Language, paths: RuntimePaths, onBack: () -> Unit, scope: kotlinx.coroutines.CoroutineScope,
-    startLine: Int? = null, onOpenAt: ((File, Int) -> Unit)? = null,
+    startLine: Int? = null, onOpenAt: ((File, Int) -> Unit)? = null, onSwitch: ((File) -> Unit)? = null,
+    onResolveConflicts: ((File) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
-    var value by remember { mutableStateOf(TextFieldValue(initial.text)) }
+    // Unsaved edits from when this tab was last shown, if any.
+    var value by remember { mutableStateOf(TextFieldValue(OpenFiles.buffer(file.path) ?: initial.text)) }
     var saved by remember { mutableStateOf(initial.text) }
     var crlf by remember { mutableStateOf(initial.crlf) }
     // Both CRLF and LF on disk: a save normalizes to [crlf]; say so rather than surprise with a big diff.
@@ -235,6 +242,40 @@ private fun Editor(
     var confirmLeave by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var showBlame by remember { mutableStateOf(false) }
+    var showSnippets by remember { mutableStateOf(false) }
+    // The language server for this file type, when one is installed.
+    var lsp by remember { mutableStateOf<LspClient?>(null) }
+    var showProblems by remember { mutableStateOf(false) }
+    var hoverText by remember { mutableStateOf<String?>(null) }
+    var completions by remember { mutableStateOf<List<Pair<String, String>>?>(null) }
+    LaunchedEffect(file) {
+        val c = LspManager.acquire(context, file) ?: return@LaunchedEffect
+        c.open(file, value.text)
+        lsp = c
+    }
+    androidx.compose.runtime.DisposableEffect(file) { onDispose { lsp?.let { it.close(file); LspManager.release(it) } } }
+    LaunchedEffect(value.text, lsp) {
+        val c = lsp ?: return@LaunchedEffect
+        delay(500) // after a pause in typing
+        c.change(file, value.text)
+    }
+    val diagnostics = lsp?.diagnostics?.get(LspClient.uri(file)).orEmpty()
+    /** 0-based line and column of the cursor, as LSP counts them. */
+    fun cursorPosition(): Pair<Int, Int> {
+        val starts = lineStarts(value.text)
+        val line = lineIndexOf(starts, value.selection.start)
+        return line to (value.selection.start - starts[line])
+    }
+    fun complete() {
+        val c = lsp ?: return
+        val (l, col) = cursorPosition()
+        scope.launch {
+            completions = c.completion(file, l, col)
+            if (completions.isNullOrEmpty()) { completions = null; Toast.makeText(context, "No suggestions here", Toast.LENGTH_SHORT).show() }
+        }
+    }
+    // Leaving with Discard: don't keep the edits as an unsaved tab.
+    var discarded by remember { mutableStateOf(false) }
     var definitionOf by remember { mutableStateOf<String?>(null) }
 
     // Find & replace
@@ -377,7 +418,53 @@ private fun Editor(
         }
     }
     BackHandler(onBack = ::tryBack)
+    val latest = androidx.compose.runtime.rememberUpdatedState(value.text to saved)
+    LaunchedEffect(dirty) { OpenFiles.dirty[file.path] = dirty }
+    androidx.compose.runtime.DisposableEffect(file.path) {
+        onDispose {
+            val (text, onDisk) = latest.value
+            OpenFiles.keep(file.path, text.takeIf { it != onDisk && !discarded })
+        }
+    }
     if (showBlame) BlameSheet(file, onDismiss = { showBlame = false }) { showBlame = false; goToLine(it) }
+    if (showProblems) dev.yurlungr.app.ui.AppSheet("Problems", onDismiss = { showProblems = false }, subtitle = "${file.name} · ${lsp?.server?.name}", icon = Ph.Warning) {
+        if (diagnostics.isEmpty()) Text("None right now.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        for (d in diagnostics.sortedBy { it.line }) {
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { showProblems = false; goToLine(d.line + 1) }.padding(8.dp)) {
+                PhIcon(if (d.isError) Ph.XCircle else Ph.Warning, null, size = 15.dp,
+                    tint = if (d.isError) MaterialTheme.colorScheme.error else dev.yurlungr.app.ui.AppColors.status.warning)
+                Spacer(Modifier.width(8.dp))
+                Text("${d.line + 1}:${d.col + 1}", fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.width(56.dp))
+                Text(d.message, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+            }
+        }
+    }
+    hoverText?.let { info ->
+        dev.yurlungr.app.ui.AppSheet("Info", onDismiss = { hoverText = null }, icon = Ph.Info) {
+            Text(info, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        }
+    }
+    completions?.let { list ->
+        dev.yurlungr.app.ui.AppSheet("Complete", onDismiss = { completions = null }, icon = Ph.MagicWand) {
+            for ((label, insert) in list) {
+                Text(label, fontFamily = FontFamily.Monospace, fontSize = 13.sp, maxLines = 1,
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable {
+                        completions = null
+                        // Replace the word being typed with the suggestion.
+                        val pos = value.selection.start
+                        var start = pos
+                        while (start > 0 && (value.text[start - 1].isLetterOrDigit() || value.text[start - 1] == '_')) start--
+                        set(TextFieldValue(value.text.replaceRange(start, pos, insert), TextRange(start + insert.length)))
+                    }.padding(horizontal = 8.dp, vertical = 8.dp))
+            }
+        }
+    }
+    if (showSnippets) SnippetSheet(file.name, onDismiss = { showSnippets = false }) { snippet ->
+        showSnippets = false
+        val (text, cursor) = Snippets.expand(snippet.body)
+        val sel = value.selection
+        set(TextFieldValue(value.text.replaceRange(sel.min, sel.max, text), TextRange(sel.min + cursor)))
+    }
     definitionOf?.let { word ->
         DefinitionSheet(EditorTools.rootOf(file), word, onDismiss = { definitionOf = null }) { target, line ->
             definitionOf = null
@@ -430,12 +517,53 @@ private fun Editor(
                         leadingIcon = { PhIcon(Ph.MagnifyingGlass, null, size = 18.dp) },
                         text = { Text(word?.let { "Find definition of $it" } ?: "Find definition (put the cursor on a name)") },
                         enabled = word != null,
-                        onClick = { menu = false; definitionOf = word },
+                        onClick = {
+                            menu = false
+                            val c = lsp
+                            if (c == null) definitionOf = word
+                            else scope.launch {
+                                val (l, col) = cursorPosition()
+                                val found = c.definition(file, l, col).firstOrNull()
+                                when {
+                                    found == null -> definitionOf = word
+                                    found.file.canonicalPath == file.canonicalPath -> goToLine(found.line)
+                                    else -> onOpenAt?.invoke(found.file, found.line)
+                                }
+                            }
+                        },
                     )
+                    if (lsp != null) {
+                        DropdownMenuItem(
+                            leadingIcon = { PhIcon(Ph.Info, null, size = 18.dp) },
+                            text = { Text("Show info") },
+                            onClick = {
+                                menu = false
+                                val (l, col) = cursorPosition()
+                                scope.launch { hoverText = lsp?.hover(file, l, col) ?: "Nothing to show here." }
+                            },
+                        )
+                        DropdownMenuItem(
+                            leadingIcon = { PhIcon(Ph.MagicWand, null, size = 18.dp) },
+                            text = { Text("Complete") },
+                            enabled = !readOnly,
+                            onClick = { menu = false; complete() },
+                        )
+                    }
                     DropdownMenuItem(
                         leadingIcon = { PhIcon(Ph.GitCommit, null, size = 18.dp) },
                         text = { Text("Blame") },
                         onClick = { menu = false; showBlame = true },
+                    )
+                    if (Snippets.forFile(file.name).isNotEmpty()) DropdownMenuItem(
+                        leadingIcon = { PhIcon(Ph.Plus, null, size = 18.dp) },
+                        text = { Text("Insert snippet") },
+                        enabled = !readOnly,
+                        onClick = { menu = false; showSnippets = true },
+                    )
+                    if (onResolveConflicts != null && Merge.hasConflicts(value.text)) DropdownMenuItem(
+                        leadingIcon = { PhIcon(Ph.GitMerge, null, size = 18.dp) },
+                        text = { Text("Resolve conflicts") },
+                        onClick = { menu = false; if (dirty) save({ onResolveConflicts(file) }) else onResolveConflicts(file) },
                     )
                     HorizontalDivider()
                     DropdownMenuItem(
@@ -447,6 +575,31 @@ private fun Editor(
             }
         }
 
+        if (OpenFiles.tabs.size > 1) {
+            androidx.compose.foundation.lazy.LazyRow(
+                Modifier.fillMaxWidth().background(Mono.Bg).padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(OpenFiles.tabs.toList(), key = { it }) { path ->
+                    val here = path == file.path
+                    Row(
+                        Modifier.clip(RoundedCornerShape(10.dp)).background(if (here) Mono.CurrentLine else Color.Transparent)
+                            .clickable(enabled = !here) { onSwitch?.invoke(File(path)) }.padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (OpenFiles.dirty[path] == true) {
+                            Box(Modifier.size(7.dp).clip(androidx.compose.foundation.shape.CircleShape).background(Mono.Accent))
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text(File(path).name, color = if (here) Mono.Fg else Mono.Dim, fontSize = 12.sp, maxLines = 1)
+                        // Closing another tab drops its unsaved edits; closing this one leaves like Back.
+                        Box(Modifier.size(28.dp).clickable { if (here) tryBack() else OpenFiles.close(path) }, contentAlignment = Alignment.Center) {
+                            PhIcon(Ph.X, "Close ${File(path).name}", size = 12.dp, tint = Mono.Dim)
+                        }
+                    }
+                }
+            }
+        }
         AnimatedVisibility(
             visible = findOpen,
             enter = fadeIn(tween(150)) + expandVertically(tween(200)),
@@ -501,6 +654,7 @@ private fun Editor(
         val gutterChars = maxOf(2, lineStarts.size.toString().length)
         val gutterWidth = with(density) { (fontSp.sp.toPx() * 0.62f * gutterChars).toDp() } + 22.dp
         val cursorLine = remember(value.selection.start, lineStarts) { lineIndexOf(lineStarts, value.selection.start) }
+        val diagnosticLines = remember(diagnostics) { diagnostics.groupBy { it.line }.mapValues { (_, list) -> list.any { it.isError } } }
 
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val viewportH = maxHeight
@@ -523,6 +677,9 @@ private fun Editor(
                                 val y = lay.getLineTop(visual)
                                 if (y < top) continue
                                 if (y > bottom) break
+                                diagnosticLines[i]?.let { error ->
+                                    drawCircle(if (error) Color(0xFFE5534B) else Mono.Modified, radius = 3.dp.toPx(), center = Offset(5.dp.toPx(), lay.getLineTop(visual) + (lay.getLineBottom(visual) - lay.getLineTop(visual)) / 2))
+                                }
                                 val label = (i + 1).toString()
                                 val measured = measurer.measure(label, gutterStyle.copy(color = if (i == cursorLine) Mono.Fg else Mono.Dim))
                                 // Baseline-aligned with the code line, whatever the line-height padding.
@@ -570,7 +727,7 @@ private fun Editor(
         }
 
         if (WindowInsets.isImeVisible && !readOnly) {
-            SymbolBar(onInsert = { s ->
+            SymbolBar(onComplete = if (lsp != null) ({ complete() }) else null, onInsert = { s ->
                 val sel = value.selection
                 val text = value.text.replaceRange(sel.min, sel.max, if (s == "⇥") indentUnit else s)
                 val caret = sel.min + if (s == "⇥") indentUnit.length else s.length
@@ -579,6 +736,16 @@ private fun Editor(
                 val c = (value.selection.start + delta).coerceIn(0, value.text.length)
                 value = value.copy(selection = TextRange(c))
             })
+        }
+        if (diagnostics.isNotEmpty()) {
+            val errors = diagnostics.count { it.isError }
+            Row(Modifier.fillMaxWidth().background(Mono.Bar).clickable { showProblems = true }.padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                PhIcon(if (errors > 0) Ph.XCircle else Ph.Warning, null, size = 13.dp, tint = if (errors > 0) Color(0xFFE5534B) else Mono.Modified)
+                Spacer(Modifier.width(6.dp))
+                Text("$errors error${if (errors == 1) "" else "s"}, ${diagnostics.size - errors} warning${if (diagnostics.size - errors == 1) "" else "s"} · ${lsp?.server?.name}",
+                    color = Mono.Dim, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
+            }
         }
         StatusBar(
             line = cursorLine + 1,
@@ -619,7 +786,7 @@ private fun Editor(
             dismissButton = {
                 Row {
                     TextButton(onClick = { confirmLeave = false }) { Text("Cancel") }
-                    TextButton(onClick = { confirmLeave = false; onBack() }) { Text("Discard", color = MaterialTheme.colorScheme.error) }
+                    TextButton(onClick = { confirmLeave = false; discarded = true; OpenFiles.close(file.path); onBack() }) { Text("Discard", color = MaterialTheme.colorScheme.error) }
                 }
             },
         )
@@ -751,7 +918,7 @@ private fun MiniField(value: String, onChange: (String) -> Unit, hint: String, m
 private val SYMBOLS = listOf("⇥", "←", "→", "{", "}", "(", ")", "[", "]", "<", ">", ";", ":", "=", "\"", "'", "`", "/", "\\", "|", "&", "!", "?", "$", "_", "-", "+", "*", "#", "@", "%", "~")
 
 @Composable
-private fun SymbolBar(onInsert: (String) -> Unit, onMove: (Int) -> Unit) {
+private fun SymbolBar(onComplete: (() -> Unit)? = null, onInsert: (String) -> Unit, onMove: (Int) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -760,6 +927,10 @@ private fun SymbolBar(onInsert: (String) -> Unit, onMove: (Int) -> Unit) {
             .padding(horizontal = 4.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
+        if (onComplete != null) Box(
+            Modifier.heightIn(min = 36.dp).clip(RoundedCornerShape(8.dp)).background(Mono.Accent).clickable(onClick = onComplete).padding(horizontal = 10.dp),
+            contentAlignment = Alignment.Center,
+        ) { Text("Complete", color = Mono.Bg, fontSize = 13.sp) }
         for (s in SYMBOLS) {
             Box(
                 Modifier
