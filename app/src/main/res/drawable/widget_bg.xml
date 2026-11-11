@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The widget's card: near-black like the app's dark ground, rounded like its cards. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="#18181D" />
+    <corners android:radius="24dp" />
+</shape>

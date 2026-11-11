@@ -50,6 +50,7 @@ fun AppDrawer(
     onOpenChat: (ChatSession) -> Unit,
     onDeleteChat: (ChatSession) -> Unit,
     onNavigate: (Route) -> Unit,
+    onSearch: () -> Unit = {},
 ) {
     ModalDrawerSheet(Modifier.width(310.dp)) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 12.dp)) {
@@ -105,9 +106,17 @@ fun AppDrawer(
 
         HorizontalDivider(Modifier.padding(horizontal = 16.dp))
         Column(Modifier.padding(12.dp)) {
+            NavigationDrawerItem(
+                label = { Text("Search everything") },
+                icon = { PhIcon(Ph.MagnifyingGlass, null) },
+                selected = false,
+                onClick = onSearch,
+                modifier = Modifier.padding(vertical = 1.dp),
+            )
             for ((label, icon, route) in listOf(
                 Triple("Projects", Ph.FolderSimple, Route.Projects),
                 Triple("Terminal", Ph.TerminalWindow, Route.Terminal),
+                Triple("Servers", Ph.Globe, Route.Servers),
                 Triple("Agents", Ph.Sparkle, Route.Agents),
                 Triple("Devices", Ph.Devices, Route.Devices),
                 Triple("Settings", Ph.GearSix, Route.Settings),

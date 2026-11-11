@@ -13,6 +13,8 @@ object LastProject {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
             ?.let(::File)?.takeIf { it.isDirectory }
 
-    fun set(context: Context, dir: File) =
+    fun set(context: Context, dir: File) = setOnly(context, dir).also { dev.yurlungr.app.widgets.OpenIn.refresh(context) }
+
+    private fun setOnly(context: Context, dir: File) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { putString(KEY, dir.path) }
 }

@@ -1,9 +1,12 @@
 package dev.yurlungr.app.ui
 
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -58,7 +61,7 @@ fun SectionLabel(text: String, modifier: Modifier = Modifier, color: Color = Mat
         style = MaterialTheme.typography.labelMedium,
         fontWeight = FontWeight.SemiBold,
         color = color,
-        modifier = modifier.padding(start = 4.dp, top = 8.dp, bottom = 2.dp),
+        modifier = modifier.padding(start = 4.dp, top = 8.dp, bottom = 2.dp).semantics { heading() },
     )
 }
 
@@ -172,6 +175,7 @@ fun HeaderTile(
     modifier: Modifier = Modifier,
     fill: Color = MaterialTheme.colorScheme.surfaceContainer,
     tint: Color = MaterialTheme.colorScheme.onSurface,
+    onLongClick: (() -> Unit)? = null,
 ) {
     Box(
         modifier
@@ -179,7 +183,7 @@ fun HeaderTile(
             .clip(RoundedCornerShape(16.dp))
             .background(fill)
             .border(1.dp, if (fill == MaterialTheme.colorScheme.surfaceContainer) MaterialTheme.colorScheme.outlineVariant else Color.Transparent, RoundedCornerShape(16.dp))
-            .clickable(onClickLabel = description, onClick = onClick),
+            .combinedClickable(onClickLabel = description, onClick = onClick, onLongClickLabel = onLongClick?.let { "Search everything" }, onLongClick = onLongClick),
         contentAlignment = Alignment.Center,
     ) { PhIcon(icon, description, size = 20.dp, tint = tint) }
 }
@@ -188,8 +192,10 @@ fun HeaderTile(
 @Composable
 fun NavTile(onBack: () -> Unit) {
     val openDrawer = LocalOpenDrawer.current
-    if (LocalTopLevel.current && openDrawer != null) HeaderTile(Ph.List, "Open menu", openDrawer)
-    else HeaderTile(Ph.CaretLeft, "Back", onBack)
+    // Long-press: search everything (the command palette).
+    val palette = LocalOpenPalette.current
+    if (LocalTopLevel.current && openDrawer != null) HeaderTile(Ph.List, "Open menu", openDrawer, onLongClick = palette)
+    else HeaderTile(Ph.CaretLeft, "Back", onBack, onLongClick = palette)
 }
 
 /** A big color-blocked stat tile: small label on top, large value at the bottom. */

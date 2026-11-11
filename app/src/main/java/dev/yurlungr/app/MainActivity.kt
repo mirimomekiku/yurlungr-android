@@ -68,6 +68,10 @@ sealed interface Route {
     data object Setup : Route
     data object Settings : Route
     data object DevEnvironment : Route
+    /** Web apps, listening ports and processes. */
+    data object Servers : Route
+    data class Preview(val url: String, val title: String) : Route
+    data class ProjectAgents(val path: String) : Route
     data object Terminal : Route
     data object Agents : Route
     data object Devices : Route
@@ -75,7 +79,7 @@ sealed interface Route {
     data class RemoteChat(val hostId: String, val chatId: String) : Route
     data object Projects : Route
     data class Project(val path: String, val tab: String? = null) : Route
-    data class FileView(val path: String, val edit: Boolean = false) : Route
+    data class FileView(val path: String, val edit: Boolean = false, val line: Int? = null) : Route
 }
 
 /**
@@ -99,6 +103,18 @@ class Navigator(start: Route) {
         stack += route
     }
 
+    /** The project a stack of opened files sits on (for the side-by-side layout), if any. */
+    fun projectBelow(): Route.Project? {
+        for (i in stack.lastIndex - 1 downTo 0) {
+            when (val r = stack[i]) {
+                is Route.Project -> return r
+                is Route.FileView -> continue
+                else -> return null
+            }
+        }
+        return null
+    }
+
     fun pop() {
         direction = NavDirection.Pop
         if (stack.size > 1) stack.removeAt(stack.lastIndex) else stack[0] = Route.NewChat
@@ -117,12 +133,16 @@ class MainActivity : ComponentActivity() {
     private var resumeTick by mutableIntStateOf(0)
     private var pendingChatId by mutableStateOf<String?>(null)
     private var pendingScreen by mutableStateOf<Route?>(null)
+    private var showPalette by mutableStateOf(false)
+    /** Something shared from another app, waiting for the share sheet. */
+    private var pendingShare by mutableStateOf<dev.yurlungr.app.ui.SharedContent?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         pendingChatId = intent?.getStringExtra(EXTRA_CHAT_ID)
-        pendingScreen = debugScreen(intent)
+        pendingScreen = debugScreen(intent) ?: terminalFrom(intent) ?: openFrom(intent)
+        pendingShare = dev.yurlungr.app.ui.SharedContent.from(intent)
         val nav = Navigator(if (RuntimePaths(this).isBootstrapInstalled) Route.NewChat else Route.Setup)
 
         setContent {
@@ -182,6 +202,7 @@ class MainActivity : ComponentActivity() {
                                 chat.delete()
                             },
                             onNavigate = ::go,
+                            onSearch = { scope.launch { drawer.close() }; showPalette = true },
                         )
                     },
                 ) {
@@ -192,13 +213,24 @@ class MainActivity : ComponentActivity() {
                         dev.yurlungr.app.ui.LocalOpenFile provides { nav.push(Route.FileView(it.path)) },
                         LocalOpenDrawer provides { scope.launch { drawer.open() } },
                         LocalTopLevel provides nav.isTopLevel,
+                        dev.yurlungr.app.ui.LocalOpenPalette provides { showPalette = true },
                     ) {
                         AnimatedContent(
                             targetState = nav.current,
                             transitionSpec = { screenTransition(nav.direction) },
                             label = "screen",
                         ) { route ->
-                            Screen(route, nav, context)
+                            // Tablets and unfolded foldables: the project beside the file it opened.
+                            val window = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width
+                            val wide = with(androidx.compose.ui.platform.LocalDensity.current) { window.toDp() } >= 840.dp
+                            val project = if (wide && route is Route.FileView) nav.projectBelow() else null
+                            if (project != null) {
+                                androidx.compose.foundation.layout.Row(Modifier.fillMaxSize()) {
+                                    Box(Modifier.weight(0.42f)) { Screen(project, nav, context) }
+                                    androidx.compose.material3.VerticalDivider(color = androidx.compose.material3.MaterialTheme.colorScheme.outlineVariant)
+                                    Box(Modifier.weight(0.58f)) { Screen(route, nav, context) }
+                                }
+                            } else Screen(route, nav, context)
                         }
                     }
                     dev.yurlungr.app.chat.UrgentBanner(
@@ -206,6 +238,31 @@ class MainActivity : ComponentActivity() {
                         onOpen = { nav.reset(Route.Chat(it)) },
                         modifier = Modifier.align(Alignment.TopCenter).systemBarsPadding(),
                     )
+                    }
+                    pendingShare?.let { shared ->
+                        dev.yurlungr.app.ui.ShareSheet(shared, onDismiss = { pendingShare = null }, onOpenChat = { nav.reset(Route.Chat(it.id)) })
+                    }
+                    if (showPalette) {
+                        fun place(title: String, icon: androidx.compose.ui.graphics.vector.ImageVector, route: Route) =
+                            dev.yurlungr.app.ui.PaletteItem("Go to", title, null, icon) { if (route == Route.NewChat || route == Route.Projects || route == Route.Terminal || route == Route.Servers || route == Route.Agents || route == Route.Devices || route == Route.Settings) go(route) else nav.push(route) }
+                        dev.yurlungr.app.ui.CommandPalette(
+                            actions = listOf(
+                                place("New chat", dev.yurlungr.app.ui.Ph.NotePencil, Route.NewChat),
+                                place("Projects", dev.yurlungr.app.ui.Ph.FolderSimple, Route.Projects),
+                                place("Terminal", dev.yurlungr.app.ui.Ph.TerminalWindow, Route.Terminal),
+                                place("Servers", dev.yurlungr.app.ui.Ph.Globe, Route.Servers),
+                                place("Agents", dev.yurlungr.app.ui.Ph.Sparkle, Route.Agents),
+                                place("Devices", dev.yurlungr.app.ui.Ph.Devices, Route.Devices),
+                                place("Settings", dev.yurlungr.app.ui.Ph.GearSix, Route.Settings),
+                                place("System checks", dev.yurlungr.app.ui.Ph.ListChecks, Route.Setup),
+                                place("Development environment", dev.yurlungr.app.ui.Ph.Wrench, Route.DevEnvironment),
+                            ),
+                            onOpenProject = { nav.reset(Route.Project(it.path)) },
+                            onOpenFile = { nav.push(Route.FileView(it.path)) },
+                            onOpenChat = { nav.reset(Route.Chat(it)) },
+                            runInTerminal = { command, name -> runInTerminal(context, nav, command, name) },
+                            onDismiss = { showPalette = false },
+                        )
                     }
                     // Registered last, so it wins: back closes the sidebar first.
                     BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }
@@ -265,6 +322,7 @@ class MainActivity : ComponentActivity() {
                 onHome = { if (nav.isTopLevel) nav.reset(Route.NewChat) else nav.pop() },
                 onDevices = { nav.push(Route.Devices) },
                 onDevEnvironment = { nav.push(Route.DevEnvironment) },
+                onUpdatePackages = { runInTerminal(context, nav, dev.yurlungr.app.runtime.packagesUpgradeCommand(), "Update packages") },
             )
             Route.Settings -> SettingsScreen(
                 setupViewModel,
@@ -317,14 +375,28 @@ class MainActivity : ComponentActivity() {
                 onAllProjects = { nav.push(Route.Projects) },
                 runInTerminal = { command, name -> runInTerminal(context, nav, command, name) },
                 onOpenTerminal = { nav.push(Route.Terminal) },
+                onPreview = { url, title -> nav.push(Route.Preview(url, title)) },
+                onAgentSettings = { nav.push(Route.ProjectAgents(route.path)) },
+                onOpenFileAt = { f, line -> nav.push(Route.FileView(f.path, edit = line != null, line = line)) },
+            )
+            Route.Servers -> dev.yurlungr.app.web.ServersScreen(
+                onBack = back,
+                onPreview = { url, title -> nav.push(Route.Preview(url, title)) },
+                onOpenTerminal = { nav.push(Route.Terminal) },
+            )
+            is Route.Preview -> dev.yurlungr.app.web.PreviewScreen(route.url, route.title, onBack = back)
+            is Route.ProjectAgents -> dev.yurlungr.app.projects.ProjectAgentsScreen(
+                File(route.path),
+                onBack = back,
+                onOpenFile = { nav.push(Route.FileView(it.path)) },
             )
             is Route.FileView -> {
                 val file = File(route.path)
-                if (!route.edit && dev.yurlungr.app.editor.isMarkdownFile(file.name)) {
+                if (!route.edit && route.line == null && dev.yurlungr.app.editor.isMarkdownFile(file.name)) {
                     dev.yurlungr.app.editor.MarkdownScreen(file, resumeTick, onBack = back,
                         onEdit = { nav.push(Route.FileView(route.path, edit = true)) })
                 } else {
-                    EditorScreen(file, onBack = back)
+                    EditorScreen(file, onBack = back, line = route.line, onOpenAt = { f, l -> nav.push(Route.FileView(f.path, edit = true, line = l)) })
                 }
             }
         }
@@ -351,12 +423,32 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         intent.getStringExtra(EXTRA_CHAT_ID)?.let { pendingChatId = it }
         debugScreen(intent)?.let { pendingScreen = it }
+        terminalFrom(intent)?.let { pendingScreen = it }
+        openFrom(intent)?.let { pendingScreen = it }
+        dev.yurlungr.app.ui.SharedContent.from(intent)?.let { pendingShare = it }
     }
 
     /**
      * Debug builds only: `adb shell am start -n com.termux/dev.yurlungr.app.MainActivity --es screen devices`
      * opens a screen directly, for checking layouts without tapping through the app.
      */
+    /** Quick Settings tiles and the home-screen widget: open a place. */
+    private fun openFrom(intent: Intent?): Route? = when (val place = intent?.getStringExtra(EXTRA_OPEN)) {
+        null -> null
+        dev.yurlungr.app.widgets.OpenIn.SERVERS -> Route.Servers
+        dev.yurlungr.app.widgets.OpenIn.TERMINAL -> Route.Terminal
+        dev.yurlungr.app.widgets.OpenIn.NEW_CHAT -> Route.NewChat
+        else -> place.removePrefix(dev.yurlungr.app.widgets.OpenIn.PROJECT).takeIf { it.isNotEmpty() && File(it).isDirectory }
+            ?.let { Route.Project(it) } ?: Route.Projects
+    }
+
+    /** A "finished" notification: show that terminal. */
+    private fun terminalFrom(intent: Intent?): Route? {
+        val id = intent?.getStringExtra(EXTRA_TERMINAL_ID) ?: return null
+        TerminalSessions.sessions.firstOrNull { TerminalSessions.statusId(it) == id }?.let(TerminalSessions::select) ?: return null
+        return Route.Terminal
+    }
+
     private fun debugScreen(intent: Intent?): Route? {
         if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE == 0) return null
         return when (intent?.getStringExtra("screen")) {
@@ -425,5 +517,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_CHAT_ID = "chat_id"
+        const val EXTRA_TERMINAL_ID = "terminal_id"
+        const val EXTRA_OPEN = "open"
     }
 }
