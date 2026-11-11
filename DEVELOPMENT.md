@@ -83,6 +83,17 @@ log (`*.log.previous`), and return nonzero on a failed step. The terminal shows
 the exit code before returning to its shell. Retry setup after fixing the reported
 failure; it will update or repair the existing installation.
 
+**On-device checks** (no screen interaction; temporary folders only). With the debug and test APKs installed:
+
+```sh
+# The runtime features: environment, JDK, git stage/unstage/discard, search, processes, ports, disk, updates
+adb shell am instrument -w -e features true com.termux.test/dev.yurlungr.app.web.WebRunSmokeInstrumentation
+# The in-runtime self-test (quick), or "full" (installs two small packs, switches the JDK and back, runs Vite)
+adb shell am instrument -w -e selfTest quick com.termux.test/dev.yurlungr.app.web.WebRunSmokeInstrumentation
+```
+
+`am instrument` restarts the app's process, so open chats and terminals end.
+
 Package lists, SDK versions and version checks live in one place, `runtime/Toolchain.kt`.
 On every launch the app writes them to `$PREFIX/libexec/yurlungr/toolchain.sh`. The setup
 scripts source that file, and System checks probes the same tools, so neither can drift

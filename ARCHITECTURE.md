@@ -24,8 +24,16 @@ agents running inside it.
   `~/.gradle/gradle.properties` listing every JDK (`org.gradle.java.installations.paths`, auto-download
   off), refreshed on launch and after a switch.
 - **Bridges.** Android's `am` is unusable from an app UID, so `runtime/RuntimeAssets.kt` installs shims
-  (`xdg-open`, `termux-open-url`, `yurlungr-install`) that drop requests into an inbox folder;
-  `runtime/RuntimeBridge.kt` watches it and opens URLs (http/https only) or the package installer.
+  (`xdg-open`, `termux-open-url`, `yurlungr-install`, `yurlungr-notify`) that drop requests into an
+  inbox folder. `runtime/RuntimeBridge.kt` watches it and does one of four things:
+  - opens URLs (http/https only);
+  - opens the package installer;
+  - posts notifications;
+  - handles `.done` reports, which terminal commands write when they ran 20 s or more
+    (`runtime/TaskNotifications.kt`).
+- **Storage.** `runtime/Storage.kt` reads pack sizes from dpkg's status file, measures and clears
+  caches, and counts upgradable packages. `assets/pack-remove.sh` removes a pack's packages but keeps
+  anything the core setups need.
 - **Agent notes.** On every launch the app rewrites a managed "you're on an Android phone" block in each
   agent's instructions file (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`).
 - **Staying alive.** `runtime/RuntimeService.kt` is a foreground service that keeps agents and terminal processes running (with an
@@ -76,6 +84,22 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
   changes inside them.
 - `projects/ProjectChanges.kt` is the Changes tab: Conflicts, Staged and Changes groups, stage, unstage
   and discard (`Git.stage/unstage/discard`), and a pinned commit box that commits staged files or all.
+- `projects/ProjectChecks.kt` is the Checks tab. It works out check and test commands per stack and
+  runs them in a terminal with `tee` into `.yurlungr/`. Parsers turn compiler and linter output,
+  JUnit XML, Jest JSON and `go`/`cargo` test output into problems and test results.
+- `editor/EditorTools.kt`: recent files, `git blame --line-porcelain` ranges, and "Find definition"
+  (a ripgrep regex for definition-like lines). The editor opens at `Route.FileView.line`.
+- `ui/CommandPalette.kt` (Search everything) ranks actions, projects, recent files, chats, and the
+  last project's tasks and files (`rg --files`). It opens through `LocalOpenPalette`.
+- `ui/ShareSheet.kt` takes `ACTION_SEND` / `SEND_MULTIPLE` into a project chat or folder.
+  `widgets/Shortcuts.kt` holds the Quick Settings tiles and the home-screen widget; both open places
+  through `MainActivity.EXTRA_OPEN`.
+- `projects/ProjectTasks.kt` finds runnable tasks in a project's own files (scripts, make targets,
+  just recipes, stack defaults). `ProjectSearch.kt` runs ripgrep (`--null` output). Both are
+  reached from the dock and the Files tab (`ProjectDock.kt`, `ProjectFiles.kt`).
+- `projects/ProjectAgentsScreen.kt` keeps per-project agent settings: the default agent (app
+  preferences), the instruction files, and MCP servers. `.mcp.json` is the source of the servers;
+  they're merged into `.gemini/settings.json` and `.qwen/settings.json` so other keys are kept.
 - `projects/StackDetector.kt` finds a project's stacks from their manifests. For each stack it records
   the Termux packages it needs, the install steps, and whether dependencies are installed. It decides
   runtimes from `packageManager` and lockfiles, and adds node-gyp's toolchain for native add-ons.
@@ -98,7 +122,11 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
 - static files;
 - a custom command.
 
-Package managers are npm, pnpm, Yarn and Bun. `WebQuickRun.kt` is the dock's one-tap Run: the last
+Package managers are npm, pnpm, Yarn and Bun. `PreviewScreen.kt` shows a running app in a WebView:
+only 127.0.0.1 and localhost load inside it; other links go to the browser. It also collects the
+page's console. `ServersScreen.kt` (the sidebar's Servers) lists runs, probes the usual development
+ports (Android blocks `/proc/net` for apps), and lists the runtime's processes from `ps`, stopping them
+with `Os.kill`. `WebQuickRun.kt` is the dock's one-tap Run: the last
 settings or defaults, dependencies installed when missing, a free port. `WebRunUi.kt` has the server card
 and the options sheet, and `WebRunSessions.kt` owns one run per project. Each run starts
 `assets/web-runner.cjs` in a managed terminal without an idle-shell fallback. The Node supervisor owns a
@@ -161,7 +189,7 @@ Transitions come from `ui/Motion.kt`.
 | `projects/` | Git operations, the workspace, history graph, branches, project list |
 | `editor/` | Markdown viewer, lexer, themes, Prettier formatting and text editor |
 | `terminal/` | Terminal sessions and screen |
-| `web/` | Project detection, saved run configuration, supervisor registry and Run UI |
+| `web/` | Project detection, saved run configuration, supervisor registry, Run UI, Preview and Servers |
 | `remote/` | Phone-to-phone protocol, server and client |
 | `setup/` | System checks (first-run screen), Settings and Development environment |
 | `ui/` | Theme, shared components, motion, loaders, icons, sidebar |

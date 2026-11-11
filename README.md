@@ -194,6 +194,32 @@ Then, on the phone:
 - Custom commands must use `127.0.0.1` and the supplied `$PORT`; project-specific native dependencies can still fail on
   Android and their errors remain in Logs. Static serving blocks dotfiles and paths outside the app folder.
 - **Terminal** from a project offers the terminals already open there, or a new one.
+- **Checks** (a project tab) runs the project's compile/lint checks and its tests in a terminal,
+  then shows what they found. Their output is saved under `.yurlungr/` in the project, which is
+  git-ignored automatically.
+  - **Check:** problems by file, with the line and message. It reads tsc, ESLint, Kotlin/Gradle,
+    javac, `cargo check`, `go vet`, ruff or Python syntax errors, and `dotnet build`.
+  - **Run tests:** passed, failed and skipped, plus each failure's message and location. It reads
+    JUnit XML (Gradle, pytest, Vitest), Jest's JSON report, and `go test -v` / `cargo test` output.
+  - Tap a problem or failure to open the file at that line. **Fix with agent** starts a chat with
+    the list, using the project's default agent.
+- **Search in files** at the top of the Files tab runs ripgrep over the project. Results open at
+  their line. It respects
+  `.gitignore`, skips `.git`, and supports plain text or a regular expression; tap a result to open
+  the file.
+- **Scripts** (in the dock's More sheet) runs the project's tasks with one tap, in a terminal:
+  package.json scripts (with its package manager), deno tasks, composer scripts, make targets, just
+  recipes, and the usual Gradle, Cargo, Go, pytest, mix and .NET commands.
+- **Agent settings** (More → Agent settings), per project:
+  - **Chat starts:** choose the agent Chat starts. Long-press Chat to pick another.
+  - **Instructions:** open or create AGENTS.md, CLAUDE.md, GEMINI.md and QWEN.md, or point the others
+    at AGENTS.md with one tap (`@AGENTS.md`).
+  - **MCP servers:** add, edit or remove them in `.mcp.json` (a command or an HTTP URL), copied to
+    `.gemini/settings.json` and `.qwen/settings.json` unless you turn that off. Codex only has global
+    servers.
+- **Preview:** a running web app opens inside the app, with reload, back and forward, a phone or
+  desktop layout, the page's console and errors, and *Open in browser*. Links to other sites open
+  in the browser. Debug builds can also be inspected from a computer's `chrome://inspect`.
 - **Setup** detects the project's tech stacks from their manifest files, in the root and common app
   folders (`app/`, `frontend/`, `apps/*`…), and installs their dependencies in a terminal with a log
   (`~/project-setup.log`). Each stack card shows the Termux packages and commands it will run:
@@ -264,6 +290,12 @@ Then, on the phone:
   - YAML front matter is shown as a small card.
 - Images in the project folder are shown downscaled. Remote images load only after a tap, so opening
   a file doesn't contact their server. SVG images show their alternative text.
+- **Open at a line:** search results, problems and test failures open the editor at their line.
+- **Find definition** (⋮ menu, with the cursor on a name) searches the project for lines that look
+  like its definition (`fun`, `class`, `def`, `function`, `const x =`…) and opens the one you pick.
+  It's a text search, not a language server, so it can show more than one match.
+- **Blame** (⋮ menu): who last changed each part of the file, with the commit and when; tap to jump there.
+- Recently opened files appear in **Search everything**.
 - Code: `editor/`.
 
 </details>
@@ -287,7 +319,32 @@ Then, on the phone:
   as the app; Antigravity stays unknown. No credentials are read or displayed.
   Uses Termux's `~/.termux/motd.sh` hook; an existing custom hook and `$PREFIX/etc/motd` are preserved.
   `~/.hushlogin` still suppresses the automatic welcome, and `NO_COLOR` disables status styling.
-- Code: `terminal/`, `runtime/RuntimeStatus.kt`, `assets/motd.sh`.
+- **"Finished" notifications:** a command run from the app (build, install, tests, Scripts) that
+  takes 20 seconds or more posts a notification when it ends, with its exit status. Tapping it opens
+  that terminal. Scripts and agents can send their own with `yurlungr-notify "Title" "details"`.
+  While the app is open these show as a toast. The *Finished tasks* channel can be turned off in
+  Android's settings.
+- **Search everything** (the sidebar's first item, or long-press ☰ / ‹ on any screen) finds
+  screens and actions, projects, recently opened files, chats, and the last project's scripts and
+  files. It ranks matches that start a word first, and Enter runs the top result.
+- **Shortcuts outside the app:**
+  - Quick Settings tiles: **Dev servers** (how many run, tap for Servers) and **Terminal**;
+  - a home-screen widget with New chat, your last project, and Servers with a running count.
+- **Share to Yurlungr** from any app: text, links, images or files. Pick a project and an agent, edit
+  the message, then **Ask** (files go as attachments, up to 10 MB each) or **Save to project**.
+- **Wide screens** (tablets, unfolded foldables): a file opened from a project shows beside it.
+- **Accessibility:** section labels are headings, tabs announce their selection, Git status letters
+  are read as words ("Modified"), and dock dots say what they mean. Terminal and diff text follow
+  Android's font size.
+- **Servers** (sidebar):
+  - the web apps the app runs (Preview, Logs, Stop);
+  - listening ports: the usual development ports (Vite, Next.js, Astro, Angular, Django, Flask,
+    Expo, PostgreSQL, Redis, MariaDB, Ollama…), each with Preview. Android doesn't let apps list
+    every open port, so these are found by trying to connect;
+  - the runtime's processes, with memory and uptime, and **Stop** (SIGTERM) or **Force kill**.
+
+  It refreshes every few seconds.
+- Code: `terminal/`, `runtime/RuntimeStatus.kt`, `runtime/TaskNotifications.kt`, `web/ServersScreen.kt`, `assets/motd.sh`.
 
 </details>
 
@@ -380,7 +437,14 @@ credential-file presence; Antigravity's is not documented, so it shows as *Insta
     (`jvmToolchain(17)`) find it. The app keeps it current on every launch.
   - **Environment:** what every process gets (`JAVA_HOME`, `ANDROID_HOME`, `PNPM_HOME`, `GOPATH`,
     `CARGO_HOME`, `DOTNET_ROOT`, and PATH entry by entry), with *Copy exports*.
-  - **Runtime packs:** installed or not, with Install.
+  - **Updates:** how many package updates are known, **Check now** (refreshes the package lists) and
+    **Update all** (in a terminal, keeping changed config files). System checks also shows pending updates.
+  - **Storage:** the size of each cache (Gradle, npm, pnpm, Yarn, Bun, pip, uv, Cargo, Go modules,
+    Maven, downloaded packages) with **Clean**, after a confirmation.
+  - **Runtime packs:** each with its size and **Install** or **Remove**. Remove never takes what the
+    developer tools, agents or Android SDK need, or packages Android's base system marks essential.
+    apt lists anything else that depends on a removed package in the terminal before removing it.
+  - After a JDK switch, it says which open chats and terminals still use the previous JDK.
 - **The environment is the same everywhere:** agents, command terminals, setups and web runs get
   `JAVA_HOME` (the default JDK) and the per-user tool folders on PATH, after the runtime's own bin:
   `~/.local/bin`, `~/.cargo/bin`, `~/go/bin`, `~/.bun/bin`, `~/.deno/bin`, `~/.dotnet/tools`,
