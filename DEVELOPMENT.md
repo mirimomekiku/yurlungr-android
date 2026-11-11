@@ -86,7 +86,22 @@ failure; it will update or repair the existing installation.
 Package lists, SDK versions and version checks live in one place, `runtime/Toolchain.kt`.
 On every launch the app writes them to `$PREFIX/libexec/yurlungr/toolchain.sh`. The setup
 scripts source that file, and System checks probes the same tools, so neither can drift
-from the other. To add a tool, add it to `Toolchain` and nothing else.
+from the other. To add a tool to an existing setup, add it to `Toolchain` and nothing else.
+
+- **A new optional pack** needs:
+  - a `ToolSetup` entry (packages, disk space, marker file, one-line blurb) and its `Tool` probes;
+  - a `Fix` entry, plus its branches in `SetupScreen`;
+  - a script copied from `assets/go-setup.sh`.
+
+  `HardeningTest` checks that every pack has all of these.
+- **Probes:**
+  - print a version line and exit 0;
+  - avoid `head` in a pipe: `pipefail` turns its early exit (SIGPIPE) into a failure, so use `sed -n 1p`;
+  - tools that start a JVM need `timeoutS = SLOW_PROBE_S`;
+  - tools that may not be installed (optional agents) need `onlyIf`, so neither System checks nor the
+    scripts report them as failures.
+- **JDK versions** live in `runtime/Jdks.kt`. Termux's Gradle, Kotlin, Maven, d8 and apksigner need
+  JDK 21, so that's the one the setups install.
 
 Each setup writes `$PREFIX/var/lib/yurlungr/setup/<name>.status` when it exits: the exit code,
 log path, time and failed steps. System checks shows a failed run with a **Log** button.

@@ -407,8 +407,11 @@ credential-file presence; Antigravity's is not documented, so it shows as *Insta
 - The terminal JNI library is rebuilt from matching Termux sources with 16 KB alignment.
   APK alignment checks do not replace testing the embedded runtime and agents on a 16 KB device.
 - Sign-in detection is a credential-file heuristic; API-key setups show as not signed in.
-- Local web runs have been verified with Vite 8.3.6 on arm64. Other frameworks are detected as
-  candidates, and project-specific native dependencies or other ABIs still need compatibility testing.
+- Local web runs have been verified with Vite 8.3.6 on arm64. The other frameworks start with their own
+  dev commands but haven't all been tried on a phone (Next.js falls back to a slower WebAssembly
+  compiler). Project-specific native dependencies or other ABIs still need compatibility testing.
+- Optional packs install Termux packages; their version checks are confirmed against the package index,
+  not on every device.
 - Alpha release APKs use the debug signing key; see [Development](DEVELOPMENT.md) before changing it.
 
 ## Credits

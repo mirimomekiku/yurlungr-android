@@ -9,8 +9,20 @@ agents running inside it.
   `/data/data/com.termux/files/usr` (`runtime/BootstrapInstaller.kt`). The application ID is `com.termux`
   because Termux's prebuilt packages are compiled for that prefix; `targetSdk` is 28 because newer targets
   forbid running binaries from app data.
-- **Environment.** `runtime/RuntimeEnv.kt` builds `PATH`, `HOME`, `PREFIX`, `LD_PRELOAD` (termux-exec) and
-  friends for every process; `runtime/CommandRunner.kt` runs non-interactive commands with it.
+- **Environment.** `runtime/RuntimeEnv.kt` builds the environment for every process (agents, terminals,
+  setups, web runs, `runtime/CommandRunner.kt`):
+  - `HOME`, `PREFIX` and `LD_PRELOAD` (termux-exec);
+  - `PATH`: the app's shims, `$PREFIX/bin`, then the per-user tool folders (`~/.local/bin`, `~/.cargo/bin`,
+    `~/go/bin`, `~/.bun/bin`…);
+  - `JAVA_HOME` (the default JDK, from `runtime/Jdks.kt`), `ANDROID_HOME`, `PNPM_HOME`, `GOPATH`,
+    `CARGO_HOME` and `DOTNET_ROOT`.
+
+  Non-login shells (agents, command terminals, setups) also load `$PREFIX/etc/profile.d`, silently, so
+  they match login terminals.
+- **JDKs.** `runtime/Jdks.kt` lists the JDKs under `$PREFIX/lib/jvm` and finds the default through Debian
+  alternatives (`update-alternatives --set java`, or `--auto` for the newest). It also keeps
+  `~/.gradle/gradle.properties` listing every JDK (`org.gradle.java.installations.paths`, auto-download
+  off), refreshed on launch and after a switch.
 - **Bridges.** Android's `am` is unusable from an app UID, so `runtime/RuntimeAssets.kt` installs shims
   (`xdg-open`, `termux-open-url`, `yurlungr-install`) that drop requests into an inbox folder;
   `runtime/RuntimeBridge.kt` watches it and opens URLs (http/https only) or the package installer.
@@ -27,7 +39,7 @@ agents running inside it.
 ## Agents and chat
 
 ```
-ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI (claude-agent-acp, codex-acp, gemini --acp, agy acp)
+ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI (claude-agent-acp, codex-acp, gemini --acp, agy acp, qwen --acp…)
                   │
                ChatStore (one JSON file per chat in app_chats/)
 ```
@@ -43,7 +55,12 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
 - New-chat Skip permissions is stored with the chat. Before the first prompt, `ChatSession` selects an
   advertised bypass mode; Antigravity instead receives its documented launch flag. Remote creation
   forwards the same setting, and remote metadata includes its current state.
-- `chat/Markdown.kt` renders CommonMark trees with table/strikethrough extensions and local-file navigation.
+- Markdown rendering:
+  - `chat/MarkdownModel.kt` parses GitHub-flavoured Markdown (tables, task lists, autolinks, footnotes,
+    front matter) into top-level blocks. It groups `<details>` sections, gives headings GitHub-style
+    anchors, and allowlists safe HTML (`HtmlLite`).
+  - `chat/Markdown.kt` renders the blocks: code with the editor's lexer and theme, images (remote ones
+    only after a tap), callouts, and find highlighting.
 - `chat/ChatSessions.kt` is the app-wide registry; saved chats cost nothing until opened.
 - `chat/ChatModel.kt` is the interface the chat screen draws, implemented by local sessions and by remote
   chats mirrored from another phone.
@@ -55,8 +72,18 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
   `GitGraph.kt` lays out commit lanes for `HistoryView.kt`. Interactive git work (clone, sign-in, publish)
   runs in a terminal session instead.
 - `projects/FileTreeGitState.kt` filters file views from Git's own ignored-path output and working-tree
-  changes; the Uncommitted view includes deleted paths.
-- `editor/` contains a Markdown preview with an explicit Edit route, plus the text editor: `Highlighter` (a linear, pure-Kotlin lexer), `EditorThemes`, `Formatter`
+  changes (All, Changed, Source, Ignored). The Changed view includes deleted paths, and folders count the
+  changes inside them.
+- `projects/ProjectChanges.kt` is the Changes tab: Conflicts, Staged and Changes groups, stage, unstage
+  and discard (`Git.stage/unstage/discard`), and a pinned commit box that commits staged files or all.
+- `projects/StackDetector.kt` finds a project's stacks from their manifests. For each stack it records
+  the Termux packages it needs, the install steps, and whether dependencies are installed. It decides
+  runtimes from `packageManager` and lockfiles, and adds node-gyp's toolchain for native add-ons.
+  `ProjectSetupSheet.kt` shows each stack, its runtimes (installed or missing, from dpkg's file lists)
+  and Install, which runs `assets/project-setup.sh` in a terminal. It also has the opt-in automatic
+  setup (once per need).
+- `editor/` contains the Markdown viewer (lazy blocks, find, outline, anchors, text size, live reload)
+  with an explicit Edit route, plus the text editor: `Highlighter` (a linear, pure-Kotlin lexer), `EditorThemes`, `Formatter`
   (Prettier via `npx` in the runtime) and `EditorScreen`.
 - `terminal/` wraps Termux's `terminal-view`; `TerminalSessions` owns sessions across screens. Long-press
   actions and confirmations use bottom sheets, while extra-key visibility is saved independently.
@@ -64,8 +91,16 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
 
 ## Local web runs
 
-`web/ProjectDetector.kt` inspects bounded project folders for Vite scripts or static entry points.
-`WebRunUi.kt` configures and controls runs; `WebRunSessions.kt` owns one run per project. Each run starts
+`web/ProjectDetector.kt` inspects bounded project folders and decides how each app starts:
+- a project `vite` dev script;
+- a framework's own dev command (`launch`: Vite, SvelteKit, Next.js, Astro, Nuxt, Angular, Create React
+  App, Expo web), run from `node_modules/.bin` on `127.0.0.1` and `$PORT`;
+- static files;
+- a custom command.
+
+Package managers are npm, pnpm, Yarn and Bun. `WebQuickRun.kt` is the dock's one-tap Run: the last
+settings or defaults, dependencies installed when missing, a free port. `WebRunUi.kt` has the server card
+and the options sheet, and `WebRunSessions.kt` owns one run per project. Each run starts
 `assets/web-runner.cjs` in a managed terminal without an idle-shell fallback. The Node supervisor owns a
 loopback HTTP listener, serves static files or proxies Vite HTTP/HMR, writes per-run atomic status, and
 stops its child process group on request. Browser readiness checks include a unique run ID. Android's
@@ -89,11 +124,24 @@ as `ChatModel`s and reconnects with backoff unless the host disconnected it.
 
 ## Optional toolchains
 
-`ToolSetup` entries marked `optional` (Python, Build tools, Utilities, Editors, Go, Rust, Ruby) are separate packs.
+`ToolSetup` entries marked `optional` (42 of them: Python, Build tools, Utilities, Editors, Go, Rust, Ruby,
+JavaScript runtimes, Java & Kotlin, PHP, Dart, .NET, Databases, Swift, Zig, Elixir, Lua, Crystal, Nim, Haskell,
+Scala, D, Perl, Shell, CLI tools, Servers, DevOps, Media, Local AI, Linux distros, Native libraries, Python
+science, Debugging, Language servers, Networking, Security, Data tools, Task runners, Docs, Archives, OCR & PDF and
+a headless browser) are separate packs.
 Each has its own script (`assets/<pack>-setup.sh`, generic: it reads `YURLUNGR_PACKAGES_<PACK>`, the space need and
 `YURLUNGR_CHECKS_<PACK>` from the generated `toolchain.sh`), its own Install button in System checks (one "(optional)" group
 each; a missing tool is Info, not a warning) and its own `Fix`. To add a pack: a `ToolSetup` entry, its `Tool` probes, a
-`Fix` entry, and a copy of a pack script. The managed agent notes list the packs that are installed, refreshed on app launch.
+`Fix` entry (with its branches in `SetupScreen`), and a copy of a pack script. `browser-setup.sh` is the one custom script: it
+enables Termux's x11 repository first. The managed agent notes list the packs that are installed, refreshed on app launch.
+
+Tools with `onlyIf` (optional agents) are checked only when installed, by System checks and by the scripts
+(`YURLUNGR_ONLY_IF` in `toolchain.sh`). JVM tools have a longer probe time (`Tool.timeoutS`).
+`setup/DevEnvironmentScreen.kt` (Settings → Development environment) shows several things:
+- the JDK switcher and JDK installs;
+- the Gradle toolchain list;
+- the full environment, with copyable exports;
+- every pack.
 
 ## Navigation
 
@@ -115,7 +163,7 @@ Transitions come from `ui/Motion.kt`.
 | `terminal/` | Terminal sessions and screen |
 | `web/` | Project detection, saved run configuration, supervisor registry and Run UI |
 | `remote/` | Phone-to-phone protocol, server and client |
-| `setup/` | System checks (first-run screen) and Settings |
+| `setup/` | System checks (first-run screen), Settings and Development environment |
 | `ui/` | Theme, shared components, motion, loaders, icons, sidebar |
 | `MainActivity.kt` | Routes and navigation |
 

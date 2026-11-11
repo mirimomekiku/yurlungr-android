@@ -56,6 +56,19 @@ Shared building blocks in `ui/Common.kt` and `ui/Chips.kt`:
 
 Screens compose these rather than styling from scratch.
 
+Patterns used across screens:
+
+- **Bottom sheets, not dialogs** (`ui/Sheets.kt` `AppSheet`), with actions pinned at the bottom.
+- **Segmented controls:** a rounded track with a raised thumb. Used for the project tabs, the Files
+  filter and History's branch scope. A count badge widens its segment rather than being clipped.
+- **The project dock:** at most three buttons: Chat, the project's main action, and **More**, which opens
+  a sheet listing every other tool with a line saying what it does. A small ringed dot marks a tool that
+  needs you (orange) or is live (green).
+- **Git status letters** (U, A, M, D, R, !) in a tinted rounded square, shared by Changes, Files and
+  commit details, with the same colours in summaries.
+- **Headers that get out of the way:** the project's stat tiles and tabs fade and slide up while you
+  scroll down, and return when you scroll up.
+
 ## Motion and loading
 
 `ui/Motion.kt` holds the timing tokens and screen transitions (direction-aware slides for push/pop,
