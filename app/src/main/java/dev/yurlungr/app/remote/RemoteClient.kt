@@ -32,7 +32,11 @@ import java.security.GeneralSecurityException
 import java.util.UUID
 
 /** A phone this one can connect to. [address] is a Tailscale IP / MagicDNS name, optionally with :port. */
-data class RemoteHost(val id: String, val name: String, val address: String, val code: String)
+data class RemoteHost(
+    val id: String, val name: String, val address: String, val code: String,
+    /** This phone's own id and secret on that host, given after the first pairing (see RemoteTrust). */
+    val deviceId: String? = null, val secret: String? = null,
+)
 
 data class RemoteChatSummary(val id: String, val agent: Agent, val title: String, val folder: String, val state: ChatState, val updatedAt: Long)
 
@@ -51,7 +55,7 @@ object RemoteHosts {
         runCatching {
             Json.parseToJsonElement(raw).jsonArray.forEach { el ->
                 val o = el.jsonObject
-                hosts += RemoteHost(o.str("id") ?: return@forEach, o.str("name").orEmpty(), o.str("address").orEmpty(), o.str("code").orEmpty())
+                hosts += RemoteHost(o.str("id") ?: return@forEach, o.str("name").orEmpty(), o.str("address").orEmpty(), o.str("code").orEmpty(), o.str("deviceId"), o.str("secret"))
             }
         }
     }
@@ -71,9 +75,20 @@ object RemoteHosts {
 
     fun get(id: String) = hosts.firstOrNull { it.id == id }
 
+    /** Saves (or clears) the id and secret the host gave this phone. */
+    fun setTrust(hostId: String, deviceId: String?, secret: String?) {
+        val i = hosts.indexOfFirst { it.id == hostId }.takeIf { it >= 0 } ?: return
+        hosts[i] = hosts[i].copy(deviceId = deviceId, secret = secret)
+        save()
+    }
+
     private fun save() {
         val arr = JsonArray(hosts.map { h ->
-            buildJsonObject { put("id", h.id); put("name", h.name); put("address", h.address); put("code", h.code) }
+            buildJsonObject {
+                put("id", h.id); put("name", h.name); put("address", h.address); put("code", h.code)
+                h.deviceId?.let { put("deviceId", it) }
+                h.secret?.let { put("secret", it) }
+            }
         })
         appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { putString("hosts", arr.toString()) }
     }
@@ -114,6 +129,11 @@ class RemoteConnection(val host: RemoteHost) {
     @Volatile private var socket: WebSocketClient? = null
     /** The current socket's sealed channel, once the host proved it knows the code. */
     @Volatile private var channel: SecureChannel? = null
+    /** This phone's id and secret on the host, once it has them; the code until then. */
+    @Volatile private var deviceId: String? = host.deviceId
+    @Volatile private var secret: String? = host.secret
+    /** What this handshake proves: the secret when there is one, else the pairing code. */
+    private val key: String get() = secret ?: host.code
     private var wanted = false
     private var retryDelayMs = 2_000L
 
@@ -152,18 +172,19 @@ class RemoteConnection(val host: RemoteHost) {
                             put("t", "hello")
                             put("v", RemoteProtocol.VERSION)
                             put("nonce", RemotePairing.toHex(mine))
-                            put("proof", RemotePairing.toHex(RemotePairing.clientProof(this@RemoteConnection.host.code, nonce, mine)))
+                            if (secret != null) deviceId?.let { put("id", it) }
+                            put("proof", RemotePairing.toHex(RemotePairing.clientProof(key, nonce, mine)))
                             put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
                         }.toString())
                     }
                     "auth" -> {
                         val hn = hostNonce ?: return close(CLOSE_POLICY, "Unexpected auth")
                         val cn = clientNonce ?: return close(CLOSE_POLICY, "Unexpected auth")
-                        val expected = RemotePairing.hostProof(this@RemoteConnection.host.code, hn, cn)
+                        val expected = RemotePairing.hostProof(key, hn, cn)
                         if (this@RemoteConnection.channel != null || !RemotePairing.matches(expected, RemotePairing.fromHex(msg.str("proof"), expected.size))) {
                             return close(CLOSE_BAD_HOST, "")
                         }
-                        this@RemoteConnection.channel = RemotePairing.channel(this@RemoteConnection.host.code, hn, cn, isHost = false)
+                        this@RemoteConnection.channel = RemotePairing.channel(key, hn, cn, isHost = false)
                     }
                     // Anything else in the clear is ignored: once paired, the host only sends sealed frames.
                 }
@@ -225,6 +246,15 @@ class RemoteConnection(val host: RemoteHost) {
             return
         }
         if (code == CLOSE_BAD_CODE) {
+            if (secret != null) {
+                // The host forgot this phone (removed it, or was reinstalled): pair again with the code.
+                secret = null
+                deviceId = null
+                RemoteHosts.setTrust(host.id, null, null)
+                status = Status.Failed("The host no longer knows this phone. Pairing again with the code…", retrying = wanted)
+                if (wanted) scheduleRetry()
+                return
+            }
             wanted = false
             status = Status.Failed("The host rejected the pairing code. Check the code shown on the host.", retrying = false)
             return
@@ -276,6 +306,15 @@ class RemoteConnection(val host: RemoteHost) {
     }).also { openChats[id] = it }
 
     private fun handle(msg: JsonObject) {
+        if (msg.str("t") == "trust") {
+            // Our own secret from now on: the host can then remove this phone alone, and a new code doesn't affect it.
+            val id = msg.str("id") ?: return
+            val s = msg.str("secret")?.takeIf { it.length == RemoteTrust.SECRET_BYTES * 2 } ?: return
+            deviceId = id
+            secret = s
+            RemoteHosts.setTrust(host.id, id, s)
+            return
+        }
         when (msg.str("t")) {
             "welcome" -> {
                 status = Status.Connected

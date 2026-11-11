@@ -119,7 +119,7 @@ fun DevicesScreen(onBack: () -> Unit, onOpenHost: (RemoteHost) -> Unit) {
     val canHost = remember { RuntimePaths(context).isBootstrapInstalled }
     var adding by remember { mutableStateOf(false) }
     var pairing by remember { mutableStateOf(false) }
-    val tailscaleOn = remember(RemoteServer.status) { RemoteServer.tailscaleAddresses().isNotEmpty() }
+    val tailscaleOn = remember(RemoteServer.status) { RemoteServer.tailscaleAddresses(context).isNotEmpty() }
 
     val nodes: List<Node> = RemoteServer.devices.map { Node.Client(it) } + RemoteHosts.hosts.map { Node.Host(it) }
     var selectedKey by remember { mutableStateOf<String?>(null) }
@@ -474,7 +474,35 @@ private fun ShareGroup() {
                 subtitleColor = MaterialTheme.colorScheme.error,
                 trailing = { TextButton(onClick = { RemoteServer.start() }) { Text("Retry") } },
             )
+            RemoteServer.Status.Starting -> GroupRow("Starting…", subtitle = "Opening port ${RemoteProtocol.DEFAULT_PORT}", trailing = {})
             RemoteServer.Status.Off -> Unit
+        }
+        var allowSkip by remember { mutableStateOf(RemoteServer.allowRemoteSkip) }
+        GroupRow(
+            "Paired devices may skip approvals",
+            subtitle = "Off: chats started from another device always ask before running commands or changing files.",
+            trailing = { Switch(checked = allowSkip, onCheckedChange = { allowSkip = it; RemoteServer.allowRemoteSkip = it }) },
+        )
+        // Devices that paired once and reconnect with their own key.
+        var removing by remember { mutableStateOf<TrustedDevice?>(null) }
+        for (d in RemoteServer.trusted.sortedByDescending { it.lastSeen }) {
+            val connected = RemoteServer.devices.any { it.trustedId == d.id }
+            GroupRow(
+                d.name,
+                subtitle = (if (connected) "Connected now" else "Last seen " + android.text.format.DateUtils.getRelativeTimeSpanString(d.lastSeen)) +
+                    " · paired " + android.text.format.DateUtils.formatDateTime(context, d.added, android.text.format.DateUtils.FORMAT_SHOW_DATE),
+                icon = Ph.DeviceMobile,
+                trailing = { TextButton(onClick = { removing = d }) { Text("Remove") } },
+            )
+        }
+        removing?.let { d ->
+            AlertDialog(
+                onDismissRequest = { removing = null },
+                title = { Text("Remove ${d.name}?") },
+                text = { Text("It's disconnected and can't connect again without pairing. The pairing code changes too; other paired devices aren't affected.") },
+                confirmButton = { TextButton(onClick = { RemoteServer.revoke(d.id); removing = null }) { Text("Remove") } },
+                dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } },
+            )
         }
         GroupRow(
             "Also allow local Wi-Fi",
@@ -510,7 +538,7 @@ private fun PairDialog(onDismiss: () -> Unit) {
                         BigField("Pairing code", RemoteServer.code)
                     }
                     is RemoteServer.Status.Failed -> Text(status.message, color = MaterialTheme.colorScheme.error)
-                    RemoteServer.Status.Off -> Text("Starting…")
+                    RemoteServer.Status.Off, RemoteServer.Status.Starting -> Text("Starting…")
                 }
             }
         },
@@ -561,6 +589,10 @@ private fun AddHostDialog(onDismiss: () -> Unit, onAdd: (String, String, String)
 }
 
 private fun copyText(context: Context, text: String) {
-    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("yurlungr", text))
+    // Sensitive: keeps the pairing code out of clipboard previews and keyboard clipboard sync.
+    val clip = ClipData.newPlainText("yurlungr", text).apply {
+        description.extras = android.os.PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
+    }
+    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
     Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
 }
