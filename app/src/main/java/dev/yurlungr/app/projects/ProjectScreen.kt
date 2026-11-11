@@ -136,6 +136,8 @@ fun ProjectScreen(
     onAgentSettings: () -> Unit = {},
     /** Opens a file at a line (search results, problems, test failures). */
     onOpenFileAt: (File, Int?) -> Unit = { f, _ -> onOpenFile(f) },
+    /** The merge view for a conflicted file. */
+    onResolveConflict: (File) -> Unit = onOpenFile,
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -301,6 +303,7 @@ fun ProjectScreen(
                     onCommitMessageChange = { commitMessage = it },
                     onCommit = ::commit,
                     onOpenFile = onOpenFile,
+                    onResolveConflict = onResolveConflict,
                     onGit = { label, block -> runGit(label, quiet = true, block = block) },
                     // Shown live in a terminal sheet: progress, prompts and git's own messages.
                     onPull = { gitTerminal = "Pull" to listOf("pull", "--ff-only") },
@@ -602,7 +605,24 @@ fun UnifiedDiff(diff: String) = DiffViewer(diff)
 @Composable
 private fun ChatsTab(dir: File, onOpenChat: (ChatSession) -> Unit) {
     val chats = ChatSessions.chats.filter { it.cwd.path == dir.path }
+    val context = LocalContext.current
+    // Per-chat turns and time, from the checkpoint records.
+    val stats by produceState(emptyMap<String, dev.yurlungr.app.chat.Checkpoints.Stats>(), chats.size) {
+        value = withContext(Dispatchers.IO) { chats.associate { it.id to dev.yurlungr.app.chat.Checkpoints.stats(context, it.id) } }
+    }
     LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
+        if (chats.isNotEmpty()) item {
+            val turns = stats.values.sumOf { it.turns }
+            val millis = stats.values.sumOf { it.millis }
+            val costs = chats.mapNotNull { it.usage }.filter { it.costAmount != null }.groupBy { it.currency ?: "USD" }
+                .map { (cur, list) -> String.format(java.util.Locale.US, "%.2f %s", list.sumOf { it.costAmount!! }, cur) }
+            Text(
+                listOfNotNull("${chats.size} chat${if (chats.size == 1) "" else "s"}", "$turns prompts", "${dev.yurlungr.app.chat.duration(millis)} working",
+                    costs.takeIf { it.isNotEmpty() }?.joinToString(" + ")?.let { "$it reported" }).joinToString(" · "),
+                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, top = 4.dp),
+            )
+        }
         if (chats.isEmpty()) {
             item {
                 Text(
@@ -629,7 +649,7 @@ private fun ChatsTab(dir: File, onOpenChat: (ChatSession) -> Unit) {
                 Column(Modifier.weight(1f)) {
                     Text(chat.title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        chat.agent.displayName + when (chat.state) {
+                        chat.agent.displayName + (stats[chat.id]?.turns?.takeIf { it > 0 }?.let { " · $it prompts" } ?: "") + when (chat.state) {
                             ChatState.Running -> " · working…"
                             ChatState.AuthRequired -> " · needs sign-in"
                             ChatState.Saved -> ""

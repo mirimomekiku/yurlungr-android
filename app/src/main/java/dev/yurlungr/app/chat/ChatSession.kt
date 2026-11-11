@@ -443,7 +443,10 @@ class ChatSession(
         state = ChatState.Running
         changed()
         promptJob = scope.launch {
+            var turn: ChatTurn? = null
             try {
+                // A checkpoint of the project before the agent works, so this turn can be undone.
+                turn = runCatching { Checkpoints.begin(appContext, id, cwd, text) }.getOrNull()
                 val blocks = withContext(Dispatchers.IO) { Attachments.toPromptBlocks(cwd, attachments, caps) }
                 val result = conn.request("session/prompt", buildJsonObject {
                     put("sessionId", sid)
@@ -486,6 +489,9 @@ class ChatSession(
                 Log.e(TAG, "prompt failed", e)
                 add(ChatItem.Notice("Couldn't send: ${e.message ?: e.toString()}", isError = true))
                 state = ChatState.Ready
+            } finally {
+                // And after, whatever happened (done, stopped, failed): what the turn changed.
+                turn?.let { t -> withContext(kotlinx.coroutines.NonCancellable) { runCatching { Checkpoints.end(appContext, id, cwd, t) } } }
             }
             changed()
         }

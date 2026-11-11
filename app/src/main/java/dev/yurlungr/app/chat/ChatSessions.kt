@@ -77,7 +77,7 @@ object ChatSessions {
         onRegistryChanged?.invoke()
         NotificationManagerCompat.from(context).cancel(chat.id.hashCode())
         val id = chat.id
-        io.execute { ChatStore.delete(appContext, id) }
+        io.execute { ChatStore.delete(appContext, id); Checkpoints.delete(appContext, id) }
         RuntimeService.refresh(context)
     }
 
@@ -122,7 +122,7 @@ object ChatSessions {
         if (appVisible) {
             // In the app: the sticky banner shows it; add the sound so it isn't missed.
             runCatching {
-                android.media.RingtoneManager.getRingtone(context, android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION))?.play()
+                dev.yurlungr.app.ui.Feedback.signal(context, dev.yurlungr.app.ui.Feedback.Kind.NeedsYou)
             }
             return
         }

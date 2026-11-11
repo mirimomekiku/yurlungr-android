@@ -156,6 +156,11 @@ fun ChatScreen(
  */
 @Composable
 private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Unit)?, onStop: () -> Unit, onDelete: () -> Unit) {
+    var sheet by remember { mutableStateOf<String?>(null) }
+    when (sheet) {
+        "checkpoints" -> (chat as? ChatSession)?.let { CheckpointsSheet(it) { sheet = null } }
+        "usage" -> UsageSheet(chat) { sheet = null }
+    }
     var menu by remember { mutableStateOf(false) }
     val model = chat.configOptions.firstOrNull { it.category == "model" }?.currentName?.takeIf { it.isNotBlank() }
     val lilac = AppColors.tiles.lilac
@@ -203,6 +208,16 @@ private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Un
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                if (chat is ChatSession) DropdownMenuItem(
+                    leadingIcon = { PhIcon(Ph.ClockCounterClockwise, null, size = 18.dp) },
+                    text = { Text("Checkpoints") },
+                    onClick = { menu = false; sheet = "checkpoints" },
+                )
+                DropdownMenuItem(
+                    leadingIcon = { PhIcon(Ph.Lightning, null, size = 18.dp) },
+                    text = { Text("Usage") },
+                    onClick = { menu = false; sheet = "usage" },
+                )
                 DropdownMenuItem(
                     leadingIcon = { PhIcon(Ph.Stop, null, size = 18.dp) },
                     text = { Text("End session") },
