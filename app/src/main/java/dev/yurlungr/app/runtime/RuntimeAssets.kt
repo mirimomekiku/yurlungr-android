@@ -18,6 +18,7 @@ object RuntimeAssets {
         "agents-setup.sh" to File(paths.libexec, "agents-setup.sh"),
         "dev-tools-setup.sh" to File(paths.libexec, "dev-tools-setup.sh"),
         "agent-install.sh" to File(paths.libexec, "agent-install.sh"),
+        "agent-key.sh" to File(paths.libexec, "agent-key.sh"),
         "project-setup.sh" to File(paths.libexec, "project-setup.sh"),
         "pack-remove.sh" to File(paths.libexec, "pack-remove.sh"),
         "self-test.sh" to File(paths.libexec, "self-test.sh"),

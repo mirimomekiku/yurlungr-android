@@ -37,9 +37,12 @@ internal fun packRemoveCommand(pack: ToolSetup): String {
 /** Refreshes the package lists, then upgrades every installed package (in a terminal). */
 internal fun packagesUpgradeCommand(): String = Storage.UPGRADE_COMMAND
 
-/** The command that installs or updates one native-binary agent with `agent-install.sh`. */
+/** The recipes `agent-install.sh` knows: native glibc builds, then Python (uv) packages. */
+internal val AGENT_RECIPES = setOf("copilot", "goose", "opencode", "cline", "kilo", "cursor", "amp", "vibe", "kiro", "fast-agent", "minion")
+
+/** The command that installs or updates one native-binary or Python agent with `agent-install.sh`. */
 internal fun agentInstallCommand(recipe: String): String {
-    require(recipe in setOf("copilot", "goose", "opencode")) { "Unknown agent recipe: $recipe" }
+    require(recipe in AGENT_RECIPES) { "Unknown agent recipe: $recipe" }
     val path = "\"\$PREFIX/libexec/yurlungr/agent-install.sh\""
     return "bash -n $path && bash $path $recipe"
 }
