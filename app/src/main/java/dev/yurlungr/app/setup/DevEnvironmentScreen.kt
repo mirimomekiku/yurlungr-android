@@ -68,7 +68,12 @@ private data class DevEnvState(
     val gradleSynced: Boolean,
     val env: Map<String, String>,
     val packs: Map<ToolSetup, Boolean>,
+    /** Installed package → bytes (dpkg's Installed-Size). */
+    val sizes: Map<String, Long>,
 )
+
+/** Cache sizes and pending updates: slower to read, so loaded separately. */
+private data class DiskState(val caches: List<Pair<dev.yurlungr.app.runtime.CacheDir, Long>>, val updates: Int?)
 
 private fun readState(paths: RuntimePaths): DevEnvState {
     val jdks = Jdks.installed(paths.prefix)
@@ -80,6 +85,7 @@ private fun readState(paths: RuntimePaths): DevEnvState {
         gradleSynced = jdks.isEmpty() || Jdks.withGradleToolchains(props, jdks) == props,
         env = RuntimeEnv.map(paths),
         packs = ToolSetup.entries.filter { it.optional }.associateWith { p -> p.marker?.let { File(paths.prefix, it).exists() } == true },
+        sizes = dev.yurlungr.app.runtime.Storage.installedSizes(paths.prefix),
     )
 }
 
@@ -103,6 +109,17 @@ fun DevEnvironmentScreen(
     var reload by remember { mutableIntStateOf(0) }
     var state by remember { mutableStateOf<DevEnvState?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
+    var disk by remember { mutableStateOf<DiskState?>(null) }
+    /** A confirmation before something that deletes: title, detail, action. */
+    var confirm by remember { mutableStateOf<Triple<String, String, () -> Unit>?>(null) }
+    LaunchedEffect(refreshTick, reload) {
+        val caches = dev.yurlungr.app.runtime.Storage.caches(paths)
+        val du = CommandRunner.shell(paths, dev.yurlungr.app.runtime.Storage.duScript(caches.flatMap { it.paths }), timeoutMs = 120_000)
+        val sizes = dev.yurlungr.app.runtime.Storage.parseDu(du.output)
+        val updates = CommandRunner.shell(paths, dev.yurlungr.app.runtime.Storage.UPGRADABLE_SCRIPT, timeoutMs = 30_000)
+            .output.trim().lines().lastOrNull()?.trim()?.toIntOrNull()
+        disk = DiskState(caches.map { c -> c to c.paths.sumOf { sizes[it.path] ?: 0L } }.filter { it.second > 0 }, updates)
+    }
     LaunchedEffect(refreshTick, reload) {
         state = withContext(Dispatchers.IO) {
             // A JDK installed since the last launch: let Gradle know about it right away.
@@ -133,6 +150,7 @@ fun DevEnvironmentScreen(
             }
         }
         val s = state
+        confirm?.let { (title, detail, action) -> ConfirmSheet(title, detail, onDismiss = { confirm = null }, onConfirm = action) }
         LazyColumn(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -182,6 +200,22 @@ fun DevEnvironmentScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 6.dp),
+                )
+            }
+
+            // Processes started before a switch keep their JDK until they're restarted.
+            val currentHome = s.current?.home?.path
+            val staleChats = dev.yurlungr.app.chat.ChatSessions.chats.count { it.isLive && it.launchedJavaHome != null && it.launchedJavaHome != currentHome }
+            val staleTerminals = dev.yurlungr.app.terminal.TerminalSessions.sessions.count { t ->
+                t.isRunning && dev.yurlungr.app.terminal.TerminalSessions.javaHomes[t].let { it != null && it != currentHome }
+            }
+            if (currentHome != null && staleChats + staleTerminals > 0) item {
+                val parts = listOfNotNull(
+                    staleChats.takeIf { it > 0 }?.let { "$it chat${if (it == 1) "" else "s"}" },
+                    staleTerminals.takeIf { it > 0 }?.let { "$it terminal${if (it == 1) "" else "s"}" },
+                )
+                dev.yurlungr.app.ui.WarningBanner(
+                    "${parts.joinToString(" and ")} still use the previous JDK. Reopen them to use Java ${s.current?.version}.",
                 )
             }
 
@@ -237,16 +271,104 @@ fun DevEnvironmentScreen(
                 }
             }
 
+            item { SectionLabel("Updates") }
+            item {
+                Group {
+                    val n = disk?.updates
+                    GroupRow(
+                        when { disk == null -> "Checking…"; n == null -> "Couldn't read the package lists"; n == 0 -> "Everything is up to date"; else -> "$n package update${if (n == 1) "" else "s"}" },
+                        subtitle = "From the package lists on the phone. Check now downloads the latest lists.",
+                        icon = Ph.CloudArrowDown,
+                        tile = AppColors.tiles.sky,
+                        trailing = {
+                            if ((n ?: 0) > 0) TextButton(onClick = { runInTerminal(dev.yurlungr.app.runtime.packagesUpgradeCommand(), "Update packages") }) { Text("Update all") }
+                            else TextButton(enabled = busy == null, onClick = {
+                                busy = "update"
+                                scope.launch {
+                                    val r = CommandRunner.run(paths, listOf(File(paths.bin, "apt-get").path, "update", "-qq"), timeoutMs = 180_000)
+                                    if (!r.ok) Toast.makeText(context, r.describe("Checking for updates"), Toast.LENGTH_LONG).show()
+                                    busy = null
+                                    reload++
+                                }
+                            }) { Text("Check now") }
+                        },
+                    )
+                }
+            }
+
+            item { SectionLabel("Storage") }
+            item {
+                Group {
+                    val d = disk
+                    if (d == null) GroupRow("Measuring caches…", icon = Ph.FloppyDisk, trailing = {})
+                    else if (d.caches.isEmpty()) GroupRow("No caches to clear", icon = Ph.FloppyDisk, trailing = {})
+                    else {
+                        GroupRow(
+                            "Caches: ${dev.yurlungr.app.runtime.Storage.human(d.caches.sumOf { it.second })}",
+                            subtitle = "Downloads that tools keep to work faster. Clearing them is safe: they're fetched again when needed.",
+                            icon = Ph.FloppyDisk,
+                            tile = AppColors.tiles.peach,
+                            trailing = {},
+                        )
+                        for ((cache, bytes) in d.caches.sortedByDescending { it.second }) {
+                            GroupRow(
+                                cache.title,
+                                subtitle = dev.yurlungr.app.runtime.Storage.human(bytes) + " · " +
+                                    cache.paths.joinToString { it.path.replace(paths.home.path, "~").replace(paths.prefix.path, "\$PREFIX") },
+                                subtitleLines = 2,
+                                trailing = {
+                                    TextButton(enabled = busy == null, onClick = {
+                                        confirm = Triple("Clear the ${cache.title.lowercase()}?", "Frees ${dev.yurlungr.app.runtime.Storage.human(bytes)}. Builds and installs download what they need again.") {
+                                            busy = cache.id
+                                            scope.launch {
+                                                val r = CommandRunner.shell(paths, cache.clean, timeoutMs = 300_000)
+                                                Toast.makeText(context, if (r.ok) "Cleared" else r.describe("Clearing the cache"), Toast.LENGTH_SHORT).show()
+                                                busy = null
+                                                reload++
+                                            }
+                                        }
+                                    }) { Text("Clean") }
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+
+            item { SectionLabel("Self-test") }
+            item {
+                Group {
+                    GroupRow(
+                        "Check the environment",
+                        subtitle = "Quick reads only: tools, JAVA_HOME, PATH, git, search, notifications. Full also installs two small packs, switches the JDK and back, and runs a Vite app (about 30 MB). Report: ~/self-test-report.txt",
+                        subtitleLines = 4,
+                        icon = Ph.ShieldCheck,
+                        tile = AppColors.tiles.lime,
+                        trailing = {
+                            TextButton(onClick = { runInTerminal("bash \"\$PREFIX/libexec/yurlungr/self-test.sh\"", "Self-test") }) { Text("Quick") }
+                            TextButton(onClick = { runInTerminal("bash \"\$PREFIX/libexec/yurlungr/self-test.sh\" --full", "Self-test (full)") }) { Text("Full") }
+                        },
+                    )
+                }
+            }
+
             item { SectionLabel("Runtime packs") }
             item {
                 Group {
                     for ((pack, installed) in s.packs) {
+                        val size = dev.yurlungr.app.runtime.Storage.packSize(pack, s.sizes)
                         GroupRow(
                             pack.title,
-                            subtitle = pack.blurb,
+                            subtitle = (if (installed && size > 0) dev.yurlungr.app.runtime.Storage.human(size) + " · " else "") + pack.blurb,
                             subtitleLines = 2,
                             trailing = {
-                                if (installed) Badge("Installed", AppColors.status.success)
+                                if (installed) TextButton(onClick = {
+                                    confirm = Triple(
+                                        "Remove ${pack.title}?",
+                                        "Removes ${pack.packages.joinToString()}, and packages that depend on them (listed in the terminal first). " +
+                                            "Anything the developer tools, agents or Android SDK need is kept.",
+                                    ) { runInTerminal(dev.yurlungr.app.runtime.packRemoveCommand(pack), "Remove ${pack.title}") }
+                                }) { Text("Remove") }
                                 else TextButton(onClick = { onInstallSetup(pack) }) { Text("Install") }
                             },
                         )
@@ -255,6 +377,23 @@ fun DevEnvironmentScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ConfirmSheet(title: String, detail: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    dev.yurlungr.app.ui.AppSheet(
+        title, onDismiss = onDismiss, icon = Ph.Trash,
+        actions = {
+            androidx.compose.material3.OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("Cancel") }
+            androidx.compose.material3.Button(
+                onClick = { onDismiss(); onConfirm() },
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
+                modifier = Modifier.weight(1f),
+            ) { Text("Continue") }
+        },
+    ) {
+        Text(detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

@@ -28,6 +28,9 @@ object TerminalSessions {
     private const val TRANSCRIPT_ROWS = 5000
 
     val sessions = mutableStateListOf<TerminalSession>()
+
+    /** JAVA_HOME each session started with (a JDK switch applies to new sessions only). */
+    val javaHomes = java.util.WeakHashMap<TerminalSession, String?>()
     var current by mutableStateOf<TerminalSession?>(null)
         private set
 
@@ -144,7 +147,11 @@ object TerminalSessions {
             val login = if (paths.login.canExecute()) paths.login else paths.bash
             login to arrayOf("-${login.name}")
         } else {
-            val status = "_yurlungr_exit=\$?; if [ \"\$_yurlungr_exit\" -ne 0 ]; then printf '\\nCommand failed (exit %s). Review the output above before retrying.\\n' \"\$_yurlungr_exit\"; fi"
+            val status = "_yurlungr_exit=\$?; if [ \"\$_yurlungr_exit\" -ne 0 ]; then printf '\\nCommand failed (exit %s). Review the output above before retrying.\\n' \"\$_yurlungr_exit\"; fi" +
+                // A long command tells the app it ended, for a "finished" notification.
+                "\nif [ \"\$SECONDS\" -ge ${dev.yurlungr.app.runtime.TaskNotifications.MIN_SECONDS} ]; then _t='${paths.inbox}'/.\$\$.tmp; " +
+                "mkdir -p '${paths.inbox}' && printf '%s\\n%s\\n%s' \"\$_yurlungr_exit\" \"\$SECONDS\" '$statusId' > \"\$_t\" && " +
+                "mv \"\$_t\" '${paths.inbox}/'\"\$\$-\$(date +%s%N).done\"; fi"
             // Plain (non-login) bash for the command: the environment already comes from RuntimeEnv, and a
             // profile that exits, execs another shell or starts tmux must not hijack setups and sign-ins.
             // The interactive shell left open afterwards is a normal login shell. Packages' own
@@ -152,11 +159,12 @@ object TerminalSessions {
             val profiled = "${dev.yurlungr.app.runtime.RuntimeEnv.PROFILE_SNIPPET}\n$command"
             paths.bash to arrayOf("bash", "-c", if (keepShell) "$profiled\n$status\n$welcome\nexec bash -l" else profiled)
         }
+        val env = RuntimeEnv.map(paths, cwd) + ("YURLUNGR_SESSION_ID" to statusId)
         val session = TerminalSession(
             shell.path,
             cwd.path,
             args,
-            (RuntimeEnv.map(paths, cwd) + ("YURLUNGR_SESSION_ID" to statusId)).map { (key, value) -> "$key=$value" }.toTypedArray(),
+            env.map { (key, value) -> "$key=$value" }.toTypedArray(),
             TRANSCRIPT_ROWS,
             client,
         )
@@ -164,6 +172,7 @@ object TerminalSessions {
         commands[session] = command
         cwds[session] = cwd
         startedAt[session] = System.currentTimeMillis()
+        javaHomes[session] = env["JAVA_HOME"]
         if (name != null) names[session] = name
         if (index != null && index in 0..sessions.size) sessions.add(index, session) else sessions += session
         current = session

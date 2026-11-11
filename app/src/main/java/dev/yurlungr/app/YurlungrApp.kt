@@ -38,6 +38,9 @@ class YurlungrApp : Application() {
                         description = "An agent is waiting for you to approve or answer"
                         enableVibration(true)
                     },
+                    NotificationChannel(CHANNEL_TASKS, "Finished tasks", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                        description = "A long terminal command (build, install, tests) finished, or a script asked to tell you"
+                    },
                 ),
             )
         }
@@ -60,6 +63,7 @@ class YurlungrApp : Application() {
     companion object {
         const val CHANNEL_RUNTIME = "runtime"
         const val CHANNEL_ATTENTION = "attention"
+        const val CHANNEL_TASKS = "tasks"
         /** Retired: finished-turn alerts no longer notify. Removed at startup so it doesn't linger in settings. */
         const val CHANNEL_AGENTS = "agents"
     }

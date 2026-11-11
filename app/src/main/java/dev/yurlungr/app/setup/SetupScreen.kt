@@ -2,6 +2,7 @@
 
 package dev.yurlungr.app.setup
 
+import androidx.core.net.toUri
 import dev.yurlungr.app.runtime.ToolSetup
 import dev.yurlungr.app.runtime.Toolchain
 import dev.yurlungr.app.ui.FlowBar
@@ -90,7 +91,7 @@ private val AREAS = listOf(
     "Tools" to listOf(
         "agents", "tool-gemini", "tool-codex", "tool-codex-acp", "tool-claude", "tool-claude-agent-acp", "tool-agy", "setup-agents-setup",
         "tool-qwen", "tool-kimi", "tool-auggie", "tool-commandcode", "tool-copilot", "tool-goose", "tool-opencode",
-        "android-sdk", "tool-java", "jdk", "tool-aapt2", "setup-android-sdk-setup", "cli-report",
+        "android-sdk", "tool-java", "jdk", "tool-aapt2", "updates", "setup-android-sdk-setup", "cli-report",
     ),
     // One group per optional pack, each with its own Install button.
     *ToolSetup.entries.filter { it.optional }.map { pack ->
@@ -122,6 +123,7 @@ fun SetupScreen(
     onHome: () -> Unit,
     onDevices: () -> Unit,
     onDevEnvironment: () -> Unit = {},
+    onUpdatePackages: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var logPath by remember { mutableStateOf<String?>(null) }
@@ -147,6 +149,7 @@ fun SetupScreen(
         Fix.ReinstallBootstrap -> confirmReinstall = true
         Fix.RepairRuntime -> vm.repairRuntime()
         Fix.ChooseJdk -> onDevEnvironment()
+        Fix.UpdatePackages -> onUpdatePackages()
     }
 
     val byId = vm.checks.associateBy { it.id }
@@ -406,6 +409,7 @@ private fun shortFixLabel(fix: Fix) = when (fix) {
     Fix.ReinstallBootstrap -> "Reinstall"
     Fix.RepairRuntime -> "Repair"
     Fix.ChooseJdk -> "Change"
+    Fix.UpdatePackages -> "Update all"
 }
 
 @Composable
@@ -499,7 +503,7 @@ internal fun openNotificationSettings(context: Context) {
     val intent = if (android.os.Build.VERSION.SDK_INT >= 26) {
         Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
     } else {
-        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
+        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:${context.packageName}".toUri())
     }
     startSafely(context, intent)
 }
@@ -511,7 +515,7 @@ internal fun openNotificationSettings(context: Context) {
 @SuppressLint("BatteryLife") // the user explicitly asks for this from settings
 internal fun requestBatteryExemption(context: Context) {
     val pm = context.getSystemService(android.os.PowerManager::class.java)
-    val app = Uri.parse("package:${context.packageName}")
+    val app = "package:${context.packageName}".toUri()
     if (pm.isIgnoringBatteryOptimizations(context.packageName)) {
         Toast.makeText(context, "Already unrestricted. Opening battery settings.", Toast.LENGTH_SHORT).show()
         startFirst(

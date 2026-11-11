@@ -1,5 +1,6 @@
 package dev.yurlungr.app.setup
 
+import androidx.core.content.edit
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Build
@@ -37,6 +38,8 @@ enum class Fix(val setup: ToolSetup? = null) {
     RepairRuntime,
     /** Pick the default JDK (Settings → Development environment). */
     ChooseJdk,
+    /** Upgrade the installed packages (apt full-upgrade in a terminal). */
+    UpdatePackages,
 }
 
 data class Check(
@@ -77,6 +80,7 @@ object DoctorChecks {
                 add(agents(paths))
                 add(androidSdk(paths))
                 jdk(paths)?.let(::add)
+                updates(paths)?.let(::add)
                 addAll(setupRuns(paths))
             }
             add(notifications(context))
@@ -87,7 +91,7 @@ object DoctorChecks {
     }
 
     fun markPhantomFixDone(context: Context, done: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_PHANTOM_DONE, done).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { putBoolean(KEY_PHANTOM_DONE, done) }
     }
 
     fun readReport(context: Context): List<ReportLine> {
@@ -364,6 +368,19 @@ object DoctorChecks {
                 required = false,
             )
         }
+
+    /** Package updates known from the lists already on the phone (no download), when there are any. */
+    private suspend fun updates(paths: RuntimePaths): Check? {
+        val n = CommandRunner.shell(paths, dev.yurlungr.app.runtime.Storage.UPGRADABLE_SCRIPT, timeoutMs = 30_000)
+            .output.trim().lines().lastOrNull()?.trim()?.toIntOrNull() ?: return null
+        if (n <= 0) return null
+        return Check(
+            "updates", "Package updates", CheckStatus.Info,
+            "$n package${if (n == 1) "" else "s"} can be upgraded. Update all refreshes the lists first.",
+            fix = Fix.UpdatePackages,
+            required = false,
+        )
+    }
 
     /** Which JDK is the default, and the others installed; Change opens Development environment. */
     private fun jdk(paths: RuntimePaths): Check? {

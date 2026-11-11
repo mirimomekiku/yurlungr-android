@@ -27,6 +27,16 @@ internal fun projectSetupCommand(dir: java.io.File, packages: List<String>, step
     return "bash -n $path && bash $path " + (listOf(dir.path, packages.joinToString(" ")) + steps).joinToString(" ") { q(it) }
 }
 
+/** The command that removes an optional pack's packages with `pack-remove.sh`. */
+internal fun packRemoveCommand(pack: ToolSetup): String {
+    require(pack.optional) { "Only optional packs can be removed" }
+    val path = "\"\$PREFIX/libexec/yurlungr/pack-remove.sh\""
+    return "bash -n $path && bash $path ${pack.name.uppercase()}"
+}
+
+/** Refreshes the package lists, then upgrades every installed package (in a terminal). */
+internal fun packagesUpgradeCommand(): String = Storage.UPGRADE_COMMAND
+
 /** The command that installs or updates one native-binary agent with `agent-install.sh`. */
 internal fun agentInstallCommand(recipe: String): String {
     require(recipe in setOf("copilot", "goose", "opencode")) { "Unknown agent recipe: $recipe" }

@@ -19,6 +19,8 @@ object RuntimeAssets {
         "dev-tools-setup.sh" to File(paths.libexec, "dev-tools-setup.sh"),
         "agent-install.sh" to File(paths.libexec, "agent-install.sh"),
         "project-setup.sh" to File(paths.libexec, "project-setup.sh"),
+        "pack-remove.sh" to File(paths.libexec, "pack-remove.sh"),
+        "self-test.sh" to File(paths.libexec, "self-test.sh"),
         "android-sdk-setup.sh" to File(paths.libexec, "android-sdk-setup.sh"),
         "motd.sh" to File(paths.libexec, "motd.sh"),
     )
@@ -81,6 +83,7 @@ object RuntimeAssets {
 
         writeShim(paths, "yurlungr-open", openShim(paths))
         writeShim(paths, "yurlungr-install", installShim(paths))
+        writeShim(paths, "yurlungr-notify", notifyShim(paths))
         for (alias in OPEN_ALIASES) {
             // An alias the user replaced with something else (e.g. a folder) is left alone.
             runCatching {
@@ -139,6 +142,14 @@ object RuntimeAssets {
         |echo "Install prompt shown for ${'$'}apk — confirm it on screen." >&2
         |""".trimMargin()
 
+    private fun notifyShim(paths: RuntimePaths) = """
+        |#!${paths.bin}/sh
+        |# Shows a notification on this phone (a toast while the app is open): yurlungr-notify "title" ["text"]
+        |if [ $# -lt 1 ] || [ $# -gt 2 ]; then echo "usage: yurlungr-notify <title> [text]" >&2; exit 64; fi
+        |msg=${'$'}(printf '%s\n%s' "${'$'}1" "${'$'}{2:-}")
+        |${submit(paths, "\"\$msg\"", "notify")}
+        |""".trimMargin()
+
     private fun submit(paths: RuntimePaths, valueExpr: String, kind: String) = """
         |inbox='${paths.inbox}'
         |mkdir -p "${'$'}inbox"
@@ -170,6 +181,7 @@ object RuntimeAssets {
         |  only an empty settings.gradle, then copy gradlew + gradle/ in. NDK/CMake native code is not supported.
         |- Install an APK on this phone with `yurlungr-install path/to/app.apk` (the user confirms on screen).
         |- Open a URL in the phone's browser with `xdg-open <url>`.
+        |- Tell the user something finished with `yurlungr-notify "Title" "details"` (a phone notification).
         |- GitHub: use `git` and `gh`. The user signs in from the app's Projects screen (gh auth + git credential
         |  helper), so pushes work once they have. Don't ask for tokens or passwords.
         |- Optional toolchains installed from System checks: ${installedPacks(paths)}. Anything else: `pkg install <name>`.

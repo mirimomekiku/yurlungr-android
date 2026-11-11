@@ -1,5 +1,6 @@
 package dev.yurlungr.app.runtime
 
+import androidx.core.net.toUri
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -85,6 +86,8 @@ object RuntimeBridge {
             when (kind) {
                 "open" -> open(context, value)
                 "install" -> install(context, File(value))
+                "notify" -> TaskNotifications.notify(context, value)
+                "done" -> TaskNotifications.commandDone(context, value)
             }
         }
     }
@@ -114,7 +117,7 @@ object RuntimeBridge {
     }
 
     fun open(context: Context, url: String) {
-        val uri = Uri.parse(url)
+        val uri = url.toUri()
         // Only web links: the runtime must not be able to fire arbitrary intents.
         if (uri.scheme?.lowercase() !in setOf("http", "https")) {
             Log.w(TAG, "Ignoring non-http(s) URL: $url")

@@ -163,6 +163,13 @@ class ChatSession(
     /** Last stderr lines, shown when the agent fails to start. */
     private val stderrTail = ArrayDeque<String>()
     private var connection: AcpConnection? = null
+
+    /** JAVA_HOME the agent process started with (a JDK switch applies from the next start). */
+    @Volatile var launchedJavaHome: String? = null
+        private set
+
+    /** An agent process is running for this chat. */
+    val isLive: Boolean get() = connection != null
     private var sessionId: String? = null
     private val toolCalls = HashMap<String, ChatItem.ToolCall>()
 
@@ -207,6 +214,7 @@ class ChatSession(
                                 clear()
                                 putAll(RuntimeEnv.map(paths, cwd))
                                 putAll(agent.env(paths))
+                                launchedJavaHome = get("JAVA_HOME")
                             }
                         }
                         .start()
