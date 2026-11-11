@@ -402,10 +402,24 @@ Then, on the phone:
 | Copilot *(optional)* | `agent-install.sh copilot`: the `@github/copilot-linux-arm64` glibc build, started through Termux's glibc loader | `copilot --acp` (sign in with `copilot login`) |
 | Goose *(optional)* | `agent-install.sh goose`: the `aarch64-linux-gnu` release, started through the glibc loader | `goose acp` (set up with `goose configure`) |
 | OpenCode *(optional)* | `agent-install.sh opencode`: the `linux-arm64` glibc release, interpreter patched like Claude Code | `opencode acp` (sign in with `opencode auth login`) |
+| MiniMax Code *(optional)* | `npm i -g @minimax-ai/code` | `mcode acp` (sign in with `mcode login --region global`) |
+| Pi *(optional)* | `npm i -g pi-acp @mariozechner/pi-coding-agent` (the ACP adapter and the CLI it drives) | `pi-acp` (sign in with `pi`, then `/login`) |
+| Qoder *(optional)* | `npm i -g @qoder-ai/qodercli` | `qodercli --acp` (sign in with `qodercli`, then `/login`) |
+| Cline *(optional)* | `agent-install.sh cline`: the `@cline/cli-linux-arm64` glibc Bun build, interpreter patched | `cline --acp` (sign in with `cline auth`) |
+| Kilo Code *(optional)* | `agent-install.sh kilo`: the registry's `linux-arm64` glibc release (an OpenCode fork), interpreter patched | `kilo acp` (sign in with `kilo auth login`) |
+| Cursor *(optional)* | `agent-install.sh cursor`: the registry's `linux/arm64` package with its own Node, which is patched; credentials kept in a file | `cursor-agent acp` (sign in with `cursor-agent login`) |
+| Amp *(optional)* | `agent-install.sh amp`: the `@ampcode/cli-linux-arm64` build and the `amp-acp` adapter, both patched | `amp-acp` (sign in with `amp login`) |
+| Mistral Vibe *(optional)* | `agent-install.sh vibe`: the registry's `vibe-acp` aarch64 bundle (its own Python), patched | `vibe-acp` (the API key goes in `~/.vibe/.env` via `agent-key.sh vibe`) |
+| Kiro *(optional)* | `agent-install.sh kiro`: the registry's `aarch64-linux` release, interpreter patched | `kiro-cli acp --agent-engine=v3` (sign in with `kiro-cli login --use-device-flow`) |
+| fast-agent *(optional)* | `agent-install.sh fast-agent`: `uv tool install fast-agent-acp` on Termux's Python (compiles its Rust parts the first time) | `fast-agent-acp -x` (provider key and model from `agent-key.sh fast-agent`) |
+| Minion Code *(optional)* | `agent-install.sh minion`: `uv tool install minion-code`, wrapped as `minion-code` so its `mcode` doesn't hide MiniMax's | `minion-code acp` (an OpenAI-compatible endpoint in `~/.minion/config.yaml` via `agent-key.sh minion`) |
 
-The optional agents are pure Node packages, installed one by one from Agents → More agents. Re-running
-the agents setup updates the ones you have. Their sign-in state isn't tracked from files: the chat asks
-you to sign in when the agent reports it.
+The optional agents are installed one by one from Agents → More agents: Node packages with npm, native
+Linux builds and Python packages with `agent-install.sh`, which also updates them. Native archives come
+from the ACP Registry, so they follow its versions. Most sign-in states aren't tracked from files: the
+chat asks you to sign in when the agent reports it. Mistral Vibe, fast-agent and Minion Code would keep
+their sign-in in an OS keyring, which Android doesn't have, so they take your provider's API key instead
+(`agent-key.sh` asks for it and saves it readable only by you).
 
 All of it is scripted in `app/src/main/assets/agents-setup.sh`; re-running it updates the agents. Each
 agent also gets a managed "you're on an Android phone" note in its own instructions file
