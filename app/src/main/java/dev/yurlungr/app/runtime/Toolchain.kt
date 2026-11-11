@@ -302,6 +302,9 @@ object Toolchain {
             // pipefail: "gh --version | sed -n 1p" must fail when gh is missing, not report sed's 0.
             append("( out=\$(timeout -k 5 ").append(tool.timeoutS).append(" bash -o pipefail -c ").append(shellQuote(tool.probe))
             append(" 2>&1 </dev/null); s=\$?; ")
+            // A silent failure (`command -v x`, `ls lib*.so 2>/dev/null | sed`) or "command not found"
+            // means the tool isn't there: report 127, so an optional pack reads "Not installed", not "Fails".
+            append("[ \$s -ne 0 ] && [ \$s -ne 124 ] && { [ -z \"\$(printf '%s' \"\$out\" | tr -d '[:space:]')\" ] || printf '%s' \"\$out\" | grep -q 'command not found'; } && s=127; ")
             append("printf '%s\\t%s\\t%s\\n' ").append(shellQuote(tool.id)).append(" \"\$s\" \"\$(printf '%s' \"\$out\" | grep -m1 . | tr '\\t' ' ')\" > \"\$d/").append(i).append("\" ) &\n")
             if ((i + 1) % PROBE_PARALLEL == 0) appendLine("wait")
         }

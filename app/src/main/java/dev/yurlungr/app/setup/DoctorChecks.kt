@@ -245,7 +245,7 @@ object DoctorChecks {
             )
             state.timedOut -> Check(
                 id, t.name, CheckStatus.Warn,
-                "Didn't answer within ${Toolchain.PROBE_TIMEOUT_S} s. Check again; if it persists, rerun ${t.setup.title} setup.",
+                "Didn't answer within ${t.timeoutS} s. Check again; if it persists, rerun ${t.setup.title} setup.",
                 fix = fix, required = false,
             )
             else -> Check(
