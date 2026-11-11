@@ -80,6 +80,28 @@ internal object FeatureSmokeChecks {
                 pass("git stage/unstage/discard")
             }
 
+            // Checkpoints: snapshot, change, diff, restore (the shadow repository, not the project's git).
+            if (!File(paths.bin, "git").canExecute()) skip("checkpoints", "git not installed")
+            else {
+                val proj0 = File(paths.home, "projects/.feature-smoke-${UUID.randomUUID()}").apply { mkdirs() }
+                try {
+                    File(proj0, "a.txt").writeText("one\n")
+                    val chat = "smoke-${UUID.randomUUID()}"
+                    val turn = dev.yurlungr.app.chat.Checkpoints.begin(context, chat, proj0, "change things")
+                    check(turn.before != null) { "no snapshot before" }
+                    File(proj0, "a.txt").writeText("two\n"); File(proj0, "b.txt").writeText("new\n")
+                    dev.yurlungr.app.chat.Checkpoints.end(context, chat, proj0, turn)
+                    val done = dev.yurlungr.app.chat.Checkpoints.turns(context, chat).single()
+                    check(done.filesChanged == 2) { "files changed: ${done.filesChanged}" }
+                    check(dev.yurlungr.app.chat.Checkpoints.diff(context, chat, proj0, done.before!!, done.after!!).contains("+two")) { "diff" }
+                    check(dev.yurlungr.app.chat.Checkpoints.restore(context, chat, proj0, done.before!!).isSuccess) { "restore" }
+                    check(File(proj0, "a.txt").readText() == "one\n" && !File(proj0, "b.txt").exists()) { "restore didn't put files back" }
+                    check(!File(proj0, ".git").exists()) { "touched the project's own git" }
+                    dev.yurlungr.app.chat.Checkpoints.delete(context, chat)
+                    pass("checkpoints", "snapshot, diff and restore")
+                } finally { proj0.deleteRecursively() }
+            }
+
             // Stacks, tasks and checks on a small Node + Python fixture.
             val proj = File(fixture, "proj").apply { mkdirs() }
             File(proj, "package.json").writeText("""{"scripts":{"dev":"vite"},"devDependencies":{"vite":"6","typescript":"5"}}""")
