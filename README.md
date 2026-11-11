@@ -121,9 +121,11 @@ Then, on the phone:
 
 - **Workspace** per project: the name (tap to switch projects or open *All projects*), Branch / Changes /
   To push stat tiles, and Files · Changes · History · Chats tabs. The tiles and tabs slide away while
-  you scroll down a tab and come back when you scroll up. The bottom dock has a wide **Chat** button,
-  then Build (Android), Run (web), Setup, Git and Terminal. A dot shows when dependencies are missing
-  or a web server is starting or running. The sidebar's *Projects* reopens the last workspace.
+  you scroll down a tab and come back when you scroll up. The bottom dock keeps to three buttons:
+  **Chat**, the project's main action (Run/Open for web apps, Build for Android, otherwise Terminal), and
+  **More**. More opens a sheet with the rest (Setup, Git, Terminal, Build, Run options), each with a line
+  saying what it does. When only three buttons are needed, all of them show. Dots mark missing
+  dependencies and a web server that's starting or running. The sidebar's *Projects* reopens the last workspace.
 - **Files** is a tree with indent guides and icons by file type. In a repository:
   - A segmented filter: **All · Changed (count) · Source** (without ignored files) **· Ignored**. Changed lists every changed path, including deletions.
   - A summary by kind ("6 new · 3 modified · 2 staged") in the rows' colours, and **Collapse all**.
@@ -144,9 +146,11 @@ Then, on the phone:
   The terminal session ends when git exits. The sheet stays open with the result until you close it.
 - **Branches** (tap the Branch tile): pull, create, switch (remote branches become tracking branches;
   uncommitted changes can be stashed first or brought along), and stash pop / apply / drop.
-- **History** is a commit graph like `git log --graph`, grouped under Today / Yesterday / dates, with
-  branch, remote and tag labels, "not pushed" marks, and a This branch / All branches filter.
-  - **Filters:** author, date (today, 7 days, 30 days, a year) and search (message, or a commit hash).
+- **History** is a commit graph like `git log --graph`, grouped under Today / Yesterday / dates (each
+  with its commit count). Rows show author avatars, branch, remote and tag labels, and "to push" marks.
+  A This branch / All branches switch and a commit count sit above the list.
+  - **Filters:** a search bar (message, or a commit hash) and a filter sheet for author and date
+    (today, 7 days, 30 days, a year). Active filters show as removable chips.
     Git applies them, so they cover the whole history, not just the commits shown.
   - **Commit details:** the changed files and a proper diff viewer, with:
     - +/− counts and line numbers for both sides;
@@ -180,7 +184,9 @@ Then, on the phone:
   - Anything else runs with a custom start command.
   - Notes warn before Next.js (no native compiler on Android) or Expo without its web packages.
 - Each web run owns a loopback-only address (`127.0.0.1`) and a managed terminal with live logs. The
-  project card shows setup/running/failure state, **Open browser**, **Logs**, and confirmed **Stop/Restart**.
+  server card shows the framework and folder, a coloured status with progress while it installs or
+  starts, and the address (tap to copy). Its actions are **Open**, **Logs**, **Try again** after a
+  failure, and ⋮ for confirmed **Restart/Stop** and the run options.
   Opening waits for that run's health endpoint; Vite HTTP and HMR are forwarded through its local listener.
   The foreground runtime service keeps runs alive while you use the browser. Stop/Close ends the run's
   process group, while preserving logs unless you close the terminal. App restarts stop stale runs;
