@@ -52,7 +52,20 @@ if source "$PREFIX/libexec/yurlungr/toolchain.sh" 2>/dev/null; then
     for entry in "${entries[@]}"; do
       name=${entry%%$'\t'*}; cmd=${entry#*$'\t'}
       first=${cmd%% *}
-      case "$first" in test|command|ls|python) ;; *) command -v "$first" >/dev/null 2>&1 || continue ;; esac
+      case "$first" in
+        test|command|ls|python)
+          # These probes can't tell "not installed" up front: a silent failure, or a missing
+          # command or file, means the optional pack isn't there (SKIP); other errors are real.
+          if out=$(timeout 120 bash -o pipefail -c "$cmd" 2>&1 </dev/null); then
+            result PASS "$name" "$(printf '%s' "$out" | grep -m1 . | cut -c1-90)"
+          elif [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ] || printf '%s' "$out" | grep -qE 'command not found|No such file'; then
+            result SKIP "$name" "not installed"
+          else
+            result FAIL "$name" "$(printf '%s' "$out" | grep . | tail -n 1 | cut -c1-90)"
+          fi
+          continue ;;
+        *) command -v "$first" >/dev/null 2>&1 || continue ;;
+      esac
       check "$name" "$cmd"
     done
   done
