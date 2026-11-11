@@ -181,7 +181,7 @@ internal fun WebRunSheet(
     var error by remember(selectedPath) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { tools = withContext(Dispatchers.IO) {
-        listOf("node","npm","pnpm","yarn").filter { File(paths.bin,it).canExecute() }.toSet()
+        listOf("node","npm","pnpm","yarn","bun").filter { File(paths.bin,it).canExecute() }.toSet()
     } }
     val active = WebRunSessions.get(root)?.state?.active == true
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
@@ -240,7 +240,9 @@ internal fun WebRunSheet(
                     Button(onClick = { onDismiss(); runInTerminal("pkg install -y nodejs-lts", "Install Node.js") }) { Text("Install Node.js") }
                 } else if (project.kind != WebKind.Static && manager != null && tools != null && manager!!.executable !in tools.orEmpty()) {
                     Text("${manager!!.executable} is not installed.", color = MaterialTheme.colorScheme.error)
-                    if ("npm" in tools.orEmpty()) Button(onClick = {
+                    // pnpm, Yarn and Bun are Termux packages; a pinned packageManager version comes from npm.
+                    if (manager == WebPackageManager.Bun) Button(onClick = { onDismiss(); runInTerminal("pkg install -y bun", "Install bun") }) { Text("Install bun") }
+                    else if ("npm" in tools.orEmpty()) Button(onClick = {
                         val declared = project.managerHint?.substringBefore('+')?.takeIf {
                             it.startsWith(manager!!.executable + "@") && Regex("[a-z]+@[0-9][0-9A-Za-z.+-]*").matches(it)
                         } ?: manager!!.executable

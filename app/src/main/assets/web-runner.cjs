@@ -40,7 +40,8 @@ async function install() {
   status('Installing', 'Installing project dependencies. Output follows.');
   const args = config.manager === 'npm'
     ? [(fs.existsSync(path.join(config.installCwd, 'package-lock.json')) || fs.existsSync(path.join(config.installCwd, 'npm-shrinkwrap.json'))) ? 'ci' : 'install']
-    : ['install', ...(config.manager === 'pnpm' && fs.existsSync(path.join(config.installCwd, 'pnpm-lock.yaml')) ? ['--frozen-lockfile'] : [])];
+    : ['install', ...(config.manager === 'pnpm' && fs.existsSync(path.join(config.installCwd, 'pnpm-lock.yaml')) ? ['--frozen-lockfile'] : []),
+        ...(config.manager === 'bun' && (fs.existsSync(path.join(config.installCwd, 'bun.lock')) || fs.existsSync(path.join(config.installCwd, 'bun.lockb'))) ? ['--frozen-lockfile'] : [])];
   await new Promise((resolve, reject) => {
     child = launch(config.manager, args, config.installCwd);
     child.once('error', reject);

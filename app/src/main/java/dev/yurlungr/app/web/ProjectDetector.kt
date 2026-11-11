@@ -8,7 +8,7 @@ import java.io.File
  * Static: served as files. Candidate: a web app we can't start without a custom command.
  */
 internal enum class WebKind { Vite, Framework, Static, Candidate }
-internal enum class WebPackageManager(val executable: String) { Npm("npm"), Pnpm("pnpm"), Yarn("yarn") }
+internal enum class WebPackageManager(val executable: String) { Npm("npm"), Pnpm("pnpm"), Yarn("yarn"), Bun("bun") }
 internal data class WebProject(
     val directory: File,
     val installDirectory: File,
@@ -84,6 +84,7 @@ internal object ProjectDetector {
                 WebPackageManager.Npm -> File(installDir, "package-lock.json").isFile || File(installDir, "npm-shrinkwrap.json").isFile
                 WebPackageManager.Pnpm -> File(installDir, "pnpm-lock.yaml").isFile
                 WebPackageManager.Yarn -> File(installDir, "yarn.lock").isFile
+                WebPackageManager.Bun -> File(installDir, "bun.lock").isFile || File(installDir, "bun.lockb").isFile
             } }
             val manager = if (hint != null) WebPackageManager.entries.firstOrNull { it.executable == hint.substringBefore('@') }
                 else if (lockManagers.size == 1) lockManagers.single() else if (lockManagers.isEmpty()) WebPackageManager.Npm else null
