@@ -120,19 +120,26 @@ Then, on the phone:
 <summary><b>Projects & git</b></summary>
 
 - **Workspace** per project: the name (tap to switch projects or open *All projects*), Branch / Changes /
-  To push stat tiles, and Files · Changes · History · Chats tabs. Bottom actions include Chat, Terminal,
-  Android Build and web Run when applicable. The sidebar's *Projects* reopens the last workspace.
-- **Files** is a tree. In a repository:
-  - Every changed file shows a coloured pill (Modified, New, Deleted, Renamed, Conflict), plus "staged" when it's in the next commit.
-  - Ignored files are dimmed and tagged, and folders with changes inside get a dot.
-  - A filter row with counts (All, Uncommitted, Ignored, Not ignored) and a one-line summary is always shown. Uncommitted lists every changed path, including deletions.
+  To push stat tiles, and Files · Changes · History · Chats tabs. The tiles and tabs slide away while
+  you scroll down a tab and come back when you scroll up. The bottom dock has a wide **Chat** button,
+  then Build (Android), Run (web), Setup, Git and Terminal. A dot shows when dependencies are missing
+  or a web server is starting or running. The sidebar's *Projects* reopens the last workspace.
+- **Files** is a tree with indent guides and icons by file type. In a repository:
+  - A segmented filter: **All · Changed (count) · Source** (without ignored files) **· Ignored**. Changed lists every changed path, including deletions.
+  - A summary by kind ("6 new · 3 modified · 2 staged") in the rows' colours, and **Collapse all**.
+  - Changed files have coloured names and a status letter (U/M/A/D/R/!), with a tick when staged. Folders show how many changed files they hold, and ignored files are faded.
   - Ignored paths come from Git itself, so nested rules, exceptions and global exclusions apply.
 
   Pull down to re-read the tree and Git's state. Tapping a Markdown file (`.md`, case-insensitive, also
   `.markdown` / `.mdown`) opens a rendered viewer with **Edit** to open the text editor; Back from the
   editor returns to the preview. Other files open in the editor.
-- **Changes**: per-file diffs, *Commit all*, a standard `.gitignore` when build output shows up, and
-  *Publish to GitHub* (`gh repo create`). **Pull** (`--ff-only`) and **Push**, which sets the upstream on
+- **Changes**:
+  - **Sync card:** the branch, ahead/behind counts, and **Pull** and **Push** (or *Publish to GitHub*, using `gh repo create`).
+  - **Groups:** Conflicts, Staged and Changes, each with Stage all, Unstage all or Mark all resolved.
+  - **Files:** tick a file to stage or unstage it, tap it for its diff, or use ⋮ for full screen, Open file and **Discard** (confirmed first; files git doesn't track yet are deleted).
+  - **Commit box:** pinned at the bottom. It commits only the staged files when there are any (with *Commit all* beside it), otherwise everything.
+  - It also offers a standard `.gitignore` when build output shows up.
+- **Pull** (`--ff-only`) and **Push**, which sets the upstream on
   the first push, run in a live terminal in a bottom sheet, showing git's progress and any prompts.
   The terminal session ends when git exits. The sheet stays open with the result until you close it.
 - **Branches** (tap the Branch tile): pull, create, switch (remote branches become tracking branches;
@@ -153,19 +160,32 @@ Then, on the phone:
 - Pull down to refresh project folders, Git status and GitHub repositories without clearing search
   or filters. **New project** and **Clone from URL** use keyboard-aware bottom sheets with folder
   previews and validation for invalid or existing names.
-- **Run locally** appears for detected Vite apps and static HTML sites, alongside Android's Build action
-  when both are present. Run setup lets you select an app folder, package manager, Vite script, port,
-  dependency installation and optional custom command. Workspace packages install dependencies at the
-  workspace root. Detection reads manifests only and checks common app folders without scanning caches.
+- **Run** is one tap. It starts the web app with its last settings (or defaults), installs missing
+  dependencies first, moves to a free port if the usual one is taken, and opens the browser when the
+  server answers. While the app is starting, Run shows its logs; once it's up, the button becomes
+  **Open**. Long-press it for the options: app folder, package manager, script, port, dependency
+  installation and a custom command. If it can't decide alone (no Node.js, no start command), it opens
+  those options instead. Workspace packages install dependencies at the workspace root. Detection reads
+  manifests only and checks common app folders without scanning caches.
+- Supported web apps and how each is started (from the project's `node_modules/.bin`, on `127.0.0.1` and `$PORT`):
+  - **Vite**: the project's `vite` dev script, or `vite` directly when the script does more (for example `tsc && vite`);
+  - **SvelteKit**: `vite`;
+  - **Next.js**: `next dev`;
+  - **Astro**: `astro dev`;
+  - **Nuxt**: `nuxt dev`;
+  - **Angular**: `ng serve`;
+  - **Create React App**: `react-scripts start`;
+  - **Expo (web)**: `expo start --web`;
+  - **static HTML sites**: served directly.
+  - Anything else runs with a custom start command.
+  - Notes warn before Next.js (no native compiler on Android) or Expo without its web packages.
 - Each web run owns a loopback-only address (`127.0.0.1`) and a managed terminal with live logs. The
   project card shows setup/running/failure state, **Open browser**, **Logs**, and confirmed **Stop/Restart**.
   Opening waits for that run's health endpoint; Vite HTTP and HMR are forwarded through its local listener.
   The foreground runtime service keeps runs alive while you use the browser. Stop/Close ends the run's
   process group, while preserving logs unless you close the terminal. App restarts stop stale runs;
   servers do not automatically restart after process death.
-- Next.js, Astro, Nuxt, CRA and Angular are detected as candidates; their launch setups still need
-  on-device validation. Package presence alone does not make a repository runnable. Custom commands
-  must use `127.0.0.1` and the supplied `$PORT`; project-specific native dependencies can still fail on
+- Custom commands must use `127.0.0.1` and the supplied `$PORT`; project-specific native dependencies can still fail on
   Android and their errors remain in Logs. Static serving blocks dotfiles and paths outside the app folder.
 - **Terminal** from a project offers the terminals already open there, or a new one.
 - **Setup** detects the project's tech stacks from their manifest files, in the root and common app
@@ -237,8 +257,10 @@ Then, on the phone:
   Ending leaves the exited terminal visible; closing removes the tab. Restart reruns the original session command.
 - The **keyboard icon** pill to the right of the session arrows directly shows/hides the extra-key rows,
   remembered across launches. It uses the same container as the session switcher.
-- New terminals show a compact status MOTD: current session, working folder,
-  Git branch, working/idle chats, approval count, and account sign-in indicators. Run `yurlungr-status`
+- New terminals open with a welcome screen: a small wave mark in the app's colours and a rounded status card
+  sized to the terminal (28–40 columns). It shows the session, working folder, Git branch (when in a
+  repository), working/idle chats, approval count, and sign-in marks for the installed agents only.
+  A key appears only for the marks shown. Run `yurlungr-status`
   to refresh after changing folders or signing in. Sign-in indicators use the same file-presence hints
   as the app; Antigravity stays unknown. No credentials are read or displayed.
   Uses Termux's `~/.termux/motd.sh` hook; an existing custom hook and `$PREFIX/etc/motd` are preserved.
