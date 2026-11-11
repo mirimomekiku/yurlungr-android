@@ -67,6 +67,7 @@ sealed interface Route {
     data class Chat(val id: String) : Route
     data object Setup : Route
     data object Settings : Route
+    data object DevEnvironment : Route
     data object Terminal : Route
     data object Agents : Route
     data object Devices : Route
@@ -263,6 +264,7 @@ class MainActivity : ComponentActivity() {
                 // Opened from Settings → back there; as the first-run screen → home.
                 onHome = { if (nav.isTopLevel) nav.reset(Route.NewChat) else nav.pop() },
                 onDevices = { nav.push(Route.Devices) },
+                onDevEnvironment = { nav.push(Route.DevEnvironment) },
             )
             Route.Settings -> SettingsScreen(
                 setupViewModel,
@@ -270,6 +272,16 @@ class MainActivity : ComponentActivity() {
                 onBack = back,
                 onSystemChecks = { nav.push(Route.Setup) },
                 onAgents = { nav.reset(Route.Agents) },
+                runInTerminal = { command, name -> runInTerminal(context, nav, command, name) },
+                onDevEnvironment = { nav.push(Route.DevEnvironment) },
+            )
+            Route.DevEnvironment -> dev.yurlungr.app.setup.DevEnvironmentScreen(
+                refreshTick = resumeTick,
+                onBack = back,
+                onSystemChecks = { nav.push(Route.Setup) },
+                onInstallSetup = { pack ->
+                    runInTerminal(context, nav, dev.yurlungr.app.runtime.setupScriptCommand(requireNotNull(pack.script)), pack.title)
+                },
                 runInTerminal = { command, name -> runInTerminal(context, nav, command, name) },
             )
             Route.Terminal -> TerminalScreen(onBack = {

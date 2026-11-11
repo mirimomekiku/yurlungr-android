@@ -76,6 +76,7 @@ fun SettingsScreen(
     onSystemChecks: () -> Unit,
     onAgents: () -> Unit,
     runInTerminal: (command: String, name: String) -> Unit,
+    onDevEnvironment: () -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -133,6 +134,13 @@ fun SettingsScreen(
                         subtitleColor = worst.subtitleColor(),
                         onClick = onSystemChecks,
                         trailing = { if (problems.isNotEmpty()) FixLabel("Review") else Chevron() },
+                    )
+                    GroupRow(
+                        "Development environment",
+                        subtitle = checks["jdk"]?.detail?.substringBefore(" · JAVA_HOME") ?: "Default JDK, environment and runtime packs",
+                        icon = Ph.Wrench,
+                        tile = tiles.lime,
+                        onClick = onDevEnvironment,
                     )
                     val agents = checks["agents"]
                     GroupRow(
