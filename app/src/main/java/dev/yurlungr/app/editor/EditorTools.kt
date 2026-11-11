@@ -44,16 +44,23 @@ import java.io.File
 object OpenFiles {
     val tabs = androidx.compose.runtime.mutableStateListOf<String>()
     val dirty = androidx.compose.runtime.mutableStateMapOf<String, Boolean>()
-    private val buffers = HashMap<String, String>()
+    /**
+     * Unsaved text, with what the file held when those edits began ([saved]) and its [stamp] then.
+     * Restoring keeps that stamp, so a save still notices the file changed on disk meanwhile
+     * (an agent, `git pull` or the merge view) instead of overwriting it.
+     */
+    data class Kept(val text: String, val saved: String, val stamp: DiskStamp)
+
+    private val buffers = HashMap<String, Kept>()
 
     fun open(path: String) { if (path !in tabs) tabs += path }
     fun close(path: String) { tabs.remove(path); buffers.remove(path); dirty.remove(path) }
-    fun buffer(path: String): String? = buffers[path]
+    fun buffer(path: String): Kept? = buffers[path]
 
-    /** Unsaved [text] for [path], or null once it's saved or discarded. */
-    fun keep(path: String, text: String?) {
-        if (text == null) buffers.remove(path) else buffers[path] = text
-        dirty[path] = text != null
+    /** Unsaved edits for [path], or null once it's saved or discarded. */
+    fun keep(path: String, kept: Kept?) {
+        if (kept == null) buffers.remove(path) else buffers[path] = kept
+        dirty[path] = kept != null
     }
 }
 

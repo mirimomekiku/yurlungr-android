@@ -219,8 +219,10 @@ private fun Editor(
     val context = LocalContext.current
     val density = LocalDensity.current
     // Unsaved edits from when this tab was last shown, if any.
-    var value by remember { mutableStateOf(TextFieldValue(OpenFiles.buffer(file.path) ?: initial.text)) }
-    var saved by remember { mutableStateOf(initial.text) }
+    val kept = remember { OpenFiles.buffer(file.path) }
+    var value by remember { mutableStateOf(TextFieldValue(kept?.text ?: initial.text)) }
+    // With kept edits, the baseline and stamp are from when they began, not this fresh read.
+    var saved by remember { mutableStateOf(kept?.saved ?: initial.text) }
     var crlf by remember { mutableStateOf(initial.crlf) }
     // Both CRLF and LF on disk: a save normalizes to [crlf]; say so rather than surprise with a big diff.
     var mixedEol by remember { mutableStateOf(initial.mixedEol) }
@@ -230,7 +232,7 @@ private fun Editor(
         }
     }
     // What the file looked like when we last read or wrote it.
-    var diskStamp by remember { mutableStateOf(initial.stamp) }
+    var diskStamp by remember { mutableStateOf(kept?.stamp ?: initial.stamp) }
     // Save found the file changed on disk; holds what to do after a successful save.
     var conflict by remember { mutableStateOf<(() -> Unit)?>(null) }
     val history = remember { History() }
@@ -418,12 +420,12 @@ private fun Editor(
         }
     }
     BackHandler(onBack = ::tryBack)
-    val latest = androidx.compose.runtime.rememberUpdatedState(value.text to saved)
+    val latest = androidx.compose.runtime.rememberUpdatedState(Triple(value.text, saved, diskStamp))
     LaunchedEffect(dirty) { OpenFiles.dirty[file.path] = dirty }
     androidx.compose.runtime.DisposableEffect(file.path) {
         onDispose {
-            val (text, onDisk) = latest.value
-            OpenFiles.keep(file.path, text.takeIf { it != onDisk && !discarded })
+            val (text, onDisk, stamp) = latest.value
+            OpenFiles.keep(file.path, if (text != onDisk && !discarded) OpenFiles.Kept(text, onDisk, stamp) else null)
         }
     }
     if (showBlame) BlameSheet(file, onDismiss = { showBlame = false }) { showBlame = false; goToLine(it) }
