@@ -12,10 +12,14 @@ import java.util.UUID
 class WebRunSmokeInstrumentation : Instrumentation() {
     private var nativeOnly = false
     private var scriptsOnly = false
+    private var features = false
+    private var selfTest: String? = null
     override fun onCreate(arguments: Bundle?) {
         super.onCreate(arguments)
         nativeOnly = arguments?.getString("nativeOnly") == "true"
         scriptsOnly = arguments?.getString("scriptsOnly") == "true"
+        features = arguments?.getString("features") == "true"
+        selfTest = arguments?.getString("selfTest")
         start()
     }
 
@@ -25,6 +29,27 @@ class WebRunSmokeInstrumentation : Instrumentation() {
         val roots = mutableListOf<File>()
         var resultCode = RESULT_OK
         try {
+            selfTest?.let { mode ->
+                // The in-runtime self-test, with the environment agents get ("full" installs two small packs).
+                val paths = dev.yurlungr.app.runtime.RuntimePaths(targetContext)
+                dev.yurlungr.app.runtime.RuntimeAssets.install(targetContext, paths)
+                val script = File(paths.libexec, "self-test.sh").path
+                val r = kotlinx.coroutines.runBlocking {
+                    dev.yurlungr.app.runtime.CommandRunner.run(paths, listOfNotNull(paths.bash.path, script, "--full".takeIf { mode == "full" }), timeoutMs = 30 * 60_000L)
+                }
+                output.putString("stream", r.output.replace(Regex("\u001B\\[[0-9;]*m"), "") + "\nexit ${r.exitCode}\n")
+                output.putString("result", if (r.ok) "PASS" else "FAIL")
+                finish(if (r.ok) RESULT_OK else RESULT_CANCELED, output)
+                return
+            }
+            if (features) {
+                // The 0.0.4 features against the real runtime (no screen, temporary folders only).
+                val lines = dev.yurlungr.app.runtime.FeatureSmokeChecks.run(this)
+                output.putString("stream", lines.joinToString("\n") + "\n")
+                output.putString("result", "PASS")
+                finish(RESULT_OK, output)
+                return
+            }
             if (scriptsOnly) {
                 val skipped = dev.yurlungr.app.runtime.RuntimeScriptSmokeChecks.run(this)
                 output.putString("stream", "PASS: installed script encoding, syntax, failures, logs, retries, setup lock and status\n" +
