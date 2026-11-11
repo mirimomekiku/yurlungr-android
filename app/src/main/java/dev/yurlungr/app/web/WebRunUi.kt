@@ -1,6 +1,9 @@
 package dev.yurlungr.app.web
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -18,33 +21,109 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import java.io.File
 
+/**
+ * The project's web server: what it is, where it stands (a coloured status, progress while it
+ * installs or starts, the address once it's up) and what to do next: Open, Logs, and ⋮ for
+ * Restart, Stop and the run options.
+ */
 @Composable
-internal fun WebRunCard(root: File, onLogs: () -> Unit) {
+internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)? = null) {
     val context = LocalContext.current
     val run = WebRunSessions.get(root) ?: return
     var confirmation by remember(run.id) { mutableStateOf<String?>(null) }
-    Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("${run.config.project.framework} · ${run.state.name}", style = MaterialTheme.typography.titleSmall)
-            Text(if (run.state == WebRunState.Running) run.url else run.message.ifBlank { when (run.state) {
-                WebRunState.Stopped -> "Server stopped."
-                WebRunState.Stopping -> "Stopping server…"
-                WebRunState.Failed -> "Couldn't run this app. Check Logs."
-                WebRunState.Installing -> "Installing dependencies…"
-                else -> "Preparing local server…"
-            } },
-                style = MaterialTheme.typography.bodySmall,
-                color = if (run.state == WebRunState.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                TextButton(enabled = run.state == WebRunState.Running, onClick = { WebRunSessions.open(context,run) }) { Text("Open browser") }
-                TextButton(enabled = run.terminal != null, onClick = { WebRunSessions.logs(run); onLogs() }) { Text("Logs") }
-                MenuChip("Actions") { close ->
-                    DropdownMenuItem(text = { Text("Restart") }, enabled = run.state != WebRunState.Stopping,
-                        onClick = { close(); confirmation = "Restart" })
-                    DropdownMenuItem(text = { Text("Stop") }, enabled = run.state.active && run.state != WebRunState.Stopping,
-                        onClick = { close(); confirmation = "Stop" })
+    var menu by remember { mutableStateOf(false) }
+    val colors = MaterialTheme.colorScheme
+    val tones = dev.yurlungr.app.ui.AppColors.status
+    val tile = dev.yurlungr.app.ui.AppColors.tiles.lime
+    val busy = run.state == WebRunState.Installing || run.state == WebRunState.Starting || run.state == WebRunState.Stopping
+    val (stateLabel, stateColor) = when (run.state) {
+        WebRunState.Running -> "Running" to tones.success
+        WebRunState.Installing -> "Installing dependencies" to tones.warning
+        WebRunState.Starting -> "Starting" to tones.warning
+        WebRunState.Stopping -> "Stopping" to colors.onSurfaceVariant
+        WebRunState.Stopped -> "Stopped" to colors.outline
+        WebRunState.Failed -> "Failed" to colors.error
+    }
+    val shape = androidx.compose.foundation.shape.RoundedCornerShape(22.dp)
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(shape).background(colors.surfaceContainer)
+            .border(1.dp, if (run.state == WebRunState.Failed) colors.error.copy(alpha = 0.5f) else colors.outlineVariant, shape),
+    ) {
+        Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp, top = 12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            androidx.compose.foundation.layout.Box(
+                Modifier.size(40.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(13.dp)).background(tile.fill),
+                contentAlignment = androidx.compose.ui.Alignment.Center,
+            ) { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Globe, null, size = 20.dp, tint = tile.on) }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("${run.config.project.framework} · ${run.config.project.directory.name}", style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    androidx.compose.foundation.layout.Box(Modifier.size(8.dp).clip(androidx.compose.foundation.shape.CircleShape).background(stateColor))
+                    Spacer(Modifier.width(6.dp))
+                    Text(stateLabel, style = MaterialTheme.typography.labelMedium, color = stateColor)
                 }
+            }
+            androidx.compose.foundation.layout.Box {
+                IconButton(onClick = { menu = true }) { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.DotsThreeVertical, "Server actions", size = 20.dp) }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text("Restart") }, enabled = run.state != WebRunState.Stopping,
+                        leadingIcon = { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.ArrowClockwise, null, size = 18.dp) },
+                        onClick = { menu = false; confirmation = "Restart" })
+                    DropdownMenuItem(text = { Text("Stop") }, enabled = run.state.active && run.state != WebRunState.Stopping,
+                        leadingIcon = { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Stop, null, size = 18.dp) },
+                        onClick = { menu = false; confirmation = "Stop" })
+                    onOptions?.let { options ->
+                        DropdownMenuItem(text = { Text("Run options") },
+                            leadingIcon = { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.GearSix, null, size = 18.dp) },
+                            onClick = { menu = false; options() })
+                    }
+                }
+            }
+        }
+        // The address once it's up (tap to copy); otherwise what's happening, or why it failed.
+        val detail = if (run.state == WebRunState.Running) run.url else run.message.ifBlank { when (run.state) {
+            WebRunState.Stopped -> "Server stopped."
+            WebRunState.Stopping -> "Stopping server…"
+            WebRunState.Failed -> "Couldn't run this app. Check Logs."
+            WebRunState.Installing -> "Installing dependencies…"
+            else -> "Preparing local server…"
+        } }
+        Text(
+            detail,
+            style = if (run.state == WebRunState.Running) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodySmall,
+            fontFamily = if (run.state == WebRunState.Running) androidx.compose.ui.text.font.FontFamily.Monospace else null,
+            color = when (run.state) { WebRunState.Failed -> colors.error; WebRunState.Running -> colors.primary; else -> colors.onSurfaceVariant },
+            maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.padding(start = 66.dp, end = 14.dp, top = 2.dp)
+                .then(if (run.state == WebRunState.Running) Modifier.clickable {
+                    context.getSystemService(android.content.ClipboardManager::class.java)
+                        .setPrimaryClip(android.content.ClipData.newPlainText("url", run.url))
+                    android.widget.Toast.makeText(context, "Address copied", android.widget.Toast.LENGTH_SHORT).show()
+                } else Modifier),
+        )
+        if (busy) {
+            LinearProgressIndicator(
+                Modifier.fillMaxWidth().padding(start = 66.dp, end = 14.dp, top = 8.dp).height(3.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(2.dp)),
+                color = stateColor, trackColor = colors.surfaceContainerHighest,
+            )
+        }
+        Row(Modifier.fillMaxWidth().padding(start = 66.dp, end = 12.dp, top = 10.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            when (run.state) {
+                WebRunState.Running -> Button(onClick = { WebRunSessions.open(context, run) }, modifier = Modifier.weight(1f)) {
+                    dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Globe, null, size = 16.dp)
+                    Spacer(Modifier.width(6.dp)); Text("Open")
+                }
+                WebRunState.Failed, WebRunState.Stopped -> Button(onClick = { WebRunSessions.restart(context, run) }, modifier = Modifier.weight(1f)) {
+                    dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Play, null, size = 16.dp)
+                    Spacer(Modifier.width(6.dp)); Text(if (run.state == WebRunState.Failed) "Try again" else "Start")
+                }
+                else -> Unit
+            }
+            FilledTonalButton(enabled = run.terminal != null, onClick = { WebRunSessions.logs(run); onLogs() }, modifier = Modifier.weight(1f)) {
+                dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.TerminalWindow, null, size = 16.dp)
+                Spacer(Modifier.width(6.dp)); Text("Logs")
             }
         }
     }
