@@ -251,6 +251,28 @@ class Git(private val paths: RuntimePaths) {
         return run(dir, "commit", "-m", message)
     }
 
+    /** Commits only what's staged. */
+    suspend fun commitStaged(dir: File, message: String): CommandResult = run(dir, "commit", "-m", message)
+
+    /** Stages [paths] (including deletions). */
+    suspend fun stage(dir: File, paths: List<String>): CommandResult =
+        if (paths.isEmpty()) CommandResult(exitCode = 0, output = "") else run(dir, "add", "-A", "--", *paths.toTypedArray())
+
+    /** Takes [paths] out of the next commit, keeping the file changes. */
+    suspend fun unstage(dir: File, paths: List<String>, unborn: Boolean): CommandResult = when {
+        paths.isEmpty() -> CommandResult(exitCode = 0, output = "")
+        // No HEAD to restore from yet: just drop them from the index.
+        unborn -> run(dir, "rm", "--cached", "-r", "-q", "--", *paths.toTypedArray())
+        else -> run(dir, "restore", "--staged", "--", *paths.toTypedArray())
+    }
+
+    /** Throws away a file's changes: untracked files are deleted, others go back to HEAD. */
+    suspend fun discard(dir: File, change: GitChange): CommandResult = when {
+        change.untracked -> run(dir, "clean", "-f", "-q", "--", change.path)
+        change.index == 'A' -> run(dir, "rm", "-f", "-q", "--", change.path)
+        else -> run(dir, "restore", "--source=HEAD", "--staged", "--worktree", "--", change.path)
+    }
+
     suspend fun push(dir: File, status: GitStatus): CommandResult =
         if (status.upstream == null) {
             run(dir, "push", "-u", "origin", "HEAD", timeoutMs = 300_000)

@@ -12,6 +12,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,6 +38,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import dev.yurlungr.app.ui.Chip
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -82,6 +84,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -146,6 +151,17 @@ fun ProjectScreen(
     var stacks by remember(dir.path) { mutableStateOf<List<DetectedStack>?>(null) }
     var showSetup by remember { mutableStateOf(false) }
     var setupBannerDismissed by remember(dir.path) { mutableStateOf(SetupBannerPrefs.dismissed(context, dir)) }
+    var headerVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(tab) { headerVisible = true }
+    // Any list in the tabs reports its scrolling here: down hides the header, up shows it.
+    val headerScroll = remember {
+        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+            override fun onPreScroll(available: androidx.compose.ui.geometry.Offset, source: androidx.compose.ui.input.nestedscroll.NestedScrollSource): androidx.compose.ui.geometry.Offset {
+                if (available.y < -8f) headerVisible = false else if (available.y > 8f) headerVisible = true
+                return androidx.compose.ui.geometry.Offset.Zero
+            }
+        }
+    }
     /** A git command running in the terminal sheet: its title and arguments. */
     var gitTerminal by remember { mutableStateOf<Pair<String, List<String>>?>(null) }
 
@@ -159,7 +175,8 @@ fun ProjectScreen(
         } }
     }
 
-    fun runGit(label: String, onSuccess: () -> Unit = {}, block: suspend () -> dev.yurlungr.app.runtime.CommandResult) {
+    /** [quiet]: say nothing when it works (stage, discard…); failures are always shown. */
+    fun runGit(label: String, quiet: Boolean = false, onSuccess: () -> Unit = {}, block: suspend () -> dev.yurlungr.app.runtime.CommandResult) {
         if (busy != null) return
         busy = label
         message = null
@@ -167,19 +184,19 @@ fun ProjectScreen(
             val r = block()
             if (r.ok) onSuccess()
             // On failure, say why in plain words (not installed, timed out, exit code) before git's own lines.
-            message = (if (r.ok) r.output.trim().lines().takeLast(6).joinToString("\n").ifBlank { "$label: done" } else r.describe(label)) to !r.ok
+            message = if (r.ok && quiet) null else (if (r.ok) r.output.trim().lines().takeLast(6).joinToString("\n").ifBlank { "$label: done" } else r.describe(label)) to !r.ok
             busy = null
             reload++
         }
     }
 
-    fun commit(text: String) = scope.launch {
+    var commitStagedOnly by remember { mutableStateOf(false) }
+    fun doCommit(text: String) =
+        runGit("Commit", onSuccess = { commitMessage = "" }) { if (commitStagedOnly) git.commitStaged(dir, text) else git.commitAll(dir, text) }
+    fun commit(text: String, stagedOnly: Boolean) = scope.launch {
+        commitStagedOnly = stagedOnly
         val (name, email) = git.identity()
-        if (name.isBlank() || email.isBlank()) {
-            askIdentity = text
-        } else {
-            runGit("Commit", onSuccess = { commitMessage = "" }) { git.commitAll(dir, text) }
-        }
+        if (name.isBlank() || email.isBlank()) askIdentity = text else doCommit(text)
     }
 
     Column(
@@ -190,6 +207,14 @@ fun ProjectScreen(
             .imePadding(),
     ) {
         Header(dir, paths.projects, onBack, onSwitchProject, onAllProjects)
+        // The stat tiles and tabs slide away while scrolling down and come back when scrolling up.
+        val collapse = androidx.compose.animation.fadeOut(tween(Motion.SHORT)) +
+            androidx.compose.animation.slideOutVertically(tween(Motion.MEDIUM, easing = Motion.Emphasized)) { -it / 2 } +
+            androidx.compose.animation.shrinkVertically(tween(Motion.MEDIUM, easing = Motion.Emphasized), shrinkTowards = Alignment.Top)
+        val reveal = androidx.compose.animation.fadeIn(tween(Motion.MEDIUM)) +
+            androidx.compose.animation.slideInVertically(tween(Motion.MEDIUM, easing = Motion.Emphasized)) { -it / 2 } +
+            androidx.compose.animation.expandVertically(tween(Motion.MEDIUM, easing = Motion.Emphasized), expandFrom = Alignment.Top)
+        AnimatedVisibility(headerVisible, enter = reveal, exit = collapse) {
         status?.takeIf { it.isRepo }?.let { s ->
             // Bento stat tiles: where you are and what's waiting.
             val tiles = AppColors.tiles
@@ -207,6 +232,7 @@ fun ProjectScreen(
                     if (toPush > 0 && busy == null) runGit("Push") { git.push(dir, s) } else tab = ProjectTab.Changes
                 }
             }
+        }
         }
         // Right after cloning (or creating) a project: offer to install what it needs.
         val missing = stacks.orEmpty().filter { it.canInstall && it.installed == false }
@@ -226,8 +252,10 @@ fun ProjectScreen(
             )
         }
         dev.yurlungr.app.web.WebRunCard(dir, onLogs = onOpenTerminal)
-        SectionTabs(tab, changeCount = status?.changes?.size ?: 0) { tab = it }
-        Box(Modifier.weight(1f)) {
+        AnimatedVisibility(headerVisible, enter = reveal, exit = collapse) {
+            SectionTabs(tab, changeCount = status?.changes?.size ?: 0) { tab = it }
+        }
+        Box(Modifier.weight(1f).nestedScroll(headerScroll)) {
             when (tab) {
                 ProjectTab.Changes -> ChangesTab(
                     dir = dir,
@@ -235,10 +263,13 @@ fun ProjectScreen(
                     status = status,
                     busy = busy,
                     message = message,
+                    onDismissMessage = { message = null },
                     onInit = { runGit("Initialize") { git.init(dir) } },
                     commitMessage = commitMessage,
                     onCommitMessageChange = { commitMessage = it },
                     onCommit = ::commit,
+                    onOpenFile = onOpenFile,
+                    onGit = { label, block -> runGit(label, quiet = true, block = block) },
                     // Shown live in a terminal sheet: progress, prompts and git's own messages.
                     onPull = { gitTerminal = "Pull" to listOf("pull", "--ff-only") },
                     onPush = {
@@ -270,9 +301,24 @@ fun ProjectScreen(
             }
         }
         ActionBar(dir, isAndroid, onNewChat, runInTerminal, onOpenTerminal,
-            hasWeb = capabilities?.web?.isNotEmpty() == true, onRunWeb = { showWebRun = true },
+            hasWeb = capabilities?.web?.isNotEmpty() == true,
+            onRunWeb = {
+                val run = dev.yurlungr.app.web.WebRunSessions.get(dir)
+                when {
+                    run?.state == dev.yurlungr.app.web.WebRunState.Running -> dev.yurlungr.app.web.WebRunSessions.open(context, run)
+                    run?.state?.active == true -> { dev.yurlungr.app.web.WebRunSessions.logs(run); onOpenTerminal() }
+                    else -> capabilities?.web?.takeIf { it.isNotEmpty() }?.let { projects ->
+                        scope.launch {
+                            // Anything it can't decide alone (no Node.js, no start command…) opens the options.
+                            if (dev.yurlungr.app.web.WebQuickRun.start(context, dir, projects) != null) showWebRun = true
+                        }
+                    }
+                }
+            },
+            onRunWebOptions = { showWebRun = true },
             hasGit = status?.isRepo == true, onGitActions = { showGitActions = true },
-            hasStacks = stacks.orEmpty().isNotEmpty(), onSetup = { showSetup = true })
+            hasStacks = stacks.orEmpty().isNotEmpty(), onSetup = { showSetup = true },
+            setupNeeded = stacks.orEmpty().any { it.canInstall && it.installed == false })
     }
 
     if (showSetup) {
@@ -325,7 +371,7 @@ fun ProjectScreen(
                     if (!saved.ok) {
                         message = saved.describe("Saving your git name and email") to true
                     } else {
-                        runGit("Commit", onSuccess = { commitMessage = "" }) { git.commitAll(dir, pending) }
+                        doCommit(pending)
                     }
                 }
             },
@@ -415,14 +461,15 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
             .clip(RoundedCornerShape(16.dp))
             .background(track)
             .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         for (t in ProjectTab.entries) {
             val on = t == selected
             val bg by animateColorAsState(if (on) thumb else Color.Transparent, tween(Motion.SHORT), label = "tab")
+            val badge = t == ProjectTab.Changes && changeCount > 0
             Row(
                 Modifier
-                    .weight(1f)
+                    .weight(if (badge) 1.45f else 1f)
                     .height(36.dp)
                     .clip(RoundedCornerShape(12.dp))
                     .background(bg)
@@ -435,36 +482,73 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
                     style = MaterialTheme.typography.labelLarge,
                     color = if (on) onThumb else colors.onSurfaceVariant,
                     maxLines = 1,
+                    softWrap = false,
                 )
-                if (t == ProjectTab.Changes && changeCount > 0) {
-                    Spacer(Modifier.width(5.dp))
+                if (badge) {
+                    Spacer(Modifier.width(6.dp))
                     val peach = AppColors.tiles.peach
+                    // A pill sized to its number, centred on the text line, never clipped by the segment.
                     Box(
-                        Modifier.height(18.dp).widthIn(min = 18.dp).clip(CircleShape).background(peach.fill).padding(horizontal = 5.dp),
+                        Modifier.height(18.dp).widthIn(min = 18.dp).clip(RoundedCornerShape(9.dp)).background(peach.fill).padding(horizontal = 5.dp),
                         contentAlignment = Alignment.Center,
-                    ) { Text(if (changeCount > 99) "99+" else "$changeCount", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = peach.on) }
+                    ) {
+                        Text(if (changeCount > 99) "99+" else "$changeCount", fontSize = 10.sp, lineHeight = 10.sp, fontWeight = FontWeight.Bold,
+                            color = peach.on, maxLines = 1, softWrap = false,
+                            style = androidx.compose.ui.text.TextStyle(platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false)))
+                    }
                 }
             }
         }
     }
 }
 
-/** Chat (pick an agent) · Build & install (Android projects) · Terminal. */
+/**
+ * The project dock: Chat (pick an agent) as the main button, then compact tools (Build for
+ * Android, Run for web, Setup, Git, Terminal) with a dot when one needs you (dependencies
+ * missing) or is live (a web server running).
+ */
 @Composable
 private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit, runInTerminal: (String, String) -> Unit,
     onOpenTerminal: () -> Unit, hasWeb: Boolean, onRunWeb: () -> Unit, hasGit: Boolean, onGitActions: () -> Unit,
-    hasStacks: Boolean, onSetup: () -> Unit) {
+    hasStacks: Boolean, onSetup: () -> Unit, setupNeeded: Boolean = false, onRunWebOptions: () -> Unit = onRunWeb) {
     val context = LocalContext.current
+    val colors = MaterialTheme.colorScheme
+    val tiles = AppColors.tiles
     val installed by androidx.compose.runtime.produceState(emptyList<Agent>()) {
         value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             agentStatuses(RuntimePaths(context)).filter { it.installed }.map { it.agent }
         }
     }
+    val webState = dev.yurlungr.app.web.WebRunSessions.get(dir)?.state
     var agentMenu by remember { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Box(Modifier.weight(2f)) {
-            ActionTile("Chat", Ph.ChatCircle, primary = true, enabled = installed.isNotEmpty()) {
-                if (installed.size == 1) onNewChat(installed[0]) else agentMenu = true
+    val shape = RoundedCornerShape(26.dp)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 12.dp)
+            .clip(shape)
+            .background(colors.surfaceContainer)
+            .border(1.dp, colors.outlineVariant, shape)
+            .padding(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Box(Modifier.weight(1.7f)) {
+            val enabled = installed.isNotEmpty()
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(if (enabled) colors.primary else colors.surfaceContainerHigh)
+                    .clickable(enabled = enabled) { if (installed.size == 1) onNewChat(installed[0]) else agentMenu = true },
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val tint = if (enabled) colors.onPrimary else colors.outline
+                PhIcon(Ph.ChatCircle, null, size = 20.dp, tint = tint)
+                Spacer(Modifier.width(8.dp))
+                Text("Chat", style = MaterialTheme.typography.titleMedium, fontSize = 16.sp, color = tint)
             }
             DropdownMenu(expanded = agentMenu, onDismissRequest = { agentMenu = false }) {
                 for (agent in installed) {
@@ -479,8 +563,9 @@ private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit,
                 }
             }
         }
+        Spacer(Modifier.width(4.dp))
         if (isAndroid) {
-            ActionTile("Build", Ph.Play, Modifier.weight(1f), tile = AppColors.tiles.lime) {
+            DockButton("Build", Ph.Hammer, tiles.lime, Modifier.weight(1f)) {
                 runInTerminal(
                     "cd ${shellQuote(dir.path)} && bash ./gradlew assembleDebug && " +
                         "yurlungr-install \"\$(ls -t app/build/outputs/apk/debug/*.apk | head -1)\"",
@@ -489,20 +574,22 @@ private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit,
             }
         }
         if (hasWeb) {
-            ActionTile("Run", Ph.Globe, Modifier.weight(1f), tile = AppColors.tiles.lime, onClick = onRunWeb)
+            // Says what a tap does now: start it, or open the app once it's up.
+            val running = webState == dev.yurlungr.app.web.WebRunState.Running
+            val starting = webState?.active == true && !running
+            DockButton(
+                when { running -> "Open"; starting -> "Starting"; else -> "Run" },
+                if (running) Ph.Globe else Ph.Play, tiles.lime, Modifier.weight(1f),
+                dot = when { running -> AppColors.status.success; starting -> AppColors.status.warning; else -> null },
+                onLongClick = onRunWebOptions, onClick = onRunWeb,
+            )
         }
-        if (hasStacks) {
-            // Detected tech stacks: install their dependencies (npm, Gradle, pub, pip…).
-            ActionTile("Setup", Ph.Wrench, Modifier.weight(1f), tile = AppColors.tiles.lime, onClick = onSetup)
-        }
-        if (hasGit) {
-            // Next to Terminal: one-tap routines (get latest, sync, push…) and AI-assisted ones.
-            ActionTile("Git", Ph.GitBranch, Modifier.weight(1f), tile = AppColors.tiles.lilac, onClick = onGitActions)
-        }
+        if (hasStacks) DockButton("Setup", Ph.Wrench, tiles.sky, Modifier.weight(1f), dot = if (setupNeeded) AppColors.status.warning else null, onClick = onSetup)
+        if (hasGit) DockButton("Git", Ph.GitBranch, tiles.lilac, Modifier.weight(1f), onClick = onGitActions)
         Box(Modifier.weight(1f)) {
             var terminalMenu by remember { mutableStateOf(false) }
             val newHere = { runInTerminal("cd ${shellQuote(dir.path)}", dir.name) }
-            ActionTile("Terminal", Ph.TerminalWindow) {
+            DockButton("Terminal", Ph.TerminalWindow, null, Modifier.fillMaxWidth()) {
                 // With terminals already open, ask: reuse one (those in this project first) or start fresh.
                 if (TerminalSessions.sessions.isEmpty()) newHere() else terminalMenu = true
             }
@@ -567,51 +654,43 @@ private fun TerminalMenu(dir: File, expanded: Boolean, onDismiss: () -> Unit, on
     }
 }
 
+/** A dock tool: a tinted icon chip over a short label, with an optional status dot. */
 @Composable
-private fun ActionTile(
+private fun DockButton(
     label: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
+    tile: dev.yurlungr.app.ui.Tile?,
     modifier: Modifier = Modifier,
-    primary: Boolean = false,
-    enabled: Boolean = true,
-    tile: dev.yurlungr.app.ui.Tile? = null,
+    dot: Color? = null,
+    /** Options, when the tap already acts. */
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    val bg = when {
-        primary -> colors.primary
-        tile != null -> tile.fill
-        else -> colors.surfaceContainer
-    }
-    val fg = when {
-        primary -> colors.onPrimary
-        tile != null -> tile.on
-        else -> colors.onSurface
-    }
-    val shape = RoundedCornerShape(22.dp)
-    val content: @Composable () -> Unit = {
-        val tint = if (enabled) fg else colors.outline
-        PhIcon(icon, null, size = if (primary) 20.dp else 18.dp, tint = tint)
-        if (primary) {
-            Spacer(Modifier.width(8.dp))
-            Text(label, style = MaterialTheme.typography.titleMedium, fontSize = 16.sp, color = tint)
-        } else {
-            Spacer(Modifier.height(3.dp))
-            Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = tint)
+    Column(
+        modifier
+            .height(56.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .combinedClickable(onClickLabel = label, onLongClickLabel = onLongClick?.let { "$label options" }, onLongClick = onLongClick, onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Box {
+            Box(
+                Modifier.size(width = 40.dp, height = 28.dp).clip(RoundedCornerShape(14.dp))
+                    .background(tile?.fill ?: colors.surfaceContainerHighest),
+                contentAlignment = Alignment.Center,
+            ) { PhIcon(icon, null, size = 17.dp, tint = tile?.on ?: colors.onSurface) }
+            if (dot != null) {
+                // Ringed in the dock colour so it reads on any tile.
+                Box(
+                    Modifier.align(Alignment.TopEnd).size(11.dp).clip(CircleShape)
+                        .background(colors.surfaceContainer).padding(2.dp).clip(CircleShape).background(dot),
+                )
+            }
         }
-    }
-    val base = modifier
-        .fillMaxWidth()
-        .height(60.dp)
-        .clip(shape)
-        .background(if (enabled) bg else colors.surfaceContainerHigh)
-        .then(if (!primary && tile == null) Modifier.border(1.dp, colors.outlineVariant, shape) else Modifier)
-        .clickable(enabled = enabled, onClick = onClick)
-    // The main action reads as one line (icon + label); the others stack.
-    if (primary) {
-        Row(base, horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) { content() }
-    } else {
-        Column(base, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) { content() }
+        Spacer(Modifier.height(4.dp))
+        Text(label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = colors.onSurface, maxLines = 1, softWrap = false)
     }
 }
 
@@ -635,196 +714,6 @@ private fun GitErrorCard(error: GitError, onInstall: () -> Unit, onRetry: () -> 
             TextButton(onClick = onRetry) { Text("Retry") }
         }
     }
-}
-
-@Composable
-private fun ChangesTab(
-    dir: File,
-    git: Git,
-    status: GitStatus?,
-    busy: String?,
-    message: Pair<String, Boolean>?,
-    onInit: () -> Unit,
-    commitMessage: String,
-    onCommitMessageChange: (String) -> Unit,
-    onCommit: (String) -> Unit,
-    onPull: () -> Unit,
-    onPush: () -> Unit,
-    onAddGitignore: () -> Unit,
-    onPublish: () -> Unit,
-) {
-    val expanded = remember(dir) { mutableStateMapOf<String, String?>() } // path -> diff (null = loading)
-    val scope = rememberCoroutineScope()
-
-    LazyColumn(
-        contentPadding = PaddingValues(12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        when {
-            status == null -> items(5) { SkeletonListItem() }
-            // Shown in the card above; never offer "Initialize git" for a repo git just couldn't read.
-            status.error != null -> item { Text("Git couldn't read this folder; see the message above.", style = MaterialTheme.typography.bodyMedium) }
-            !status.isRepo -> item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("This folder isn't a git repository.", style = MaterialTheme.typography.bodyMedium)
-                    Button(onClick = onInit, enabled = busy == null) { Text("Initialize git") }
-                }
-            }
-            else -> {
-                item { SyncRow(status, busy, onPull, onPush) }
-                if (!status.hasOrigin && !status.unborn) {
-                    item {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                "Not on GitHub yet.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.weight(1f),
-                            )
-                            FilledTonalButton(onClick = onPublish, enabled = busy == null) { Text("Publish to GitHub") }
-                        }
-                    }
-                }
-                message?.let { (text, isError) -> item { ResultBox(text, isError) } }
-                if (!File(dir, ".gitignore").exists() && status.changes.any { looksGenerated(it.path) }) {
-                    item {
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text(
-                                    "No .gitignore: build output and caches would be committed.",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                )
-                                FilledTonalButton(onClick = onAddGitignore, enabled = busy == null) { Text("Add standard .gitignore") }
-                            }
-                        }
-                    }
-                }
-                if (status.changes.isEmpty()) {
-                    item {
-                        Text("No changes. Working tree clean.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                } else {
-                    item {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(
-                                commitMessage,
-                                onCommitMessageChange,
-                                label = { Text("Commit message") },
-                                modifier = Modifier.fillMaxWidth(),
-                                maxLines = 4,
-                            )
-                            Button(
-                                onClick = {
-                                    onCommit(commitMessage.trim())
-                                },
-                                enabled = busy == null && commitMessage.isNotBlank(),
-                            ) { Text("Commit all ${status.changes.size} changes") }
-                        }
-                    }
-                    changeItems(status, expanded) { change ->
-                        if (expanded.containsKey(change.path)) {
-                            expanded.remove(change.path)
-                        } else {
-                            expanded[change.path] = null
-                            scope.launch { expanded[change.path] = git.diff(dir, change, status.unborn) }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-private fun looksGenerated(path: String): Boolean =
-    path.startsWith(".gradle/") || path.startsWith("build/") || path.contains("/build/") ||
-        path.startsWith("node_modules/") || path.startsWith(".kotlin/") || path == "local.properties"
-
-private fun LazyListScope.changeItems(
-    status: GitStatus,
-    expanded: Map<String, String?>,
-    onToggle: (GitChange) -> Unit,
-) {
-    items(status.changes, key = { it.path }) { change ->
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-            modifier = Modifier.fillMaxWidth().animateContentSize(),
-        ) {
-            Column(Modifier.clickable { onToggle(change) }.padding(12.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        change.label.uppercase(),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = when (change.label) {
-                            "new", "added" -> Color(0xFF2DA44E)
-                            "deleted" -> MaterialTheme.colorScheme.error
-                            "conflict" -> Color(0xFFD29922)
-                            else -> MaterialTheme.colorScheme.primary
-                        },
-                        modifier = Modifier.width(76.dp),
-                    )
-                    Text(
-                        change.origPath?.let { "$it → ${change.path}" } ?: change.path,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontFamily = FontFamily.Monospace,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                if (expanded.containsKey(change.path)) {
-                    Spacer(Modifier.size(8.dp))
-                    val diff = expanded[change.path]
-                    if (diff == null) SkeletonCode(lines = 6) else UnifiedDiff(diff)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SyncRow(status: GitStatus, busy: String?, onPull: () -> Unit, onPush: () -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(status.branch ?: "?", style = MaterialTheme.typography.titleSmall, fontFamily = FontFamily.Monospace)
-            Text(
-                when {
-                    status.unborn -> "No commits yet"
-                    status.upstream == null -> "Not pushed anywhere yet"
-                    status.ahead == 0 && status.behind == 0 -> "Up to date with ${status.upstream}"
-                    else -> "${status.ahead} to push · ${status.behind} to pull (${status.upstream})"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        if (busy != null) {
-            WaveDots(dotSize = 5.dp)
-            Spacer(Modifier.width(8.dp))
-            Text(busy, style = MaterialTheme.typography.labelMedium)
-        } else {
-            TextButton(onClick = onPull, enabled = status.upstream != null) { Text("Pull") }
-            TextButton(onClick = onPush, enabled = !status.unborn && status.hasOrigin) { Text("Push") }
-        }
-    }
-}
-
-@Composable
-private fun ResultBox(text: String, isError: Boolean) {
-    Text(
-        text,
-        fontFamily = FontFamily.Monospace,
-        fontSize = 11.sp,
-        lineHeight = 15.sp,
-        color = if (isError) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.small)
-            .background(if (isError) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceContainerHighest)
-            .padding(10.dp),
-    )
 }
 
 /** The project's diffs (Changes tab, History): see [DiffViewer]. */
@@ -902,31 +791,70 @@ private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<
     Column(Modifier.fillMaxSize()) {
         if (isRepo) {
             val changes = treeStatus?.changes.orEmpty()
-            val staged = changes.count { !it.untracked && it.index != ' ' }
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                for (option in listOf(FileTreeFilter.All, FileTreeFilter.Changed, FileTreeFilter.Ignored, FileTreeFilter.NotIgnored)) {
+            val colors = MaterialTheme.colorScheme
+            // Segmented filter: the whole tree, what changed, what git ignores, or the source without it.
+            Row(
+                Modifier.padding(horizontal = 12.dp).fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                    .background(colors.surfaceContainer).padding(3.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                for (option in listOf(FileTreeFilter.All, FileTreeFilter.Changed, FileTreeFilter.NotIgnored, FileTreeFilter.Ignored)) {
                     val needsIgnore = option == FileTreeFilter.Ignored || option == FileTreeFilter.NotIgnored
-                    val label = when (option) {
-                        FileTreeFilter.Changed -> "Uncommitted · ${changes.size}"
-                        else -> option.label
+                    val usable = !needsIgnore || ignored != null
+                    val on = effectiveFilter == option
+                    val bg by animateColorAsState(if (on) colors.surfaceContainerHighest else Color.Transparent, tween(Motion.SHORT), label = "filter")
+                    Row(
+                        Modifier.weight(if (option == FileTreeFilter.Changed && changes.isNotEmpty()) 1.3f else 1f).height(32.dp)
+                            .clip(RoundedCornerShape(11.dp)).background(bg).clickable(enabled = usable) { filter = option },
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(option.label, style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false,
+                            fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
+                            color = when { !usable -> colors.outline; on -> colors.onSurface; else -> colors.onSurfaceVariant })
+                        if (option == FileTreeFilter.Changed && changes.isNotEmpty()) {
+                            Spacer(Modifier.width(5.dp))
+                            Text(if (changes.size > 99) "99+" else "${changes.size}", fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                                color = AppColors.tiles.peach.on, maxLines = 1, softWrap = false,
+                                modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(AppColors.tiles.peach.fill).padding(horizontal = 5.dp))
+                        }
                     }
-                    Chip(label, selected = effectiveFilter == option, onClick = { if (!needsIgnore || ignored != null) filter = option })
                 }
             }
-            // One line saying where things stand, instead of a toggle to find out.
-            Text(
+            // Where things stand, by kind, with the same colours as the rows below.
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp).heightIn(min = 36.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
                 when {
-                    checkingIgnored && ignored == null -> "Reading Git's ignore rules…"
-                    ignored == null -> "Couldn't read Git's ignore rules. Pull down to retry."
-                    changes.isEmpty() -> "Everything is committed."
-                    else -> "${changes.size} uncommitted" + (if (staged > 0) " · $staged staged" else "") +
-                        (treeStatus?.conflicts?.size?.takeIf { it > 0 }?.let { " · $it with conflicts" } ?: "")
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 4.dp),
-            )
+                    checkingIgnored && ignored == null -> SummaryText("Reading Git's ignore rules…")
+                    ignored == null -> SummaryText("Couldn't read Git's ignore rules. Pull down to retry.")
+                    changes.isEmpty() -> {
+                        PhIcon(Ph.CheckCircle, null, size = 14.dp, tint = AppColors.status.success)
+                        SummaryText("Everything is committed", Modifier.padding(start = 0.dp))
+                    }
+                    else -> {
+                        val tones = AppColors.status
+                        val counts = changes.groupingBy { it.label }.eachCount()
+                        for ((label, tone) in listOf("new" to tones.success, "added" to tones.success, "modified" to tones.warning,
+                            "renamed" to colors.primary, "deleted" to colors.error, "conflict" to colors.error)) {
+                            val n = counts[label] ?: continue
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.size(7.dp).clip(CircleShape).background(tone))
+                                Spacer(Modifier.width(5.dp))
+                                SummaryText("$n $label")
+                            }
+                        }
+                        val staged = changes.count { it.isStaged }
+                        if (staged > 0) SummaryText("$staged staged")
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                if (open.isNotEmpty() && effectiveFilter != FileTreeFilter.Changed) {
+                    TextButton(onClick = { open.clear() }) { Text("Collapse all", style = MaterialTheme.typography.labelMedium) }
+                }
+            }
         }
         val pullState = androidx.compose.material3.pulltorefresh.rememberPullToRefreshState()
         androidx.compose.material3.pulltorefresh.PullToRefreshBox(
@@ -960,13 +888,14 @@ private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<
                 val change = gitState.changesByPath[relative]
                 val changed = gitState.isChanged(relative, entry.isDir)
                 val isIgnored = ignored != null && gitState.isIgnored(relative)
+                val flat = effectiveFilter == FileTreeFilter.Changed
                 TreeRow(
-                    name = if (effectiveFilter == FileTreeFilter.Changed) relative else f.name,
+                    name = f.name,
+                    folder = if (flat) relative.substringBeforeLast('/', "").ifEmpty { null } else null,
                     depth = depth, isDir = entry.isDir, expanded = open.containsKey(f.path),
                     enabled = entry.enabled,
-                    mark = change?.let(::changeMark) ?: if (changed) "•" else null,
-                    badge = change?.let(::changeBadge),
-                    staged = change != null && !change.untracked && change.index != ' ',
+                    change = change,
+                    changedInside = if (entry.isDir && changed) gitState.changedInside[relative] ?: 0 else 0,
                     ignored = isIgnored,
                     modifier = Modifier.animateItem(),
                 ) {
@@ -982,92 +911,94 @@ private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<
     }
 }
 
-/** The word on a changed file's pill. */
-private fun changeBadge(c: GitChange): String = when (c.label) {
-    "new" -> "New"
-    "added" -> "Added"
-    "deleted" -> "Deleted"
-    "conflict" -> "Conflict"
-    "renamed" -> "Renamed"
-    else -> "Modified"
-}
-
 /** A file-tree row with its file-system facts read once, off the main thread. */
 private data class TreeEntry(val file: File, val depth: Int, val isDir: Boolean, val enabled: Boolean)
 
-private fun changeMark(c: GitChange) = when (c.label) {
-    "new" -> "?"
-    "added" -> "A"
-    "deleted" -> "D"
-    "conflict" -> "!"
-    "renamed" -> "R"
-    else -> "M"
+@Composable
+private fun SummaryText(text: String, modifier: Modifier = Modifier) =
+    Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, modifier = modifier)
+
+/** An icon and tint for a file, by its kind (code, config, docs, images, scripts). */
+@Composable
+private fun fileIcon(name: String): Pair<androidx.compose.ui.graphics.vector.ImageVector, Color> {
+    val colors = MaterialTheme.colorScheme
+    val ext = name.substringAfterLast('.', "").lowercase()
+    return when {
+        ext in setOf("png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp") -> Ph.Image to AppColors.status.success
+        ext in setOf("md", "markdown", "txt", "rst", "adoc") || name.equals("LICENSE", true) -> Ph.BookOpen to colors.secondary
+        ext in setOf("sh", "bash", "zsh", "bat", "ps1") || name == "gradlew" -> Ph.Terminal to colors.tertiary
+        ext in setOf("json", "yml", "yaml", "toml", "xml", "properties", "gradle", "kts", "lock", "ini", "cfg", "conf") ||
+            name.startsWith(".") -> Ph.GearSix to colors.onSurfaceVariant
+        ext in setOf("kt", "java", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rs", "go", "dart", "swift", "c", "h", "cpp",
+            "cs", "rb", "php", "html", "css", "scss", "vue", "svelte", "astro", "sql") -> Ph.FileText to colors.primary
+        else -> Ph.File to colors.onSurfaceVariant
+    }
 }
 
 @Composable
 private fun TreeRow(
-    name: String, depth: Int, isDir: Boolean, expanded: Boolean, mark: String?,
-    /** A changed file's state ("Modified", "New"…), shown as a coloured pill. */
-    badge: String? = null,
-    staged: Boolean = false,
+    name: String,
+    /** In the flat Changed list: the folder it's in. */
+    folder: String? = null,
+    depth: Int, isDir: Boolean, expanded: Boolean,
+    change: GitChange? = null,
+    /** For folders: how many changed files are inside. */
+    changedInside: Int = 0,
     ignored: Boolean = false, enabled: Boolean = true, modifier: Modifier = Modifier, onClick: () -> Unit,
 ) {
-    val tones = AppColors.status
-    val markColor = when (mark) {
-        "?", "A" -> tones.success
-        "D", "!" -> MaterialTheme.colorScheme.error
-        else -> tones.warning
-    }
+    val colors = MaterialTheme.colorScheme
+    val guide = colors.outlineVariant.copy(alpha = 0.6f)
+    val (icon, iconTint) = if (isDir) Ph.FolderSimple to colors.primary else fileIcon(name)
+    val tone = change?.let { changeTone(it).second }
     Row(
         modifier
             .fillMaxWidth()
-            .height(42.dp)
+            .height(if (folder != null) 48.dp else 40.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(if (mark != null && !isDir) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent)
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(start = 12.dp + 22.dp * depth, end = 12.dp),
+            // A thin guide per level, so deep trees stay readable.
+            .drawBehind {
+                for (level in 0 until depth) {
+                    val x = (12 + 22 * level + 7).dp.toPx()
+                    drawLine(guide, androidx.compose.ui.geometry.Offset(x, 0f), androidx.compose.ui.geometry.Offset(x, size.height), strokeWidth = 1.dp.toPx())
+                }
+            }
+            .padding(start = 12.dp + 22.dp * depth, end = 10.dp)
+            .then(if (ignored) Modifier.alpha(0.5f) else Modifier),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.width(14.dp)) {
-            if (isDir) PhIcon(if (expanded) Ph.CaretDown else Ph.CaretRight, null, size = 12.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (isDir) PhIcon(if (expanded) Ph.CaretDown else Ph.CaretRight, null, size = 12.dp, tint = colors.onSurfaceVariant)
         }
         Spacer(Modifier.width(8.dp))
-        PhIcon(
-            if (isDir) Ph.FolderSimple else Ph.FileText,
-            null,
-            size = 18.dp,
-            tint = when {
-                isDir -> MaterialTheme.colorScheme.primary
-                mark != null -> markColor
-                else -> MaterialTheme.colorScheme.onSurfaceVariant
-            },
-        )
+        PhIcon(icon, null, size = 18.dp, tint = iconTint)
         Spacer(Modifier.width(10.dp))
-        Text(
-            name,
-            color = if (ignored) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 13.5.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                name,
+                color = tone ?: colors.onSurface,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.5.sp,
+                fontWeight = if (change != null) FontWeight.Medium else FontWeight.Normal,
+                textDecoration = if (change?.label == "deleted") androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (folder != null) Text(folder, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
         when {
-            badge != null && !isDir -> {
-                if (staged) {
-                    // Staged: in the next commit already.
-                    Text("staged", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 6.dp))
-                }
-                Text(
-                    badge, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = markColor,
-                    modifier = Modifier.padding(start = 6.dp).clip(RoundedCornerShape(50)).background(markColor.copy(alpha = 0.14f)).padding(horizontal = 8.dp, vertical = 2.dp),
-                )
+            change != null && !isDir -> {
+                // Staged: already in the next commit.
+                if (change.isStaged) PhIcon(Ph.CheckCircle, "Staged", size = 14.dp, tint = AppColors.status.success, modifier = Modifier.padding(end = 6.dp))
+                StatusLetter(change, size = 20.dp)
             }
-            ignored -> Text("ignored", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
-                modifier = Modifier.padding(start = 6.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surfaceContainerHigh).padding(horizontal = 8.dp, vertical = 2.dp))
-            // A folder with changes somewhere inside.
-            mark != null -> Box(Modifier.padding(start = 6.dp).size(7.dp).clip(RoundedCornerShape(50)).background(markColor))
+            changedInside > 0 -> Text(
+                if (changedInside > 99) "99+" else "$changedInside",
+                fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppColors.status.warning,
+                modifier = Modifier.clip(RoundedCornerShape(50)).background(AppColors.status.warning.copy(alpha = 0.14f)).padding(horizontal = 7.dp, vertical = 1.dp),
+            )
+            ignored -> Text("ignored", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
         }
     }
 }
