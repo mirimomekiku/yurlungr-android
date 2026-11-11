@@ -106,10 +106,21 @@ install_pkgs() {
   done
 }
 
-# Runs "name<TAB>command" entries from toolchain.sh through check.
+# Runs "name<TAB>command" entries from toolchain.sh through check. Optional tools (agents
+# installed one by one from the app) are checked only when present, like System checks does.
 run_checks() {
-  local entry
-  for entry in "$@"; do check "${entry%%$'\t'*}" "${entry#*$'\t'}"; done
+  local entry name only
+  # Declared even if an older toolchain.sh didn't define it (an empty map: everything is checked).
+  declare -gA YURLUNGR_ONLY_IF
+  for entry in "$@"; do
+    name=${entry%%$'\t'*}
+    only=${YURLUNGR_ONLY_IF[$name]:-}
+    if [ -n "$only" ] && [ ! -e "$PREFIX/$only" ]; then
+      printf '\n[%s skipped: not installed]\n' "$name" >> "$LOG"
+      continue
+    fi
+    check "$name" "${entry#*$'\t'}"
+  done
 }
 
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }

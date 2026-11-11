@@ -77,7 +77,8 @@ object Toolchain {
         Tool("codex-acp", "Codex ACP adapter", "test -x \"\$(command -v codex-acp)\" && echo \"\$(command -v codex-acp)\"", ToolSetup.Agents, onlyIf = "bin/codex-acp"),
         Tool("claude", "Claude Code", "claude --version", ToolSetup.Agents, onlyIf = "libexec/yurlungr/claude-glibc"),
         Tool("claude-agent-acp", "Claude ACP adapter", "test -x \"\$(command -v claude-agent-acp)\" && echo \"\$(command -v claude-agent-acp)\"", ToolSetup.Agents, onlyIf = "bin/claude-agent-acp"),
-        Tool("agy", "Antigravity", "agy --version", ToolSetup.Agents, onlyIf = "bin/agy"),
+        // Its Go runtime logs a startup line to stderr ("logging before google.Init") on every run.
+        Tool("agy", "Antigravity", "agy --version 2>/dev/null", ToolSetup.Agents, onlyIf = "bin/agy"),
         Tool("qwen", "Qwen Code", "qwen --version", ToolSetup.Agents, onlyIf = "bin/qwen"),
         Tool("kimi", "Kimi Code", "kimi --version", ToolSetup.Agents, onlyIf = "bin/kimi"),
         Tool("auggie", "Auggie", "auggie --version", ToolSetup.Agents, onlyIf = "bin/auggie"),
@@ -173,6 +174,11 @@ object Toolchain {
             tools.filter { it.setup == setup }.forEach { appendLine("  ${shellQuote(it.id + "\t" + it.probe)}") }
             appendLine(")")
         }
+        // Tools checked only when installed (optional agents): the file that says so, under $PREFIX.
+        // Global: the scripts source this file from inside a function.
+        appendLine("declare -gA YURLUNGR_ONLY_IF=(")
+        tools.filter { it.onlyIf != null }.forEach { appendLine("  [${shellQuote(it.id)}]=${shellQuote(it.onlyIf!!)}") }
+        appendLine(")")
     }
 
     private fun shellQuote(s: String) = "'" + s.replace("'", "'\\''") + "'"

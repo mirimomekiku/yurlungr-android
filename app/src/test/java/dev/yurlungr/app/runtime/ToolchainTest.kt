@@ -57,6 +57,11 @@ class ToolchainTest {
         assertTrue(sh.contains("YURLUNGR_CHECKS_DEVTOOLS=("))
         assertTrue(sh.contains("YURLUNGR_CHECKS_ANDROIDSDK=("))
         assertTrue(sh.contains("'git\tgit --version'"))
+        // Optional agents are checked only when installed (the agents setup failed on every one before).
+        assertTrue(sh.contains("declare -gA YURLUNGR_ONLY_IF=("))
+        assertTrue(sh.contains("['qwen']='bin/qwen'"))
+        assertTrue(sh.contains("['goose']='libexec/yurlungr/bin/goose'"))
+        assertFalse("required tools are always checked", sh.contains("['git']="))
     }
 
     @Test fun `setup status files round-trip into a summary`() {

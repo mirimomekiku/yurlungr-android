@@ -52,8 +52,13 @@ check() {
 record INFO device "$(uname -m) · Android $(getprop ro.build.version.release) · $(getprop ro.product.manufacturer) $(getprop ro.product.model)"
 
 printf '\n\033[1;36m==> Version checks\033[0m\n'
+declare -A YURLUNGR_ONLY_IF # kept if toolchain.sh defined it; empty otherwise
 for entry in "${YURLUNGR_CHECKS_DEVTOOLS[@]}" "${YURLUNGR_CHECKS_AGENTS[@]}" "${YURLUNGR_CHECKS_ANDROIDSDK[@]}"; do
-  check "${entry%%$'\t'*}" "${entry#*$'\t'}"
+  name=${entry%%$'\t'*}
+  # Optional agents that aren't installed aren't failures.
+  only=${YURLUNGR_ONLY_IF[$name]:-}
+  if [ -n "$only" ] && [ ! -e "$PREFIX/$only" ]; then continue; fi
+  check "$name" "${entry#*$'\t'}"
 done
 check grun 'command -v grun'
 
