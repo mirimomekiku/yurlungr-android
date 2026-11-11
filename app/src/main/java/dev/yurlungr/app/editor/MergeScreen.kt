@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -121,17 +122,32 @@ object Merge {
 /** Resolve a conflicted file conflict by conflict: ours, theirs, both, or your own edit. */
 @Composable
 fun MergeScreen(file: File, onBack: () -> Unit, onOpenEditor: () -> Unit) {
-    BackHandler(onBack = onBack)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var parts by remember { mutableStateOf<List<MergePart>?>(null) }
     val resolutions = remember { mutableStateListOf<String?>() }
     var editing by remember { mutableStateOf<Int?>(null) }
+    // The file's line endings, written back as they were (not every line rewritten to LF).
+    var crlf by remember { mutableStateOf(false) }
+    // Resolutions picked since the last save; Back asks before dropping them.
+    var unsaved by remember { mutableStateOf(false) }
+    var confirmBack by remember { mutableStateOf(false) }
+    fun tryBack() { if (unsaved) confirmBack = true else onBack() }
+    BackHandler(onBack = ::tryBack)
     LaunchedEffect(file) {
-        val p = withContext(Dispatchers.IO) { Merge.parse(file.readText().replace("\r\n", "\n")) }
+        val text = withContext(Dispatchers.IO) { file.readText() }
+        crlf = text.contains("\r\n")
+        val p = Merge.parse(text.replace("\r\n", "\n"))
         parts = p
         resolutions.clear(); repeat(p.count { it is MergePart.Conflict }) { resolutions += null }
     }
+    if (confirmBack) AlertDialog(
+        onDismissRequest = { confirmBack = false },
+        title = { Text("Leave without saving?") },
+        text = { Text("The conflicts you resolved here aren't saved to ${file.name} yet.") },
+        confirmButton = { TextButton(onClick = { confirmBack = false; onBack() }) { Text("Leave") } },
+        dismissButton = { TextButton(onClick = { confirmBack = false }) { Text("Keep resolving") } },
+    )
     val conflicts = parts.orEmpty().filterIsInstance<MergePart.Conflict>()
     val done = resolutions.count { it != null }
     val colors = MaterialTheme.colorScheme
@@ -141,7 +157,8 @@ fun MergeScreen(file: File, onBack: () -> Unit, onOpenEditor: () -> Unit) {
         val p = parts ?: return@launch
         val ok = withContext(Dispatchers.IO) {
             runCatching {
-                dev.yurlungr.app.editor.FileSave.writeAtomically(file, Merge.render(p, resolutions))
+                val rendered = Merge.render(p, resolutions)
+                dev.yurlungr.app.editor.FileSave.writeAtomically(file, if (crlf) rendered.replace("\n", "\r\n") else rendered)
                 if (markResolved) {
                     val paths = RuntimePaths(context)
                     val root = EditorTools.rootOf(file)
@@ -149,12 +166,13 @@ fun MergeScreen(file: File, onBack: () -> Unit, onOpenEditor: () -> Unit) {
                 }
             }
         }
+        if (ok.isSuccess) unsaved = false
         Toast.makeText(context, ok.fold({ if (markResolved) "Saved and marked resolved" else "Saved" }, { "Couldn't save: ${it.message}" }), Toast.LENGTH_SHORT).show()
         if (ok.isSuccess && markResolved) onBack()
     }
 
     Column(Modifier.fillMaxSize().background(colors.background).systemBarsPadding()) {
-        ScreenHeader("Resolve conflicts", onBack) { TextButton(onClick = onOpenEditor) { Text("Editor") } }
+        ScreenHeader("Resolve conflicts", ::tryBack) { TextButton(onClick = onOpenEditor) { Text("Editor") } }
         Text("${file.name} · $done of ${conflicts.size} resolved", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 20.dp))
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -170,13 +188,13 @@ fun MergeScreen(file: File, onBack: () -> Unit, onOpenEditor: () -> Unit) {
                     c.base?.let { Side("Base (before both)", it, colors.surfaceContainerHigh) }
                     Side("Theirs · ${c.theirsLabel}", c.theirs, tiles.sky.fill.copy(alpha = 0.25f))
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        OutlinedButton(onClick = { resolutions[i] = c.ours }) { Text("Use ours") }
-                        OutlinedButton(onClick = { resolutions[i] = c.theirs }) { Text("Use theirs") }
-                        OutlinedButton(onClick = { resolutions[i] = c.ours + "\n" + c.theirs }) { Text("Both") }
-                        TextButton(onClick = { if (resolutions[i] == null) resolutions[i] = c.ours; editing = i }) { Text("Edit") }
+                        OutlinedButton(onClick = { resolutions[i] = c.ours; unsaved = true }) { Text("Use ours") }
+                        OutlinedButton(onClick = { resolutions[i] = c.theirs; unsaved = true }) { Text("Use theirs") }
+                        OutlinedButton(onClick = { resolutions[i] = c.ours + "\n" + c.theirs; unsaved = true }) { Text("Both") }
+                        TextButton(onClick = { if (resolutions[i] == null) { resolutions[i] = c.ours; unsaved = true }; editing = i }) { Text("Edit") }
                     }
                     resolutions[i]?.let { r ->
-                        if (editing == i) OutlinedTextField(r, { resolutions[i] = it }, label = { Text("Result") },
+                        if (editing == i) OutlinedTextField(r, { resolutions[i] = it; unsaved = true }, label = { Text("Result") },
                             textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
                             modifier = Modifier.fillMaxWidth())
                         else Side("Result", r, AppColors.status.successContainer)
