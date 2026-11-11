@@ -68,7 +68,7 @@ class HardeningTest {
 
     @Test fun `every optional pack has its own script, packages, tools and fix`() {
         val packs = ToolSetup.entries.filter { it.optional }
-        assertEquals(7, packs.size)
+        assertEquals(42, packs.size)
         assertEquals(packs.size, packs.mapNotNull { it.script }.toSet().size)
         assertEquals(Toolchain.tools.map { it.id }.toSet().size, Toolchain.tools.size)
         val manifest = Toolchain.shellManifest()
@@ -79,6 +79,10 @@ class HardeningTest {
             assertTrue(manifest.contains("YURLUNGR_CHECKS_${p.name.uppercase()}=("))
             assertEquals(p, Fix.entries.first { it.setup == p }.setup)
             assertTrue(setupScriptCommand(p.script!!).contains(p.script!!))
+            // The script ships with the app and reads its own pack's lists.
+            val script = java.io.File("src/main/assets/${p.script}")
+            assertTrue("${p.script} exists", script.isFile)
+            assertTrue("${p.script} uses its pack", script.readText().contains("YURLUNGR_PACKAGES_${p.name.uppercase()}[@]"))
         }
     }
 

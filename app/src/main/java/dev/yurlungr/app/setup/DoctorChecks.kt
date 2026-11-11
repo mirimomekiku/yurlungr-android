@@ -24,7 +24,10 @@ enum class CheckStatus { Pass, Warn, Fail, Info }
 /** Fixes the UI knows how to offer; kept as data so checks stay free of UI/Activity code. */
 enum class Fix(val setup: ToolSetup? = null) {
     InstallPython(ToolSetup.Python), InstallBuildTools(ToolSetup.BuildTools), InstallUtils(ToolSetup.Utils),
+    InstallNativeLibs(ToolSetup.NativeLibs), InstallPyScience(ToolSetup.PyScience), InstallDebugging(ToolSetup.Debugging), InstallLanguageServers(ToolSetup.LanguageServers), InstallNetworking(ToolSetup.Networking), InstallSecurity(ToolSetup.Security), InstallDataTools(ToolSetup.DataTools), InstallTaskRunners(ToolSetup.TaskRunners), InstallDocs(ToolSetup.Docs), InstallArchives(ToolSetup.Archives), InstallOcr(ToolSetup.Ocr), InstallBrowser(ToolSetup.Browser),
+    InstallCrystal(ToolSetup.Crystal), InstallNim(ToolSetup.Nim), InstallHaskell(ToolSetup.Haskell), InstallScala(ToolSetup.Scala), InstallDlang(ToolSetup.Dlang), InstallPerl(ToolSetup.Perl), InstallShell(ToolSetup.Shell), InstallCliTools(ToolSetup.CliTools), InstallServers(ToolSetup.Servers), InstallDevOps(ToolSetup.DevOps), InstallMedia(ToolSetup.Media), InstallLocalAi(ToolSetup.LocalAi), InstallDistros(ToolSetup.Distros),
     InstallEditors(ToolSetup.Editors), InstallGo(ToolSetup.Go), InstallRust(ToolSetup.Rust), InstallRuby(ToolSetup.Ruby),
+    InstallJsRuntimes(ToolSetup.JsRuntimes), InstallJvm(ToolSetup.Jvm), InstallPhp(ToolSetup.Php), InstallDart(ToolSetup.Dart), InstallDotnet(ToolSetup.Dotnet), InstallDatabases(ToolSetup.Databases), InstallSwift(ToolSetup.Swift), InstallZig(ToolSetup.Zig), InstallElixir(ToolSetup.Elixir), InstallLua(ToolSetup.Lua),
     InstallBootstrap, Notifications, BatteryOptimization, PhantomProcesses, OpenTerminal, InstallAgents, InstallAndroidSdk,
     /** Git, gh, Node.js, termux-exec… (dev-tools-setup.sh). */
     InstallDevTools,
@@ -32,6 +35,8 @@ enum class Fix(val setup: ToolSetup? = null) {
     ReinstallBootstrap,
     /** Rewrite the app's scripts and shims in the runtime. */
     RepairRuntime,
+    /** Pick the default JDK (Settings → Development environment). */
+    ChooseJdk,
 }
 
 data class Check(
@@ -71,6 +76,7 @@ object DoctorChecks {
                 }
                 add(agents(paths))
                 add(androidSdk(paths))
+                jdk(paths)?.let(::add)
                 addAll(setupRuns(paths))
             }
             add(notifications(context))
@@ -212,7 +218,7 @@ object DoctorChecks {
     suspend fun tools(paths: RuntimePaths): List<Check> {
         if (!paths.isBootstrapInstalled) return emptyList()
         val wanted = Toolchain.tools.filter { t -> t.onlyIf == null || File(paths.prefix, t.onlyIf).exists() }
-        val r = CommandRunner.shell(paths, Toolchain.probeScript(wanted), timeoutMs = Toolchain.probeBudgetMs(wanted.size))
+        val r = CommandRunner.shell(paths, Toolchain.probeScript(wanted), timeoutMs = Toolchain.probeBudgetMs(wanted.size, wanted.maxOfOrNull { it.timeoutS } ?: Toolchain.PROBE_TIMEOUT_S))
         if (!r.ok && r.output.isBlank()) {
             // Not by itself a sign of a broken base system (the shell check says if it is): no reinstall offered.
             return listOf(Check("tools", "Tools", CheckStatus.Warn, "Couldn't check the tools: " + r.describe("probe") + ". Tap refresh to retry.", required = false))
@@ -358,6 +364,20 @@ object DoctorChecks {
                 required = false,
             )
         }
+
+    /** Which JDK is the default, and the others installed; Change opens Development environment. */
+    private fun jdk(paths: RuntimePaths): Check? {
+        val current = dev.yurlungr.app.runtime.Jdks.current(paths.prefix) ?: return null
+        val others = dev.yurlungr.app.runtime.Jdks.installed(paths.prefix).filter { it != current }.map { it.version }
+        val how = if (dev.yurlungr.app.runtime.Jdks.isManual(paths.prefix)) "chosen" else "newest"
+        return Check(
+            "jdk", "Default JDK", CheckStatus.Info,
+            "Java ${current.version} ($how)" + (if (others.isEmpty()) "" else " · also ${others.joinToString()}") +
+                " · JAVA_HOME and Gradle toolchains set",
+            fix = Fix.ChooseJdk,
+            required = false,
+        )
+    }
 
     private fun cliReport(paths: RuntimePaths): Check {
         if (!paths.spikeReport.isFile) {

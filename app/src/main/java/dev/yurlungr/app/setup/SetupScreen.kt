@@ -90,7 +90,7 @@ private val AREAS = listOf(
     "Tools" to listOf(
         "agents", "tool-gemini", "tool-codex", "tool-codex-acp", "tool-claude", "tool-claude-agent-acp", "tool-agy", "setup-agents-setup",
         "tool-qwen", "tool-kimi", "tool-auggie", "tool-commandcode", "tool-copilot", "tool-goose", "tool-opencode",
-        "android-sdk", "tool-java", "tool-aapt2", "setup-android-sdk-setup", "cli-report",
+        "android-sdk", "tool-java", "jdk", "tool-aapt2", "setup-android-sdk-setup", "cli-report",
     ),
     // One group per optional pack, each with its own Install button.
     *ToolSetup.entries.filter { it.optional }.map { pack ->
@@ -121,6 +121,7 @@ fun SetupScreen(
     onInstallSetup: (ToolSetup) -> Unit,
     onHome: () -> Unit,
     onDevices: () -> Unit,
+    onDevEnvironment: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var logPath by remember { mutableStateOf<String?>(null) }
@@ -142,9 +143,10 @@ fun SetupScreen(
         Fix.InstallAndroidSdk -> onInstallAndroidSdk()
         Fix.InstallDevTools -> onInstallDevTools()
         Fix.InstallPython, Fix.InstallBuildTools, Fix.InstallUtils, Fix.InstallEditors,
-        Fix.InstallGo, Fix.InstallRust, Fix.InstallRuby -> onInstallSetup(requireNotNull(fix.setup))
+        Fix.InstallGo, Fix.InstallRust, Fix.InstallRuby, Fix.InstallJsRuntimes, Fix.InstallJvm, Fix.InstallPhp, Fix.InstallDart, Fix.InstallDotnet, Fix.InstallDatabases, Fix.InstallSwift, Fix.InstallZig, Fix.InstallElixir, Fix.InstallLua, Fix.InstallCrystal, Fix.InstallNim, Fix.InstallHaskell, Fix.InstallScala, Fix.InstallDlang, Fix.InstallPerl, Fix.InstallShell, Fix.InstallCliTools, Fix.InstallServers, Fix.InstallDevOps, Fix.InstallMedia, Fix.InstallLocalAi, Fix.InstallDistros, Fix.InstallNativeLibs, Fix.InstallPyScience, Fix.InstallDebugging, Fix.InstallLanguageServers, Fix.InstallNetworking, Fix.InstallSecurity, Fix.InstallDataTools, Fix.InstallTaskRunners, Fix.InstallDocs, Fix.InstallArchives, Fix.InstallOcr, Fix.InstallBrowser -> onInstallSetup(requireNotNull(fix.setup))
         Fix.ReinstallBootstrap -> confirmReinstall = true
         Fix.RepairRuntime -> vm.repairRuntime()
+        Fix.ChooseJdk -> onDevEnvironment()
     }
 
     val byId = vm.checks.associateBy { it.id }
@@ -400,9 +402,10 @@ private fun shortFixLabel(fix: Fix) = when (fix) {
     Fix.InstallAndroidSdk -> "Set up"
     Fix.InstallDevTools -> "Install"
     Fix.InstallPython, Fix.InstallBuildTools, Fix.InstallUtils, Fix.InstallEditors,
-    Fix.InstallGo, Fix.InstallRust, Fix.InstallRuby -> "Install"
+    Fix.InstallGo, Fix.InstallRust, Fix.InstallRuby, Fix.InstallJsRuntimes, Fix.InstallJvm, Fix.InstallPhp, Fix.InstallDart, Fix.InstallDotnet, Fix.InstallDatabases, Fix.InstallSwift, Fix.InstallZig, Fix.InstallElixir, Fix.InstallLua, Fix.InstallCrystal, Fix.InstallNim, Fix.InstallHaskell, Fix.InstallScala, Fix.InstallDlang, Fix.InstallPerl, Fix.InstallShell, Fix.InstallCliTools, Fix.InstallServers, Fix.InstallDevOps, Fix.InstallMedia, Fix.InstallLocalAi, Fix.InstallDistros, Fix.InstallNativeLibs, Fix.InstallPyScience, Fix.InstallDebugging, Fix.InstallLanguageServers, Fix.InstallNetworking, Fix.InstallSecurity, Fix.InstallDataTools, Fix.InstallTaskRunners, Fix.InstallDocs, Fix.InstallArchives, Fix.InstallOcr, Fix.InstallBrowser -> "Install"
     Fix.ReinstallBootstrap -> "Reinstall"
     Fix.RepairRuntime -> "Repair"
+    Fix.ChooseJdk -> "Change"
 }
 
 @Composable
