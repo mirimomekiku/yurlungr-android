@@ -143,13 +143,27 @@ object ProjectMcp {
     internal fun merged(existing: JsonObject?, servers: Map<String, JsonElement>): JsonObject =
         JsonObject((existing ?: JsonObject(emptyMap())) + ("mcpServers" to JsonObject(servers)))
 
+    /**
+     * The file's object for a merge: empty when there's no file, and an error when there is one we
+     * can't parse (comments, trailing commas): writing then would drop all its other settings.
+     */
+    private fun readForMerge(f: File): JsonObject {
+        if (!f.exists()) return JsonObject(emptyMap())
+        val text = f.readText()
+        if (text.isBlank()) return JsonObject(emptyMap())
+        return runCatching { Json.parseToJsonElement(text) as? JsonObject }.getOrNull()
+            ?: throw IllegalStateException("${f.path.substringAfterLast("/.").let { if (it == f.path) f.name else ".$it" }} isn't plain JSON (comments or trailing commas?), so nothing was changed. Fix or remove it, then save again.")
+    }
+
     fun write(dir: File, servers: List<McpServer>, alsoGeminiQwen: Boolean) {
-        val f = file(dir)
-        f.writeText(json.encodeToString(JsonObject.serializer(), merged(readObject(f), servers.associate { it.name to claudeEntry(it) })) + "\n")
-        if (alsoGeminiQwen) for (sub in listOf(".gemini", ".qwen")) {
-            val settings = File(dir, "$sub/settings.json")
-            settings.parentFile?.mkdirs()
-            settings.writeText(json.encodeToString(JsonObject.serializer(), merged(readObject(settings), servers.associate { it.name to geminiEntry(it) })) + "\n")
+        // Every file is read (and checked) before any is written, so a bad one changes nothing.
+        val targets = buildList {
+            add(file(dir) to servers.associate { it.name to claudeEntry(it) })
+            if (alsoGeminiQwen) for (sub in listOf(".gemini", ".qwen")) add(File(dir, "$sub/settings.json") to servers.associate { it.name to geminiEntry(it) })
+        }.map { (f, entries) -> f to merged(readForMerge(f), entries) }
+        for ((f, obj) in targets) {
+            f.parentFile?.mkdirs()
+            dev.yurlungr.app.editor.FileSave.writeAtomically(f, json.encodeToString(JsonObject.serializer(), obj) + "\n")
         }
     }
 
