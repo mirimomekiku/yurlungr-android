@@ -1,5 +1,9 @@
 package dev.yurlungr.app.projects
 
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import dev.yurlungr.app.ui.PhIcon
 import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -104,7 +108,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-private enum class ProjectTab(val label: String) { Files("Files"), Changes("Changes"), History("History"), Chats("Chats") }
+private enum class ProjectTab(val label: String) { Files("Files"), Changes("Changes"), History("History"), Checks("Checks"), Chats("Chats") }
 
 /**
  * A project's workspace: name (tap to switch projects) and branch on top, Files / Changes /
@@ -126,6 +130,12 @@ fun ProjectScreen(
     runInTerminal: (command: String, name: String) -> Unit,
     /** Shows the terminal screen with whatever session is selected. */
     onOpenTerminal: () -> Unit,
+    /** Opens a running web app in the in-app preview. */
+    onPreview: (url: String, title: String) -> Unit = { _, _ -> },
+    /** This project's agent settings (default agent, instructions, MCP servers). */
+    onAgentSettings: () -> Unit = {},
+    /** Opens a file at a line (search results, problems, test failures). */
+    onOpenFileAt: (File, Int?) -> Unit = { f, _ -> onOpenFile(f) },
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -149,7 +159,12 @@ fun ProjectScreen(
     var showGitActions by remember { mutableStateOf(false) }
     /** Tech stacks found in the project (for dependency installation); null while detecting. */
     var stacks by remember(dir.path) { mutableStateOf<List<DetectedStack>?>(null) }
+    /** The stacks that still need runtimes or dependencies (computed when the stacks change). */
+    var needs by remember(dir.path) { mutableStateOf(emptyList<DetectedStack>()) }
     var showSetup by remember { mutableStateOf(false) }
+    /** Runnable tasks (package.json scripts, make, Gradle…), found with the stacks. */
+    var tasks by remember(dir.path) { mutableStateOf(emptyList<ProjectTask>()) }
+    var showTasks by remember { mutableStateOf(false) }
     var setupBannerDismissed by remember(dir.path) { mutableStateOf(SetupBannerPrefs.dismissed(context, dir)) }
     var headerVisible by remember { mutableStateOf(true) }
     LaunchedEffect(tab) { headerVisible = true }
@@ -168,17 +183,23 @@ fun ProjectScreen(
     // Automatic setup (opt-in, in the Setup sheet): once the stacks are known, install what's
     // missing in a terminal, once per need, so reopening the project doesn't repeat it.
     LaunchedEffect(stacks) {
-        val needs = stacks.orEmpty().filter { it.needsSetup(paths.prefix) }
-        if (needs.isEmpty() || !SetupBannerPrefs.auto(context)) return@LaunchedEffect
-        val signature = needs.joinToString("|") { it.id + ":" + it.dir.path + ":" + it.missingPackages(paths.prefix).joinToString(",") + ":" + it.installed }
-        if (SetupBannerPrefs.autoRan(context, dir, signature)) return@LaunchedEffect
+        // Read once per refresh, off the main thread: it checks dpkg's files for every package.
+        val found = withContext(Dispatchers.IO) { stacks.orEmpty().filter { it.needsSetup(paths.prefix) } }
+        needs = found
+        if (found.isEmpty() || !SetupBannerPrefs.auto(context)) return@LaunchedEffect
+        val signature = autoSetupSignature(found)
+        if (SetupBannerPrefs.autoRan(context, dir, signature) || SetupBannerPrefs.startedNow(dir)) return@LaunchedEffect
         SetupBannerPrefs.markAutoRan(context, dir, signature)
-        runInTerminal(installCommand(dir, needs), "Set up ${dir.name}")
+        runInTerminal(installCommand(dir, found), "Set up ${dir.name}")
     }
 
     LaunchedEffect(dir, refreshTick, reload) {
         launch { status = git.status(dir) }
-        launch { stacks = withContext(Dispatchers.IO) { runCatching { StackDetector.detect(dir) }.getOrDefault(emptyList()) } }
+        launch {
+            val found = withContext(Dispatchers.IO) { runCatching { StackDetector.detect(dir) }.getOrDefault(emptyList()) }
+            stacks = found
+            tasks = withContext(Dispatchers.IO) { runCatching { ProjectTasks.detect(dir, found) }.getOrDefault(emptyList()) }
+        }
         launch { capabilities = withContext(Dispatchers.IO) {
             runCatching { dev.yurlungr.app.web.ProjectDetector.detect(dir) }.getOrElse {
                 dev.yurlungr.app.web.ProjectCapabilities(File(dir,"gradlew").isFile,emptyList())
@@ -246,7 +267,7 @@ fun ProjectScreen(
         }
         }
         // Right after cloning (or creating) a project: offer to install what it needs.
-        val missing = stacks.orEmpty().filter { it.needsSetup(paths.prefix) }
+        val missing = needs
         if (missing.isNotEmpty() && !setupBannerDismissed) {
             SetupBanner(
                 missing, paths.prefix,
@@ -262,7 +283,7 @@ fun ProjectScreen(
                 onRetry = { reload++ },
             )
         }
-        dev.yurlungr.app.web.WebRunCard(dir, onLogs = onOpenTerminal, onOptions = { showWebRun = true })
+        dev.yurlungr.app.web.WebRunCard(dir, onLogs = onOpenTerminal, onOptions = { showWebRun = true }, onPreview = onPreview)
         AnimatedVisibility(headerVisible, enter = reveal, exit = collapse) {
             SectionTabs(tab, changeCount = status?.changes?.size ?: 0) { tab = it }
         }
@@ -306,7 +327,25 @@ fun ProjectScreen(
                         )
                     },
                 )
-                ProjectTab.Files -> FilesTab(dir, status, git, refreshTick to reload, onOpenFile)
+                ProjectTab.Files -> FilesTab(dir, status, git, refreshTick to reload, onOpenFile, onOpenFileAt)
+                ProjectTab.Checks -> ChecksTab(
+                    dir, stacks.orEmpty(), refreshKey = refreshTick * 1000 + reload, runInTerminal = runInTerminal,
+                    onOpenAt = onOpenFileAt,
+                    onAskAgent = { prompt ->
+                        // The project's chosen agent, else the first installed one, in a new chat.
+                        scope.launch {
+                            val installed = withContext(Dispatchers.IO) { agentStatuses(paths).filter { it.installed }.map { it.agent } }
+                            val agent = ProjectAgentPrefs.defaultAgent(context, dir)?.takeIf { it in installed } ?: installed.firstOrNull()
+                            if (agent == null) {
+                                android.widget.Toast.makeText(context, "Install an agent first (Agents)", android.widget.Toast.LENGTH_LONG).show()
+                            } else {
+                                val chat = dev.yurlungr.app.chat.ChatSessions.create(context, agent, dir)
+                                chat.queue(prompt, emptyList())
+                                onOpenChat(chat)
+                            }
+                        }
+                    },
+                )
                 ProjectTab.History -> HistoryView(dir, git, status, refreshKey = refreshTick * 1000 + reload)
                 ProjectTab.Chats -> ChatsTab(dir, onOpenChat)
             }
@@ -316,7 +355,7 @@ fun ProjectScreen(
             onRunWeb = {
                 val run = dev.yurlungr.app.web.WebRunSessions.get(dir)
                 when {
-                    run?.state == dev.yurlungr.app.web.WebRunState.Running -> dev.yurlungr.app.web.WebRunSessions.open(context, run)
+                    run?.state == dev.yurlungr.app.web.WebRunState.Running -> onPreview(run.url, "${run.config.project.framework} · ${dir.name}")
                     run?.state?.active == true -> { dev.yurlungr.app.web.WebRunSessions.logs(run); onOpenTerminal() }
                     else -> capabilities?.web?.takeIf { it.isNotEmpty() }?.let { projects ->
                         scope.launch {
@@ -333,7 +372,18 @@ fun ProjectScreen(
             onRunWebOptions = { showWebRun = true },
             hasGit = status?.isRepo == true, onGitActions = { showGitActions = true },
             hasStacks = stacks.orEmpty().isNotEmpty(), onSetup = { showSetup = true },
-            setupNeeded = stacks.orEmpty().any { it.needsSetup(paths.prefix) })
+            setupNeeded = needs.isNotEmpty(),
+            extraTools = listOfNotNull(
+                DockTool("Scripts", Ph.Play, AppColors.tiles.lime, "Run package.json scripts, make, just, Gradle, Cargo…") { showTasks = true }.takeIf { tasks.isNotEmpty() },
+                DockTool("Agent settings", Ph.Sparkle, AppColors.tiles.lilac, "Default agent, instruction files and MCP servers for this project", onClick = onAgentSettings),
+            ))
+    }
+
+    if (showTasks) {
+        ProjectTasksSheet(dir, tasks, onDismiss = { showTasks = false }) { task ->
+            showTasks = false
+            runInTerminal("cd ${shellQuote(task.dir.path)} && ${task.command}", "${task.name} · ${dir.name}")
+        }
     }
 
     if (showSetup) {
@@ -485,6 +535,11 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
             Row(
                 Modifier
                     .weight(if (badge) 1.45f else 1f)
+                    .semantics(mergeDescendants = true) {
+                        role = androidx.compose.ui.semantics.Role.Tab
+                        this.selected = on
+                        if (badge) stateDescription = "$changeCount uncommitted"
+                    }
                     .height(36.dp)
                     .clip(RoundedCornerShape(12.dp))
                     .background(bg)
@@ -517,287 +572,6 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
     }
 }
 
-/** One tool in the project dock (and its More sheet). */
-private class DockTool(
-    val label: String,
-    val icon: androidx.compose.ui.graphics.vector.ImageVector,
-    val tile: dev.yurlungr.app.ui.Tile?,
-    /** Shown in the More sheet. */
-    val description: String,
-    val dot: Color? = null,
-    val onLongClick: (() -> Unit)? = null,
-    val onClick: () -> Unit,
-)
-
-/**
- * The project dock. Chat, then the project's main action: Run/Open for web apps, Build for Android,
- * otherwise Terminal. With more than three buttons the rest (Setup, Git, Terminal…) go into a
- * **More** sheet, which carries a dot when one of them needs you.
- */
-@Composable
-private fun ActionBar(dir: File, isAndroid: Boolean, onNewChat: (Agent) -> Unit, runInTerminal: (String, String) -> Unit,
-    onOpenTerminal: () -> Unit, hasWeb: Boolean, onRunWeb: () -> Unit, hasGit: Boolean, onGitActions: () -> Unit,
-    hasStacks: Boolean, onSetup: () -> Unit, setupNeeded: Boolean = false, onRunWebOptions: () -> Unit = onRunWeb) {
-    val context = LocalContext.current
-    val colors = MaterialTheme.colorScheme
-    val tiles = AppColors.tiles
-    val installed by androidx.compose.runtime.produceState(emptyList<Agent>()) {
-        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            agentStatuses(RuntimePaths(context)).filter { it.installed }.map { it.agent }
-        }
-    }
-    val webState = dev.yurlungr.app.web.WebRunSessions.get(dir)?.state
-    var agentMenu by remember { mutableStateOf(false) }
-    var terminalMenu by remember { mutableStateOf(false) }
-    var more by remember { mutableStateOf(false) }
-    val newHere = { runInTerminal("cd ${shellQuote(dir.path)}", dir.name) }
-
-    val running = webState == dev.yurlungr.app.web.WebRunState.Running
-    val starting = webState?.active == true && !running
-    val run = if (hasWeb) DockTool(
-        when { running -> "Open"; starting -> "Starting"; else -> "Run" },
-        if (running) Ph.Globe else Ph.Play, tiles.lime,
-        when { running -> "Open the app in the browser"; starting -> "Show the server's logs"; else -> "Start the web app and open it" },
-        dot = when { running -> AppColors.status.success; starting -> AppColors.status.warning; else -> null },
-        onLongClick = onRunWebOptions, onClick = onRunWeb,
-    ) else null
-    val build = if (isAndroid) DockTool("Build", Ph.Hammer, tiles.lime, "Build the debug APK and install it") {
-        runInTerminal(
-            "cd ${shellQuote(dir.path)} && bash ./gradlew assembleDebug && " +
-                "yurlungr-install \"\$(ls -t app/build/outputs/apk/debug/*.apk | head -1)\"",
-            "Build ${dir.name}",
-        )
-    } else null
-    val terminal = DockTool("Terminal", Ph.TerminalWindow, null, "Open a shell in this project, or switch to an open one") {
-        // With terminals already open, ask: reuse one (those in this project first) or start fresh.
-        if (TerminalSessions.sessions.isEmpty()) newHere() else terminalMenu = true
-    }
-    val others = listOfNotNull(
-        if (hasStacks) DockTool("Setup", Ph.Wrench, tiles.sky, if (setupNeeded) "Dependencies are missing: install them" else "Detected stacks and their dependencies",
-            dot = if (setupNeeded) AppColors.status.warning else null, onClick = onSetup) else null,
-        if (hasGit) DockTool("Git", Ph.GitBranch, tiles.lilac, "Get latest, sync, branches and AI fixes", onClick = onGitActions) else null,
-    )
-    // The main action for this kind of project; everything else is secondary.
-    val primary = run ?: build ?: terminal
-    val secondary = listOfNotNull(build.takeIf { primary !== it }) + others + listOfNotNull(terminal.takeIf { primary !== it }) +
-        listOfNotNull(run?.let { DockTool("Run options", Ph.GearSix, null, "App folder, script, port and start command", onClick = onRunWebOptions) })
-    // Chat + primary + one more fits; past three buttons, the rest move to the More sheet.
-    // Run options don't count: long-pressing Run (or the server card's menu) reaches them.
-    val counted = secondary.filterNot { it.label == "Run options" }
-    val inline = if (counted.size <= 1) counted else emptyList()
-    val overflow = if (inline.isEmpty()) secondary else emptyList()
-
-    val shape = RoundedCornerShape(26.dp)
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 12.dp)
-            .clip(shape)
-            .background(colors.surfaceContainer)
-            .border(1.dp, colors.outlineVariant, shape)
-            .padding(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Box(Modifier.weight(1.5f)) {
-            val enabled = installed.isNotEmpty()
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(if (enabled) colors.primary else colors.surfaceContainerHigh)
-                    .clickable(enabled = enabled) { if (installed.size == 1) onNewChat(installed[0]) else agentMenu = true },
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                val tint = if (enabled) colors.onPrimary else colors.outline
-                PhIcon(Ph.ChatCircle, null, size = 20.dp, tint = tint)
-                Spacer(Modifier.width(8.dp))
-                Text("Chat", style = MaterialTheme.typography.titleMedium, fontSize = 16.sp, color = tint)
-            }
-            DropdownMenu(expanded = agentMenu, onDismissRequest = { agentMenu = false }) {
-                for (agent in installed) {
-                    DropdownMenuItem(
-                        leadingIcon = { AgentBadge(agent, size = 26.dp) },
-                        text = { Text(agent.displayName) },
-                        onClick = {
-                            agentMenu = false
-                            onNewChat(agent)
-                        },
-                    )
-                }
-            }
-        }
-        // The main action is a wide pill with its label beside the icon.
-        PrimaryDockButton(primary, Modifier.weight(1.3f))
-        for (tool in inline) DockButton(tool.label, tool.icon, tool.tile, Modifier.weight(0.8f), dot = tool.dot, onLongClick = tool.onLongClick, onClick = tool.onClick)
-        Box(if (overflow.isNotEmpty()) Modifier.weight(0.8f) else Modifier) {
-            if (overflow.isNotEmpty()) {
-                DockButton("More", Ph.DotsThreeVertical, null, Modifier.fillMaxWidth(),
-                    dot = overflow.firstNotNullOfOrNull { it.dot.takeIf { _ -> it.label == "Setup" } }) { more = true }
-            }
-            // Anchored here so it opens above the dock, from the main button or the sheet.
-            TerminalMenu(dir, terminalMenu, onDismiss = { terminalMenu = false }, onNew = { terminalMenu = false; newHere() }) { s ->
-                terminalMenu = false
-                TerminalSessions.select(s)
-                onOpenTerminal()
-            }
-        }
-    }
-
-    if (more) {
-        dev.yurlungr.app.ui.AppSheet("Project tools", onDismiss = { more = false }, subtitle = dir.name, icon = Ph.Wrench) {
-            for (tool in overflow) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(colors.surfaceContainerHigh)
-                        .clickable { more = false; tool.onClick() }
-                        .padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(tool.tile?.fill ?: colors.surfaceContainerHighest),
-                        contentAlignment = Alignment.Center,
-                    ) { PhIcon(tool.icon, null, size = 20.dp, tint = tool.tile?.on ?: colors.onSurface) }
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(tool.label, style = MaterialTheme.typography.titleSmall)
-                        Text(tool.description, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                    }
-                    tool.dot?.let { Box(Modifier.size(9.dp).clip(CircleShape).background(it)) }
-                    Spacer(Modifier.width(4.dp))
-                    PhIcon(Ph.CaretRight, null, size = 14.dp, tint = colors.onSurfaceVariant)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PrimaryDockButton(tool: DockTool, modifier: Modifier) {
-    val colors = MaterialTheme.colorScheme
-    val fill = tool.tile?.fill ?: colors.surfaceContainerHighest
-    val on = tool.tile?.on ?: colors.onSurface
-    Box(modifier) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .height(56.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .background(fill)
-                .combinedClickable(onClickLabel = tool.label, onLongClickLabel = tool.onLongClick?.let { "${tool.label} options" },
-                    onLongClick = tool.onLongClick, onClick = tool.onClick),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            PhIcon(tool.icon, null, size = 18.dp, tint = on)
-            Spacer(Modifier.width(6.dp))
-            Text(tool.label, style = MaterialTheme.typography.titleSmall, color = on, maxLines = 1, softWrap = false)
-        }
-        tool.dot?.let {
-            Box(
-                Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 8.dp).size(11.dp).clip(CircleShape)
-                    .background(fill).padding(2.dp).clip(CircleShape).background(it),
-            )
-        }
-    }
-}
-
-/** Open terminals (this project's first, marked "here") plus "New terminal in <project>". */
-@Composable
-private fun TerminalMenu(dir: File, expanded: Boolean, onDismiss: () -> Unit, onNew: () -> Unit, onOpen: (TerminalSession) -> Unit) {
-    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
-        val entries = remember(expanded) {
-            TerminalSessions.sessions.mapIndexed { i, s ->
-                val cwd = runCatching { s.cwd }.getOrNull()
-                Triple(i, s, cwd)
-            }.sortedByDescending { (_, _, cwd) -> cwd != null && (cwd == dir.path || cwd.startsWith(dir.path + "/")) }
-        }
-        Text(
-            "Open terminal",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-        )
-        DropdownMenuItem(
-            leadingIcon = { PhIcon(Ph.Plus, null, size = 18.dp, tint = MaterialTheme.colorScheme.primary) },
-            text = { Text("New terminal in ${dir.name}") },
-            onClick = onNew,
-        )
-        HorizontalDivider()
-        for ((i, s, cwd) in entries) {
-            val here = cwd != null && (cwd == dir.path || cwd.startsWith(dir.path + "/"))
-            DropdownMenuItem(
-                leadingIcon = {
-                    Box(
-                        Modifier.size(26.dp).clip(RoundedCornerShape(8.dp)).background(if (here) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest),
-                        contentAlignment = Alignment.Center,
-                    ) { Text("${i + 1}", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp) }
-                },
-                text = {
-                    Column {
-                        Text(TerminalSessions.title(s, i), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            listOfNotNull(
-                                cwd?.let { cwdLabel(it) },
-                                if (!s.isRunning) "exited" else if (here) "here" else null,
-                            ).joinToString(" · "),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (here) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                },
-                onClick = { onOpen(s) },
-            )
-        }
-    }
-}
-
-/** A dock tool: a tinted icon chip over a short label, with an optional status dot. */
-@Composable
-private fun DockButton(
-    label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    tile: dev.yurlungr.app.ui.Tile?,
-    modifier: Modifier = Modifier,
-    dot: Color? = null,
-    /** Options, when the tap already acts. */
-    onLongClick: (() -> Unit)? = null,
-    onClick: () -> Unit,
-) {
-    val colors = MaterialTheme.colorScheme
-    Column(
-        modifier
-            .height(56.dp)
-            .clip(RoundedCornerShape(18.dp))
-            .combinedClickable(onClickLabel = label, onLongClickLabel = onLongClick?.let { "$label options" }, onLongClick = onLongClick, onClick = onClick),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Box {
-            Box(
-                Modifier.size(width = 40.dp, height = 28.dp).clip(RoundedCornerShape(14.dp))
-                    .background(tile?.fill ?: colors.surfaceContainerHighest),
-                contentAlignment = Alignment.Center,
-            ) { PhIcon(icon, null, size = 17.dp, tint = tile?.on ?: colors.onSurface) }
-            if (dot != null) {
-                // Ringed in the dock colour so it reads on any tile.
-                Box(
-                    Modifier.align(Alignment.TopEnd).size(11.dp).clip(CircleShape)
-                        .background(colors.surfaceContainer).padding(2.dp).clip(CircleShape).background(dot),
-                )
-            }
-        }
-        Spacer(Modifier.height(4.dp))
-        Text(label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = colors.onSurface, maxLines = 1, softWrap = false)
-    }
-}
-
 // ---- Changes -------------------------------------------------------------------------
 
 /** Git is missing or failed: what happened, and the fix (install the tools, or retry). */
@@ -823,289 +597,6 @@ private fun GitErrorCard(error: GitError, onInstall: () -> Unit, onRetry: () -> 
 /** The project's diffs (Changes tab, History): see [DiffViewer]. */
 @Composable
 fun UnifiedDiff(diff: String) = DiffViewer(diff)
-
-// ---- Files ---------------------------------------------------------------------------
-
-/**
- * Expandable file tree. In a repository every file shows its Git state (a status pill, "staged",
- * ignored files dimmed) and a filter row narrows it to uncommitted, ignored or not-ignored files.
- * Pull down to re-read the tree and Git's state.
- */
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
-@Composable
-private fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair<Int, Int>, onOpenFile: (File) -> Unit) {
-    val open = remember(root.path) { mutableStateMapOf<String, List<File>>() }
-    var top by remember(root.path) { mutableStateOf<List<File>?>(null) }
-    var refreshing by remember(root.path) { mutableStateOf(false) }
-    var filter by rememberSaveable(root.path) { mutableStateOf(FileTreeFilter.All) }
-    var ignored by remember(root.path) { mutableStateOf<Set<String>?>(null) }
-    var checkingIgnored by remember(root.path) { mutableStateOf(false) }
-    var treeReload by remember(root.path) { mutableIntStateOf(0) }
-    val scope = rememberCoroutineScope()
-    suspend fun list(dir: File) = withContext(Dispatchers.IO) {
-        dir.listFiles { f -> f.name != ".git" }.orEmpty().sortedWith(compareBy<File>({ !it.isDirectory }, { it.name.lowercase() }))
-    }
-    // Refreshing here also re-reads changes without requiring navigation away from the project.
-    var treeStatus by remember(root.path) { mutableStateOf(status) }
-    LaunchedEffect(root, status, refreshKey, treeReload) {
-        treeStatus = if (treeReload > 0) git.status(root) else status
-        top = list(root)
-        for (path in open.keys.toList()) open[path] = list(File(path))
-        // Keep the previous ignore rules visible while they're re-read (no flicker on refresh).
-        checkingIgnored = treeStatus?.isRepo == true
-        if (checkingIgnored) {
-            ignored = runCatching { git.ignoredPaths(root) }.getOrNull()
-            checkingIgnored = false
-        } else ignored = null
-        refreshing = false
-    }
-    val isRepo = treeStatus?.isRepo == true
-    val gitState = remember(treeStatus, ignored) { FileTreeGitState(ignored.orEmpty(), treeStatus?.changes.orEmpty()) }
-    // Uncommitted only needs the status; the ignore-based filters wait for the ignore rules.
-    val effectiveFilter = when {
-        !isRepo -> FileTreeFilter.All
-        filter == FileTreeFilter.Changed -> filter
-        ignored != null -> filter
-        else -> FileTreeFilter.All
-    }
-    // Built off the main thread: every row needs a stat() or two, and big expanded trees have thousands.
-    // Keeps showing the previous rows until the new ones are ready; null only before the first build.
-    val openNow = open.toMap()
-    val rows by produceState<List<TreeEntry>?>(null, top, openNow, gitState, effectiveFilter) {
-        val listed = top ?: return@produceState
-        value = withContext(Dispatchers.IO) {
-            if (effectiveFilter == FileTreeFilter.Changed) {
-                // Include deleted paths too; a filesystem-only tree cannot show them.
-                gitState.changesByPath.keys.sorted().map { File(root, it).let { f -> TreeEntry(f, 0, f.isDirectory, f.isFile) } }
-            } else buildList {
-                fun add(files: List<File>, depth: Int) {
-                    for (f in files) {
-                        val isDir = f.isDirectory
-                        val relative = f.relativeTo(root).invariantSeparatorsPath
-                        if (!gitState.includes(relative, isDir, effectiveFilter)) continue
-                        add(TreeEntry(f, depth, isDir, enabled = isDir || f.exists()))
-                        openNow[f.path]?.let { add(it, depth + 1) }
-                    }
-                }
-                add(listed, 0)
-            }
-        }
-    }
-
-    Column(Modifier.fillMaxSize()) {
-        if (isRepo) {
-            val changes = treeStatus?.changes.orEmpty()
-            val colors = MaterialTheme.colorScheme
-            // Segmented filter: the whole tree, what changed, what git ignores, or the source without it.
-            Row(
-                Modifier.padding(horizontal = 12.dp).fillMaxWidth().clip(RoundedCornerShape(14.dp))
-                    .background(colors.surfaceContainer).padding(3.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                for (option in listOf(FileTreeFilter.All, FileTreeFilter.Changed, FileTreeFilter.NotIgnored, FileTreeFilter.Ignored)) {
-                    val needsIgnore = option == FileTreeFilter.Ignored || option == FileTreeFilter.NotIgnored
-                    val usable = !needsIgnore || ignored != null
-                    val on = effectiveFilter == option
-                    val bg by animateColorAsState(if (on) colors.surfaceContainerHighest else Color.Transparent, tween(Motion.SHORT), label = "filter")
-                    Row(
-                        Modifier.weight(if (option == FileTreeFilter.Changed && changes.isNotEmpty()) 1.3f else 1f).height(32.dp)
-                            .clip(RoundedCornerShape(11.dp)).background(bg).clickable(enabled = usable) { filter = option },
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(option.label, style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false,
-                            fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
-                            color = when { !usable -> colors.outline; on -> colors.onSurface; else -> colors.onSurfaceVariant })
-                        if (option == FileTreeFilter.Changed && changes.isNotEmpty()) {
-                            Spacer(Modifier.width(5.dp))
-                            Text(if (changes.size > 99) "99+" else "${changes.size}", fontSize = 10.sp, fontWeight = FontWeight.Bold,
-                                color = AppColors.tiles.peach.on, maxLines = 1, softWrap = false,
-                                modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(AppColors.tiles.peach.fill).padding(horizontal = 5.dp))
-                        }
-                    }
-                }
-            }
-            // Where things stand, by kind, with the same colours as the rows below.
-            Row(
-                Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp).heightIn(min = 36.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                when {
-                    checkingIgnored && ignored == null -> SummaryText("Reading Git's ignore rules…")
-                    ignored == null -> SummaryText("Couldn't read Git's ignore rules. Pull down to retry.")
-                    changes.isEmpty() -> {
-                        PhIcon(Ph.CheckCircle, null, size = 14.dp, tint = AppColors.status.success)
-                        SummaryText("Everything is committed", Modifier.padding(start = 0.dp))
-                    }
-                    else -> {
-                        val tones = AppColors.status
-                        val counts = changes.groupingBy { it.label }.eachCount()
-                        for ((label, tone) in listOf("new" to tones.success, "added" to tones.success, "modified" to tones.warning,
-                            "renamed" to colors.primary, "deleted" to colors.error, "conflict" to colors.error)) {
-                            val n = counts[label] ?: continue
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(Modifier.size(7.dp).clip(CircleShape).background(tone))
-                                Spacer(Modifier.width(5.dp))
-                                SummaryText("$n $label")
-                            }
-                        }
-                        val staged = changes.count { it.isStaged }
-                        if (staged > 0) SummaryText("$staged staged")
-                    }
-                }
-                Spacer(Modifier.weight(1f))
-                if (open.isNotEmpty() && effectiveFilter != FileTreeFilter.Changed) {
-                    TextButton(onClick = { open.clear() }) { Text("Collapse all", style = MaterialTheme.typography.labelMedium) }
-                }
-            }
-        }
-        val pullState = androidx.compose.material3.pulltorefresh.rememberPullToRefreshState()
-        androidx.compose.material3.pulltorefresh.PullToRefreshBox(
-            isRefreshing = refreshing,
-            onRefresh = { refreshing = true; treeReload++ },
-            state = pullState,
-            modifier = Modifier.fillMaxWidth().weight(1f),
-            indicator = {
-                androidx.compose.material3.pulltorefresh.PullToRefreshDefaults.IndicatorBox(
-                    state = pullState,
-                    isRefreshing = refreshing,
-                    modifier = Modifier.align(Alignment.TopCenter),
-                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                ) {
-                    if (refreshing) dev.yurlungr.app.ui.WaveDots(Modifier.align(Alignment.Center), dotSize = 4.dp)
-                    else PhIcon(Ph.ArrowClockwise, "Pull to refresh", Modifier.align(Alignment.Center), size = 18.dp)
-                }
-            },
-        ) {
-        LazyColumn(contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp), modifier = Modifier.fillMaxSize()) {
-            val loaded = rows
-            if (top == null || loaded == null) items(6) { SkeletonListItem() }
-            else if (loaded.isEmpty()) item {
-                Text(if (effectiveFilter == FileTreeFilter.All) "Empty folder" else "No ${effectiveFilter.label.lowercase()} files here.",
-                    modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            items(loaded.orEmpty(), key = { it.file.path }) { entry ->
-                val f = entry.file
-                val depth = entry.depth
-                val relative = f.relativeTo(root).invariantSeparatorsPath
-                val change = gitState.changesByPath[relative]
-                val changed = gitState.isChanged(relative, entry.isDir)
-                val isIgnored = ignored != null && gitState.isIgnored(relative)
-                val flat = effectiveFilter == FileTreeFilter.Changed
-                TreeRow(
-                    name = f.name,
-                    folder = if (flat) relative.substringBeforeLast('/', "").ifEmpty { null } else null,
-                    depth = depth, isDir = entry.isDir, expanded = open.containsKey(f.path),
-                    enabled = entry.enabled,
-                    change = change,
-                    changedInside = if (entry.isDir && changed) gitState.changedInside[relative] ?: 0 else 0,
-                    ignored = isIgnored,
-                    modifier = Modifier.animateItem(),
-                ) {
-                    when {
-                        !entry.isDir -> onOpenFile(f)
-                        open.containsKey(f.path) -> open.keys.filter { it == f.path || it.startsWith(f.path + "/") }.forEach { open.remove(it) }
-                        else -> scope.launch { open[f.path] = list(f) }
-                    }
-                }
-            }
-        }
-        }
-    }
-}
-
-/** A file-tree row with its file-system facts read once, off the main thread. */
-private data class TreeEntry(val file: File, val depth: Int, val isDir: Boolean, val enabled: Boolean)
-
-@Composable
-private fun SummaryText(text: String, modifier: Modifier = Modifier) =
-    Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, modifier = modifier)
-
-/** An icon and tint for a file, by its kind (code, config, docs, images, scripts). */
-@Composable
-private fun fileIcon(name: String): Pair<androidx.compose.ui.graphics.vector.ImageVector, Color> {
-    val colors = MaterialTheme.colorScheme
-    val ext = name.substringAfterLast('.', "").lowercase()
-    return when {
-        ext in setOf("png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp") -> Ph.Image to AppColors.status.success
-        ext in setOf("md", "markdown", "txt", "rst", "adoc") || name.equals("LICENSE", true) -> Ph.BookOpen to colors.secondary
-        ext in setOf("sh", "bash", "zsh", "bat", "ps1") || name == "gradlew" -> Ph.Terminal to colors.tertiary
-        ext in setOf("json", "yml", "yaml", "toml", "xml", "properties", "gradle", "kts", "lock", "ini", "cfg", "conf") ||
-            name.startsWith(".") -> Ph.GearSix to colors.onSurfaceVariant
-        ext in setOf("kt", "java", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rs", "go", "dart", "swift", "c", "h", "cpp",
-            "cs", "rb", "php", "html", "css", "scss", "vue", "svelte", "astro", "sql") -> Ph.FileText to colors.primary
-        else -> Ph.File to colors.onSurfaceVariant
-    }
-}
-
-@Composable
-private fun TreeRow(
-    name: String,
-    /** In the flat Changed list: the folder it's in. */
-    folder: String? = null,
-    depth: Int, isDir: Boolean, expanded: Boolean,
-    change: GitChange? = null,
-    /** For folders: how many changed files are inside. */
-    changedInside: Int = 0,
-    ignored: Boolean = false, enabled: Boolean = true, modifier: Modifier = Modifier, onClick: () -> Unit,
-) {
-    val colors = MaterialTheme.colorScheme
-    val guide = colors.outlineVariant.copy(alpha = 0.6f)
-    val (icon, iconTint) = if (isDir) Ph.FolderSimple to colors.primary else fileIcon(name)
-    val tone = change?.let { changeTone(it).second }
-    Row(
-        modifier
-            .fillMaxWidth()
-            .height(if (folder != null) 48.dp else 40.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(enabled = enabled, onClick = onClick)
-            // A thin guide per level, so deep trees stay readable.
-            .drawBehind {
-                for (level in 0 until depth) {
-                    val x = (12 + 22 * level + 7).dp.toPx()
-                    drawLine(guide, androidx.compose.ui.geometry.Offset(x, 0f), androidx.compose.ui.geometry.Offset(x, size.height), strokeWidth = 1.dp.toPx())
-                }
-            }
-            .padding(start = 12.dp + 22.dp * depth, end = 10.dp)
-            .then(if (ignored) Modifier.alpha(0.5f) else Modifier),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(Modifier.width(14.dp)) {
-            if (isDir) PhIcon(if (expanded) Ph.CaretDown else Ph.CaretRight, null, size = 12.dp, tint = colors.onSurfaceVariant)
-        }
-        Spacer(Modifier.width(8.dp))
-        PhIcon(icon, null, size = 18.dp, tint = iconTint)
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                name,
-                color = tone ?: colors.onSurface,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 13.5.sp,
-                fontWeight = if (change != null) FontWeight.Medium else FontWeight.Normal,
-                textDecoration = if (change?.label == "deleted") androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (folder != null) Text(folder, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        when {
-            change != null && !isDir -> {
-                // Staged: already in the next commit.
-                if (change.isStaged) PhIcon(Ph.CheckCircle, "Staged", size = 14.dp, tint = AppColors.status.success, modifier = Modifier.padding(end = 6.dp))
-                StatusLetter(change, size = 20.dp)
-            }
-            changedInside > 0 -> Text(
-                if (changedInside > 99) "99+" else "$changedInside",
-                fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppColors.status.warning,
-                modifier = Modifier.clip(RoundedCornerShape(50)).background(AppColors.status.warning.copy(alpha = 0.14f)).padding(horizontal = 7.dp, vertical = 1.dp),
-            )
-            ignored -> Text("ignored", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-        }
-    }
-}
 
 /** Chats started in this project, newest activity first. */
 @Composable

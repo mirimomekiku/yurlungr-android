@@ -1,5 +1,8 @@
 package dev.yurlungr.app.projects
 
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -231,8 +234,10 @@ internal fun changeTone(c: GitChange): Pair<String, Color> {
 @Composable
 internal fun StatusLetter(change: GitChange, size: androidx.compose.ui.unit.Dp = 22.dp) {
     val (letter, color) = changeTone(change)
+    val spoken = changeLabel(change)
     Box(
-        Modifier.size(size).clip(RoundedCornerShape(7.dp)).background(color.copy(alpha = 0.16f)),
+        Modifier.size(size).clip(RoundedCornerShape(7.dp)).background(color.copy(alpha = 0.16f))
+            .clearAndSetSemantics { contentDescription = spoken },
         contentAlignment = Alignment.Center,
     ) { Text(letter, color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace) }
 }

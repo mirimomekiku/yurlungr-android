@@ -60,6 +60,10 @@ internal object SetupBannerPrefs {
      * Whether automatic setup already ran for this exact need ([signature]: what was missing), so
      * reopening the project doesn't start it again; a new need (another stack, a removed runtime) does.
      */
+    /** Projects whose automatic setup started in this app session: never twice while one may run. */
+    private val startedThisSession = mutableSetOf<String>()
+    fun startedNow(dir: File): Boolean = !startedThisSession.add(dir.canonicalPath)
+
     fun autoRan(context: Context, dir: File, signature: String): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("ran:" + dir.canonicalPath, null) == signature
     fun markAutoRan(context: Context, dir: File, signature: String) =
@@ -69,6 +73,13 @@ internal object SetupBannerPrefs {
     fun dismiss(context: Context, dir: File) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { putBoolean(dir.canonicalPath, true) }
 }
+
+/**
+ * What automatic setup remembers having run for: the stacks (kind and folder), not what's missing,
+ * which changes while the install is still going and would otherwise start it again.
+ */
+internal fun autoSetupSignature(stacks: List<DetectedStack>): String =
+    stacks.map { it.id + ":" + it.dir.path }.sorted().joinToString("|")
 
 /** What a project still needs, in one line: "Needs Bun and pnpm · dependencies not installed". */
 internal fun setupSummary(stacks: List<DetectedStack>, prefix: File): String {
