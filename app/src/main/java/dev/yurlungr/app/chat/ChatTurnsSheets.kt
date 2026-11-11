@@ -86,22 +86,28 @@ fun CheckpointsSheet(chat: ChatSession, onDismiss: () -> Unit) {
                     if (t.before != null && t.after != null && (t.filesChanged ?: 0) > 0) TextButton(onClick = {
                         scope.launch { diff = t to Checkpoints.diff(context, chat.id, chat.cwd, t.before, t.after) }
                     }) { Text("Diff") }
-                    if (t.before != null && t.endedAt != null) TextButton(onClick = { restoring = t }) { Text("Restore to before") }
+                    // Not while the agent works: the restore and the agent would write the same files.
+                    val busy = chat.state == ChatState.Running
+                    if (t.before != null && t.endedAt != null) TextButton(enabled = !busy && !Checkpoints.restoring, onClick = { restoring = t }) {
+                        Text(if (t.restore) "Undo this restore" else "Restore to before")
+                    }
                 }
             }
         }
     }
 
     restoring?.let { t ->
-        AppSheet("Restore to before turn ${t.index}?", onDismiss = { restoring = null }, icon = Ph.ArrowCounterClockwise,
+        AppSheet(if (t.restore) "Undo this restore?" else "Restore to before turn ${t.index}?", onDismiss = { restoring = null }, icon = Ph.ArrowCounterClockwise,
             actions = {
                 OutlinedButton(onClick = { restoring = null }, modifier = Modifier.weight(1f)) { Text("Cancel") }
                 Button(
                     onClick = {
                         restoring = null
-                        scope.launch {
-                            val r = Checkpoints.restore(context, chat.id, chat.cwd, t.before!!)
-                            Toast.makeText(context, r.fold({ "Files restored. The previous state is a checkpoint too." }, { "Couldn't restore: ${it.message}" }), Toast.LENGTH_LONG).show()
+                        // In the app's scope: closing this sheet mustn't stop a restore halfway.
+                        val app = context.applicationContext
+                        Checkpoints.scope.launch {
+                            val r = Checkpoints.restore(app, chat.id, chat.cwd, t.before!!, label = if (t.restore) "Undid restore ${t.index}" else "Restored to before turn ${t.index}")
+                            Toast.makeText(app, r.fold({ "Files restored. To undo, use “Undo this restore” in Checkpoints." }, { "Couldn't restore: ${it.message}" }), Toast.LENGTH_LONG).show()
                             reload++
                         }
                     },
@@ -111,8 +117,10 @@ fun CheckpointsSheet(chat: ChatSession, onDismiss: () -> Unit) {
             },
         ) {
             Text(
-                "The project's files go back to how they were before “${t.prompt.take(80)}”: this turn's changes and every later one are undone. " +
-                    "Files added since are removed. The agent isn't told; mention it in your next message. A snapshot is taken first, so you can restore it back.",
+                if (t.restore) "The project's files go back to how they were just before that restore. Edits made since then are replaced. " +
+                    "The agent isn't told; mention it in your next message."
+                else "The project's files go back to how they were before “${t.prompt.take(80)}”: this turn's changes and every later one are undone. " +
+                    "Files added since are removed. The agent isn't told; mention it in your next message. A snapshot is taken first, so you can undo this.",
                 style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant,
             )
         }

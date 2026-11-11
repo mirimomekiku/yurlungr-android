@@ -47,6 +47,7 @@ object ChatSessions {
         for (saved in ChatStore.readAll(appContext)) {
             val agent = Agent.entries.firstOrNull { it.name == saved.agent } ?: continue
             chats += wire(ChatSession(appContext, agent, File(saved.cwd), saved))
+            io.execute { Checkpoints.closeInterrupted(appContext, saved.id) }
         }
     }
 
@@ -77,7 +78,7 @@ object ChatSessions {
         onRegistryChanged?.invoke()
         NotificationManagerCompat.from(context).cancel(chat.id.hashCode())
         val id = chat.id
-        io.execute { ChatStore.delete(appContext, id); Checkpoints.delete(appContext, id) }
+        io.execute { ChatStore.delete(appContext, id); kotlinx.coroutines.runBlocking { runCatching { Checkpoints.delete(appContext, id) } } }
         RuntimeService.refresh(context)
     }
 
