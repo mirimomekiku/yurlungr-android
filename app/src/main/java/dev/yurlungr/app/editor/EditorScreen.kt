@@ -145,27 +145,6 @@ private sealed interface SaveOutcome {
     data class Failed(val message: String) : SaveOutcome
 }
 
-/** Undo/redo snapshots; consecutive typing is grouped into one step. */
-private class History {
-    val undo = ArrayDeque<TextFieldValue>()
-    val redo = ArrayDeque<TextFieldValue>()
-    var version by mutableIntStateOf(0) // recompose when stacks change
-    private var lastPush = 0L
-
-    fun record(before: TextFieldValue, boundary: Boolean) {
-        val now = System.currentTimeMillis()
-        if (boundary || now - lastPush > 800 || undo.isEmpty()) {
-            undo.addLast(before)
-            if (undo.size > 300) undo.removeFirst()
-            lastPush = now
-        }
-        redo.clear()
-        version++
-    }
-
-    fun breakGroup() { lastPush = 0 }
-}
-
 /**
  * Code editor (Sublime-style): Monokai syntax colors for ~25 languages, line numbers, current
  * line, undo/redo, find & replace, auto-indent and bracket closing, a symbol row above the
@@ -237,22 +216,10 @@ private fun Editor(
     var diskStamp by remember { mutableStateOf(kept?.stamp ?: initial.stamp) }
     // Save found the file changed on disk; holds what to do after a successful save.
     var conflict by remember { mutableStateOf<(() -> Unit)?>(null) }
-    val history = remember { History() }
+    val history = remember { EditHistory() }
     val indentUnit = remember { detectIndent(initial.text, lang) }
     var readOnly by remember { mutableStateOf(false) }
     var wrap by remember { mutableStateOf(lang.kind == Language.Kind.Markdown || lang.kind == Language.Kind.Plain) }
-        lspNote = null
-    }
-    val lspRunning = lsp?.running
-    LaunchedEffect(lspRunning) {
-        val dead = lsp?.takeIf { lspRunning == false } ?: return@LaunchedEffect
-        lsp = null
-        LspManager.release(dead)
-        if (lspStart < LSP_RESTARTS) {
-            lspNote = "${dead.server.name} stopped · restarting…"
-            delay(2_000)
-            lspStart++
-        } else lspNote = "${dead.server.name} keeps stopping · tap to retry"
     val fontSp = EditorPrefs.fontSize
     var formatting by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
@@ -274,6 +241,18 @@ private fun Editor(
         }
         c.open(file, value.text)
         lsp = c
+        lspNote = null
+    }
+    val lspRunning = lsp?.running
+    LaunchedEffect(lspRunning) {
+        val dead = lsp?.takeIf { lspRunning == false } ?: return@LaunchedEffect
+        lsp = null
+        LspManager.release(dead)
+        if (lspStart < LSP_RESTARTS) {
+            lspNote = "${dead.server.name} stopped · restarting…"
+            delay(2_000)
+            lspStart++
+        } else lspNote = "${dead.server.name} keeps stopping · tap to retry"
     }
     androidx.compose.runtime.DisposableEffect(file) { onDispose { lsp?.let { it.close(file); LspManager.release(it) } } }
     LaunchedEffect(value.text, lsp) {
@@ -323,7 +302,7 @@ private fun Editor(
     var viewportPx by remember { mutableIntStateOf(0) }
 
     fun set(new: TextFieldValue, boundary: Boolean = true) {
-        if (new.text != value.text) history.record(value, boundary)
+        if (new.text != value.text) history.record(value.text, value.selection, new.text, new.selection, boundary)
         value = new
     }
 
@@ -417,19 +396,13 @@ private fun Editor(
     }
 
     fun undo() {
-        val prev = history.undo.removeLastOrNull() ?: return
-        history.redo.addLast(value)
-        history.version++
-        history.breakGroup()
-        value = prev
+        val (text, selection) = history.undo(value.text) ?: return
+        value = TextFieldValue(text, selection)
     }
 
     fun redo() {
-        val next = history.redo.removeLastOrNull() ?: return
-        history.undo.addLast(value)
-        history.version++
-        history.breakGroup()
-        value = next
+        val (text, selection) = history.redo(value.text) ?: return
+        value = TextFieldValue(text, selection)
     }
 
     fun tryBack() {
@@ -732,14 +705,6 @@ private fun Editor(
                                     val smart = smartEdit(value, new, indentUnit, lang)
                                     val inserted = smart.text.length - value.text.length
                                     val boundary = inserted != 1 || smart.text.getOrNull(smart.selection.start - 1)?.isWhitespace() == true
-        lspNote?.let { note ->
-            Row(Modifier.fillMaxWidth().background(Mono.Bar).clickable(enabled = note.endsWith("retry")) { lspNote = null; lspStart++ }
-                .padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                PhIcon(Ph.Warning, null, size = 13.dp, tint = Mono.Modified)
-                Spacer(Modifier.width(6.dp))
-                Text(note, color = Mono.Dim, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
-            }
-        }
                                     set(smart, boundary)
                                 }
                             },
@@ -766,6 +731,14 @@ private fun Editor(
                 val c = (value.selection.start + delta).coerceIn(0, value.text.length)
                 value = value.copy(selection = TextRange(c))
             })
+        }
+        lspNote?.let { note ->
+            Row(Modifier.fillMaxWidth().background(Mono.Bar).clickable(enabled = note.endsWith("retry")) { lspNote = null; lspStart++ }
+                .padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                PhIcon(Ph.Warning, null, size = 13.dp, tint = Mono.Modified)
+                Spacer(Modifier.width(6.dp))
+                Text(note, color = Mono.Dim, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
+            }
         }
         if (diagnostics.isNotEmpty()) {
             val errors = diagnostics.count { it.isError }
@@ -1000,15 +973,8 @@ private fun StatusBar(line: Int, col: Int, selected: Int, lines: Int, lang: Stri
 
 // ---- Editing helpers (pure) ------------------------------------------------------------------
 
-/** Offsets where each line starts. */
-internal fun lineStarts(text: String): IntArray {
-    var count = 1
-    for (c in text) if (c == '\n') count++
-    val out = IntArray(count)
-    var k = 1
-    for (i in text.indices) if (text[i] == '\n') out[k++] = i + 1
-    return out
-}
+/** Offsets where each line starts (cached and updated incrementally, see [LineIndex]). */
+internal fun lineStarts(text: String): IntArray = LineIndex.of(text)
 
 internal fun lineIndexOf(starts: IntArray, offset: Int): Int {
     var lo = 0
