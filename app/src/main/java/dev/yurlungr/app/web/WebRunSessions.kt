@@ -35,7 +35,14 @@ internal object WebRunSessions {
     private const val STALE_RUN_GRACE_MS = 15_000L
     fun get(root: File): WebRun? = runs[root.canonicalPath]
 
+    /** Every run this session, active or finished, for the Servers screen. */
+    fun all(): List<WebRun> = runs.values.toList()
+
+    /** For refreshing the home-screen widget and the servers tile when a run changes state. */
+    private var appContext: Context? = null
+
     fun init(context: Context) {
+        appContext = context.applicationContext
         // Capture old run directories before the UI can start a new run. Never adopt stale PIDs.
         val previous = File(context.cacheDir,"web-runs").listFiles().orEmpty()
             .filter { it.isDirectory && runCatching { UUID.fromString(it.name) }.isSuccess }
@@ -164,13 +171,16 @@ internal object WebRunSessions {
         if (status["id"]?.jsonPrimitive?.contentOrNull != run.id) return
         val state = runCatching { WebRunState.valueOf(status["state"]!!.jsonPrimitive.content) }.getOrNull() ?: return
         // A stale status update must not undo a user-requested stop.
+        val before = run.state
         if (run.state != WebRunState.Stopping || !state.active) run.state = state
+        if (run.state != before) appContext?.let(dev.yurlungr.app.widgets.OpenIn::refresh)
         run.message = status["message"]?.jsonPrimitive?.contentOrNull.orEmpty()
     }
 
     private fun finish(context: Context, run: WebRun) {
         if (run.finalized) return
         run.finalized = true
+        dev.yurlungr.app.widgets.OpenIn.refresh(context)
         if (run.state.active) {
             run.state = if (run.state == WebRunState.Stopping) WebRunState.Stopped else WebRunState.Failed
             if (run.state == WebRunState.Failed && run.message.isBlank()) run.message = "Server process exited. Check Logs."

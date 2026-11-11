@@ -27,7 +27,7 @@ import java.io.File
  * Restart, Stop and the run options.
  */
 @Composable
-internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)? = null) {
+internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)? = null, onPreview: ((String, String) -> Unit)? = null) {
     val context = LocalContext.current
     val run = WebRunSessions.get(root) ?: return
     var confirmation by remember(run.id) { mutableStateOf<String?>(null) }
@@ -68,6 +68,9 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
             androidx.compose.foundation.layout.Box {
                 IconButton(onClick = { menu = true }) { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.DotsThreeVertical, "Server actions", size = 20.dp) }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    if (run.state == WebRunState.Running) DropdownMenuItem(text = { Text("Open in browser") },
+                        leadingIcon = { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Globe, null, size = 18.dp) },
+                        onClick = { menu = false; WebRunSessions.open(context, run) })
                     DropdownMenuItem(text = { Text("Restart") }, enabled = run.state != WebRunState.Stopping,
                         leadingIcon = { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.ArrowClockwise, null, size = 18.dp) },
                         onClick = { menu = false; confirmation = "Restart" })
@@ -111,9 +114,12 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
         }
         Row(Modifier.fillMaxWidth().padding(start = 66.dp, end = 12.dp, top = 10.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             when (run.state) {
-                WebRunState.Running -> Button(onClick = { WebRunSessions.open(context, run) }, modifier = Modifier.weight(1f)) {
+                WebRunState.Running -> Button(onClick = {
+                    if (onPreview != null) onPreview(run.url, "${run.config.project.framework} · ${run.config.project.directory.name}")
+                    else WebRunSessions.open(context, run)
+                }, modifier = Modifier.weight(1f)) {
                     dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Globe, null, size = 16.dp)
-                    Spacer(Modifier.width(6.dp)); Text("Open")
+                    Spacer(Modifier.width(6.dp)); Text(if (onPreview != null) "Preview" else "Open")
                 }
                 WebRunState.Failed, WebRunState.Stopped -> Button(onClick = { WebRunSessions.restart(context, run) }, modifier = Modifier.weight(1f)) {
                     dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Play, null, size = 16.dp)
