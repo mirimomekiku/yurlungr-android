@@ -77,6 +77,7 @@ sealed interface Route {
     data class Merge(val path: String) : Route
     data object Terminal : Route
     data object Agents : Route
+    data object Activity : Route
     data object Devices : Route
     data class RemoteHome(val hostId: String) : Route
     data class RemoteChat(val hostId: String, val chatId: String) : Route
@@ -328,6 +329,7 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+            Route.Activity -> dev.yurlungr.app.chat.ActivityScreen(onBack = back, onOpenChat = { nav.reset(Route.Chat(it)) })
             Route.Agents -> AgentsScreen(
                 refreshTick = resumeTick,
                 onBack = back,

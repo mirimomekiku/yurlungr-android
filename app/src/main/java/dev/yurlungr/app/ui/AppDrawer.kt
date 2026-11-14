@@ -117,6 +117,7 @@ fun AppDrawer(
                 Triple("Projects", Ph.FolderSimple, Route.Projects),
                 Triple("Terminal", Ph.TerminalWindow, Route.Terminal),
                 Triple("Servers", Ph.Globe, Route.Servers),
+                Triple("Activity", Ph.ListChecks, Route.Activity),
                 Triple("Agents", Ph.Sparkle, Route.Agents),
                 Triple("Devices", Ph.Devices, Route.Devices),
                 Triple("Settings", Ph.GearSix, Route.Settings),
