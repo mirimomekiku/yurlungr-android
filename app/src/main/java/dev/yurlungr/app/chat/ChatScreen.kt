@@ -160,6 +160,7 @@ private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Un
     when (sheet) {
         "checkpoints" -> (chat as? ChatSession)?.let { CheckpointsSheet(it) { sheet = null } }
         "usage" -> UsageSheet(chat) { sheet = null }
+        "artifacts" -> ArtifactsSheet(chat) { sheet = null }
     }
     var menu by remember { mutableStateOf(false) }
     val model = chat.configOptions.firstOrNull { it.category == "model" }?.currentName?.takeIf { it.isNotBlank() }
@@ -212,6 +213,11 @@ private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Un
                     leadingIcon = { PhIcon(Ph.ClockCounterClockwise, null, size = 18.dp) },
                     text = { Text("Checkpoints") },
                     onClick = { menu = false; sheet = "checkpoints" },
+                )
+                DropdownMenuItem(
+                    leadingIcon = { PhIcon(Ph.File, null, size = 18.dp) },
+                    text = { Text("Artifacts") },
+                    onClick = { menu = false; sheet = "artifacts" },
                 )
                 DropdownMenuItem(
                     leadingIcon = { PhIcon(Ph.Lightning, null, size = 18.dp) },
