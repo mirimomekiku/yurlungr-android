@@ -133,7 +133,11 @@ fun CommandPalette(
             .map { (path, s) -> PaletteItem("Files · ${project.name}", path.substringAfterLast('/'), path, Ph.FileText) { onOpenFile(File(project, path)) } to s }
             .toList()
         val ranked = if (query.isBlank()) scored else (scored + fileHits).sortedByDescending { it.second }
-        ranked.map { it.first }.take(80)
+        // What was said inside chats (3+ letters), after the title and file matches.
+        val said = dev.yurlungr.app.chat.ChatSearch.search(ChatSessions.chats.toList(), query).map { h ->
+            PaletteItem("In chats", h.chat.title, (if (h.fromUser) "You: " else h.chat.agent.displayName + ": ") + h.snippet, Ph.ChatCircle) { onOpenChat(h.chat.id) }
+        }
+        (ranked.map { it.first }.take(60) + said).take(90)
     }
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
