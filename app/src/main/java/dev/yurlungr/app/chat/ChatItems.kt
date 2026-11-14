@@ -90,6 +90,9 @@ data class Usage(val used: Long, val size: Long, val costAmount: Double?, val cu
 data class PromptCaps(val image: Boolean = false, val embeddedContext: Boolean = false)
 
 /** A file or image picked on the phone, waiting to be sent with the next message. */
+/** A message typed while the agent was busy; sent automatically when the turn ends. */
+class QueuedMessage(val text: String, val attachments: List<Attachment> = emptyList())
+
 class Attachment(val name: String, val mimeType: String, val bytes: ByteArray) {
     val isImage: Boolean get() = mimeType.startsWith("image/")
 }

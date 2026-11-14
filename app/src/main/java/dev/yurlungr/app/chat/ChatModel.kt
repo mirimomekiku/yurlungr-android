@@ -38,6 +38,16 @@ interface ChatModel {
     val usage: Usage?
     val caps: PromptCaps
 
+    /** Messages waiting for the current turn to end (sent in order, automatically). */
+    val queued: List<QueuedMessage> get() = emptyList()
+    /** Sends [text] now when idle; otherwise queues it behind the running turn. */
+    fun enqueue(text: String, attachments: List<Attachment>) = send(text, attachments)
+    fun removeQueued(index: Int) {}
+    /** Stops the running turn so the first queued message goes out right away. */
+    fun sendQueuedNow() {}
+    /** Project files matching [query] for @-mentions (relative paths). */
+    suspend fun suggestFiles(query: String): List<String> = emptyList()
+
     fun resume()
     fun restart()
     fun send(text: String) = send(text, emptyList())

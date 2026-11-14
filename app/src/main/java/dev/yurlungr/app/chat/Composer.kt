@@ -3,6 +3,7 @@ package dev.yurlungr.app.chat
 import androidx.compose.material3.IconButton
 import dev.yurlungr.app.ui.PhIcon
 import dev.yurlungr.app.ui.Ph
+import dev.yurlungr.app.ui.Microphone
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
@@ -32,6 +33,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -64,6 +66,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
@@ -85,8 +88,16 @@ import kotlinx.coroutines.withContext
 /** Composer bound to an existing chat. */
 @Composable
 fun Composer(chat: ChatModel) {
-    var input by rememberSaveable(chat.id, stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue("")) }
+    val appContext = LocalContext.current
+    var input by rememberSaveable(chat.id, stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(Drafts.get(appContext, chat.id))) }
+    // Unsent text survives restarts: saved shortly after the last keystroke.
+    androidx.compose.runtime.LaunchedEffect(chat.id, input.text) {
+        kotlinx.coroutines.delay(400)
+        Drafts.set(appContext, chat.id, input.text)
+    }
     val attachments = remember(chat.id) { mutableStateListOf<Attachment>() }
+    Column {
+    QueueChips(chat)
     ComposerField(
         value = input,
         onValueChange = { input = it },
@@ -98,12 +109,40 @@ fun Composer(chat: ChatModel) {
         agentName = chat.agent.displayName,
         footnote = chat.usage?.let(AcpExtras::usageLabel),
         onSend = { text, files ->
-            chat.send(text, files)
+            // While the agent works the message waits its turn; otherwise it goes out now.
+            chat.enqueue(text, files)
             input = TextFieldValue("")
             attachments.clear()
         },
         onCancel = chat::cancel,
+        queueing = true,
+        suggestFiles = chat::suggestFiles,
     )
+    }
+}
+
+/** Messages typed while the agent was busy, in the order they'll be sent. */
+@Composable
+private fun QueueChips(chat: ChatModel) {
+    val queued = chat.queued
+    if (queued.isEmpty()) return
+    Row(
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).padding(horizontal = 10.dp).horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        PhIcon(Ph.ListChecks, null, size = 16.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        queued.forEachIndexed { i, m ->
+            InputChip(
+                selected = false,
+                onClick = { chat.removeQueued(i) },
+                label = { Text("${i + 1}. " + m.text.ifBlank { m.attachments.firstOrNull()?.name.orEmpty() }, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 180.dp)) },
+                trailingIcon = { PhIcon(Ph.X, "Remove from queue", size = 14.dp) },
+            )
+        }
+        if (chat.isRunning) TextButton(onClick = chat::sendQueuedNow) { Text("Send now") }
+        else if (chat.state == ChatState.Ready) TextButton(onClick = chat::sendQueuedNow) { Text("Send") }
+    }
 }
 
 /**
@@ -127,10 +166,48 @@ fun ComposerField(
     placeholder: String? = null,
     /** Small text between + and send, e.g. context-window use. */
     footnote: String? = null,
+    /** While the agent works, Send adds the message to the queue instead of being replaced by Stop. */
+    queueing: Boolean = false,
+    /** Project files matching a typed "@query", for mentions. Null: no mentions. */
+    suggestFiles: (suspend (String) -> List<String>)? = null,
+    /** Focus the message box and raise the keyboard when this turns true (quick ask). */
+    autoFocus: Boolean = false,
 ) {
+    val focusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+    androidx.compose.runtime.LaunchedEffect(autoFocus, enabled) {
+        if (autoFocus && enabled) runCatching { focusRequester.requestFocus() }
+    }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var attachMenu by remember { mutableStateOf(false) }
+    var showPrompts by remember { mutableStateOf(false) }
+    val speech = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        val spoken = r.data?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        if (!spoken.isNullOrBlank()) {
+            val joined = (if (value.text.isBlank()) "" else value.text.trimEnd() + " ") + spoken
+            onValueChange(TextFieldValue(joined, selection = TextRange(joined.length)))
+        }
+    }
+    fun listen() {
+        val intent = android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        runCatching { speech.launch(intent) }.onFailure { Toast.makeText(context, "No speech recognition on this phone", Toast.LENGTH_LONG).show() }
+    }
+    // "@" mention: the word being typed, if it starts with @.
+    val cursor = value.selection.end.coerceIn(0, value.text.length)
+    val mentionStart = value.text.substring(0, cursor).let { head -> head.lastIndexOfAny(charArrayOf(' ', '\n')) + 1 }
+    val mention = value.text.substring(mentionStart, cursor).takeIf { it.startsWith("@") && suggestFiles != null }?.removePrefix("@")
+    val fileHits by androidx.compose.runtime.produceState(emptyList<String>(), mention) {
+        this.value = if (mention == null) emptyList() else suggestFiles?.invoke(mention).orEmpty()
+    }
+    if (showPrompts) PromptLibrarySheet(
+        current = value.text,
+        onPick = { p ->
+            val joined = (if (value.text.isBlank()) "" else value.text.trimEnd() + "\n") + p
+            onValueChange(TextFieldValue(joined, selection = TextRange(joined.length)))
+        },
+        onDismiss = { showPrompts = false },
+    )
 
     fun add(uris: List<android.net.Uri>) = scope.launch {
         for (uri in uris) {
@@ -193,6 +270,30 @@ fun ComposerField(
             }
         }
 
+        if (mention != null && fileHits.isNotEmpty()) {
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh),
+            ) {
+                for (path in fileHits) {
+                    Text(
+                        path,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.StartEllipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                val text = value.text.replaceRange(mentionStart, cursor, "@$path ")
+                                onValueChange(TextFieldValue(text, selection = TextRange(mentionStart + path.length + 2)))
+                            }
+                            .padding(horizontal = 16.dp, vertical = 9.dp),
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+        }
+
         // One rounded "pill" like Gemini/ChatGPT: attachments, text, then + and send in a row.
         Column(
             Modifier
@@ -241,7 +342,7 @@ fun ComposerField(
                     unfocusedIndicatorColor = Color.Transparent,
                     disabledIndicatorColor = Color.Transparent,
                 ),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box {
@@ -259,15 +360,21 @@ fun ComposerField(
                             attachMenu = false
                             pickFiles.launch(arrayOf("*/*"))
                         })
+                        DropdownMenuItem(leadingIcon = { PhIcon(Ph.ListChecks, null) }, text = { Text("Prompts") }, onClick = {
+                            attachMenu = false
+                            showPrompts = true
+                        })
                     }
                 }
+                IconButton(onClick = ::listen, enabled = enabled) { PhIcon(Ph.Microphone, "Speak", size = 20.dp) }
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     if (footnote != null) {
                         Text(footnote, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                     }
                 }
                 AnimatedContent(
-                    targetState = running,
+                    // Stop only when there's nothing to queue; typed text turns it into a queueing Send.
+                    targetState = running && !(queueing && (value.text.isNotBlank() || attachments.isNotEmpty())),
                     transitionSpec = {
                         (scaleIn(tween(Motion.MEDIUM, easing = Motion.Emphasized), initialScale = 0.6f) + fadeIn(tween(Motion.SHORT)))
                             .togetherWith(scaleOut(tween(Motion.SHORT), targetScale = 0.6f) + fadeOut(tween(Motion.SHORT)))
@@ -287,7 +394,7 @@ fun ComposerField(
                             colors = ButtonDefaults.buttonColors(containerColor = lime.fill, contentColor = lime.on),
                             modifier = Modifier.size(44.dp),
                             contentPadding = PaddingValues(0.dp),
-                        ) { PhIcon(Ph.ArrowUp, "Send", size = 20.dp) }
+                        ) { PhIcon(if (running) Ph.ListChecks else Ph.ArrowUp, if (running) "Add to queue" else "Send", size = 20.dp) }
                     }
                 }
             }

@@ -439,6 +439,55 @@ class ChatSession(
 
     private val defaultTitle get() = "${agent.displayName} · ${cwd.name}"
 
+    override val queued = mutableStateListOf<QueuedMessage>()
+
+    override fun enqueue(text: String, attachments: List<Attachment>) {
+        if (text.isBlank() && attachments.isEmpty()) return
+        if (state == ChatState.Ready) send(text, attachments)
+        else if (state == ChatState.Running || state == ChatState.Starting) queued += QueuedMessage(text, attachments)
+    }
+
+    override fun removeQueued(index: Int) {
+        if (index in queued.indices) queued.removeAt(index)
+    }
+
+    override fun sendQueuedNow() {
+        if (queued.isEmpty()) return
+        if (state == ChatState.Running) {
+            // The turn's end sends the queue (a stop normally holds it back).
+            resumeQueueAfterStop = true
+            cancel()
+        } else drainQueue()
+    }
+
+    private var resumeQueueAfterStop = false
+
+    /** Sends the oldest queued message if the agent is idle. */
+    private fun drainQueue() {
+        if (state != ChatState.Ready || queued.isEmpty()) return
+        val next = queued.removeAt(0)
+        send(next.text, next.attachments)
+    }
+
+    override suspend fun suggestFiles(query: String): List<String> = withContext(Dispatchers.IO) {
+        val q = query.lowercase()
+        val skip = setOf(".git", "node_modules", "build", ".gradle", ".idea", "dist", "target", ".next", "__pycache__", ".venv")
+        val out = ArrayList<String>()
+        fun walk(dir: File, depth: Int) {
+            if (out.size >= 400 || depth > 6) return
+            for (f in dir.listFiles().orEmpty().sortedBy { it.name }) {
+                if (f.name in skip || f.name.startsWith(".") && f.name != ".github") continue
+                if (f.isDirectory) walk(f, depth + 1)
+                else {
+                    val rel = f.relativeTo(cwd).path
+                    if (q.isEmpty() || rel.lowercase().contains(q)) out += rel
+                }
+            }
+        }
+        walk(cwd, 0)
+        out.sortedWith(compareBy({ !it.substringAfterLast('/').lowercase().startsWith(q) }, { it.length })).take(8)
+    }
+
     override fun send(text: String, attachments: List<Attachment>) {
         if (state != ChatState.Ready || (text.isBlank() && attachments.isEmpty())) return
         showUserMessage(text, attachments)
@@ -485,6 +534,11 @@ class ChatSession(
                 }
                 state = ChatState.Ready
                 onTurnFinished?.invoke(this@ChatSession, lastAgentText())
+                // Queued messages go out in order, unless the user pressed Stop (then they wait for "Send now").
+                if (result.string("stopReason") != "cancelled" || resumeQueueAfterStop) {
+                    resumeQueueAfterStop = false
+                    drainQueue()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: AcpException) {
