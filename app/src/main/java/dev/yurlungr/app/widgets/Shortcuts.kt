@@ -18,10 +18,20 @@ import dev.yurlungr.app.web.WebRunSessions
 import dev.yurlungr.app.web.WebRunState
 
 /** Intents that open a place in the app (tiles, the widget, shortcuts). */
+/** Set by the widget's "Ask an agent…" bar: the new-chat screen focuses its message box once, then clears it. */
+object QuickAsk {
+    private val state = androidx.compose.runtime.mutableStateOf(false)
+    var pending: Boolean
+        get() = state.value
+        set(v) { state.value = v }
+}
+
 object OpenIn {
     const val SERVERS = "servers"
     const val TERMINAL = "terminal"
     const val NEW_CHAT = "new_chat"
+    /** New chat with the keyboard already up: type and send. */
+    const val QUICK_ASK = "quick_ask"
     const val PROJECT = "project:"
 
     fun intent(context: Context, place: String): Intent =
@@ -42,6 +52,7 @@ object OpenIn {
         val project = LastProject.get(context)
         androidx.core.content.pm.ShortcutManagerCompat.setDynamicShortcuts(context, listOfNotNull(
             shortcut("new_chat", "New chat", NEW_CHAT),
+            shortcut("quick_ask", "Ask an agent", QUICK_ASK),
             project?.let { shortcut("last_project", it.name.take(24), PROJECT + it.path) },
             shortcut("servers", "Servers", SERVERS),
             shortcut("terminal", "Terminal", TERMINAL),
@@ -104,6 +115,7 @@ class HomeWidget : AppWidgetProvider() {
             setTextViewText(R.id.widget_project, project?.name ?: "Projects")
             setOnClickPendingIntent(R.id.widget_project, OpenIn.pending(context, project?.let { OpenIn.PROJECT + it.path } ?: OpenIn.PROJECT))
             setOnClickPendingIntent(R.id.widget_chat, OpenIn.pending(context, OpenIn.NEW_CHAT))
+            setOnClickPendingIntent(R.id.widget_ask, OpenIn.pending(context, OpenIn.QUICK_ASK))
             val n = OpenIn.runningServers()
             setTextViewText(R.id.widget_servers, if (n == 0) "Servers" else "Servers · $n")
             setOnClickPendingIntent(R.id.widget_servers, OpenIn.pending(context, OpenIn.SERVERS))

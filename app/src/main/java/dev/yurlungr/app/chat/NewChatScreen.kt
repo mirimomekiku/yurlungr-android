@@ -233,7 +233,9 @@ fun NewChatScreen(
             commands = emptyList(),
             acceptsImages = null,
             agentName = agent.displayName,
+            autoFocus = dev.yurlungr.app.widgets.QuickAsk.pending,
             onSend = { text, files ->
+                dev.yurlungr.app.widgets.QuickAsk.pending = false
                 NewChatPrefs.save(context, agent, folder)
                 val chat = ChatSessions.create(context, agent, File(paths.projects, folder), skipPermissions = skipPermissions)
                 chat.queue(text, files)

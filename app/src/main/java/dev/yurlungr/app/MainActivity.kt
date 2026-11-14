@@ -487,6 +487,7 @@ class MainActivity : ComponentActivity() {
         dev.yurlungr.app.widgets.OpenIn.SERVERS -> Route.Servers
         dev.yurlungr.app.widgets.OpenIn.TERMINAL -> Route.Terminal
         dev.yurlungr.app.widgets.OpenIn.NEW_CHAT -> Route.NewChat
+        dev.yurlungr.app.widgets.OpenIn.QUICK_ASK -> { dev.yurlungr.app.widgets.QuickAsk.pending = true; Route.NewChat }
         // This activity is exported, so any app can send this: only folders under ~/projects, or the
         // last project (which shortcuts and the widget point at), never the runtime's own folders.
         else -> place.removePrefix(dev.yurlungr.app.widgets.OpenIn.PROJECT).takeIf { it.isNotEmpty() && File(it).isDirectory }
