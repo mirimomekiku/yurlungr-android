@@ -627,6 +627,13 @@ class ChatSession(
         }
     }
 
+    override fun alwaysAllow(item: ChatItem.Permission) {
+        val kind = item.toolKind ?: return
+        ApprovalRules.add(appContext, ApprovalRule(cwd.path, kind))
+        val option = item.options.firstOrNull { it.kind == "allow_once" } ?: item.options.firstOrNull { it.isAllow } ?: return
+        answerPermission(item, option)
+    }
+
     override fun answerPermission(item: ChatItem.Permission, option: PermissionOption) {
         if (item.resolved != null) return
         item.resolved = option.name
@@ -787,7 +794,14 @@ class ChatSession(
             val o = el as? JsonObject ?: return@mapNotNull null
             PermissionOption(o.string("optionId") ?: return@mapNotNull null, o.string("name") ?: "?", o.string("kind") ?: "")
         }.orEmpty()
-        val item = ChatItem.Permission(toolTitle, options, CompletableDeferred())
+        val toolKind = toolCall?.string("kind") ?: toolCall?.string("toolCallId")?.let { toolCalls[it]?.kind }
+        // A standing rule for this kind of tool call in this project: approve once, quietly, and say so.
+        val auto = options.firstOrNull { it.kind == "allow_once" } ?: options.firstOrNull { it.isAllow }
+        if (auto != null && ApprovalRules.matches(appContext, cwd.path, toolKind)) {
+            add(ChatItem.Notice("Auto-approved: $toolTitle (rule: allow ${ApprovalRules.label(toolKind!!).lowercase()} here)"))
+            return buildJsonObject { putJsonObject("outcome") { put("outcome", "selected"); put("optionId", auto.optionId) } }
+        }
+        val item = ChatItem.Permission(toolTitle, options, CompletableDeferred(), toolKind)
         add(item)
         onNeedsAttention?.invoke(this, "Approve: $toolTitle")
         val chosen = item.decision.await()

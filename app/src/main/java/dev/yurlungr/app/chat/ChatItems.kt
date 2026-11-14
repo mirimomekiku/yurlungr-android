@@ -39,6 +39,8 @@ sealed class ChatItem {
         val toolTitle: String,
         val options: List<PermissionOption>,
         val decision: CompletableDeferred<String?>,
+        /** ACP tool kind (read, edit, execute…), for approval rules. */
+        val toolKind: String? = null,
     ) : ChatItem() {
         /** Chosen option name, "Cancelled", or null while waiting. */
         var resolved by mutableStateOf<String?>(null)

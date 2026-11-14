@@ -57,6 +57,8 @@ interface ChatModel {
     fun cancel()
     fun setMode(modeId: String)
     fun answerPermission(item: ChatItem.Permission, option: PermissionOption)
+    /** Approves this request and every later one of the same kind in this project. */
+    fun alwaysAllow(item: ChatItem.Permission) {}
     /** Stops the agent; the chat stays and can be resumed. */
     fun endSession()
     fun delete()

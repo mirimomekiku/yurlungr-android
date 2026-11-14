@@ -161,6 +161,7 @@ private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Un
         "checkpoints" -> (chat as? ChatSession)?.let { CheckpointsSheet(it) { sheet = null } }
         "usage" -> UsageSheet(chat) { sheet = null }
         "artifacts" -> ArtifactsSheet(chat) { sheet = null }
+        "rules" -> (chat as? ChatSession)?.let { ApprovalRulesSheet(it.cwd.path) { sheet = null } }
     }
     var menu by remember { mutableStateOf(false) }
     val model = chat.configOptions.firstOrNull { it.category == "model" }?.currentName?.takeIf { it.isNotBlank() }
@@ -213,6 +214,11 @@ private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Un
                     leadingIcon = { PhIcon(Ph.ClockCounterClockwise, null, size = 18.dp) },
                     text = { Text("Checkpoints") },
                     onClick = { menu = false; sheet = "checkpoints" },
+                )
+                if (chat is ChatSession) DropdownMenuItem(
+                    leadingIcon = { PhIcon(Ph.ShieldCheck, null, size = 18.dp) },
+                    text = { Text("Approval rules") },
+                    onClick = { menu = false; sheet = "rules" },
                 )
                 DropdownMenuItem(
                     leadingIcon = { PhIcon(Ph.File, null, size = 18.dp) },
@@ -290,7 +296,7 @@ private fun ChatItemView(chat: ChatModel, item: ChatItem) {
         is ChatItem.Thought -> ThoughtView(item)
         is ChatItem.ToolCall -> ToolCallCard(item)
         is ChatItem.Plan -> PlanCard(item)
-        is ChatItem.Permission -> PermissionCard(item) { option -> chat.answerPermission(item, option) }
+        is ChatItem.Permission -> PermissionCard(item, onAlways = if (chat is ChatSession && item.toolKind in ApprovalRules.kinds) ({ chat.alwaysAllow(item) }) else null) { option -> chat.answerPermission(item, option) }
         is ChatItem.Notice -> Text(
             item.text,
             style = MaterialTheme.typography.labelMedium,
@@ -510,7 +516,7 @@ private fun PlanCard(item: ChatItem.Plan) {
 }
 
 @Composable
-private fun PermissionCard(item: ChatItem.Permission, onChoose: (PermissionOption) -> Unit) {
+private fun PermissionCard(item: ChatItem.Permission, onAlways: (() -> Unit)? = null, onChoose: (PermissionOption) -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
         modifier = Modifier.fillMaxWidth(),
@@ -529,6 +535,9 @@ private fun PermissionCard(item: ChatItem.Permission, onChoose: (PermissionOptio
                         } else {
                             OutlinedButton(onClick = { onChoose(option) }) { Text(option.name) }
                         }
+                    }
+                    if (onAlways != null) androidx.compose.material3.TextButton(onClick = onAlways) {
+                        Text("Always allow ${ApprovalRules.label(item.toolKind ?: "").lowercase()} here")
                     }
                 }
             }
