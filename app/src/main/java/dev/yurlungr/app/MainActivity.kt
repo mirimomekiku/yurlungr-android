@@ -439,6 +439,11 @@ class MainActivity : ComponentActivity() {
                 val file = File(route.path)
                 if (dev.yurlungr.app.editor.Sqlite.isDatabase(file)) {
                     dev.yurlungr.app.editor.DatabaseScreen(file, onBack = back)
+                } else if (!route.edit && route.line == null && dev.yurlungr.app.editor.FilePreview.kindOf(file.name).let { it != dev.yurlungr.app.editor.PreviewKind.None && it != dev.yurlungr.app.editor.PreviewKind.Json }) {
+                    // Pictures, HTML/SVG pages and CSV/TSV tables open as a preview; Edit (where it makes sense) opens the text.
+                    val image = dev.yurlungr.app.editor.FilePreview.kindOf(file.name) == dev.yurlungr.app.editor.PreviewKind.Image
+                    dev.yurlungr.app.editor.FilePreviewScreen(file, onBack = back,
+                        onEdit = if (image) null else ({ nav.push(Route.FileView(route.path, edit = true)) }))
                 } else if (!route.edit && route.line == null && dev.yurlungr.app.editor.isMarkdownFile(file.name)) {
                     dev.yurlungr.app.editor.MarkdownScreen(file, resumeTick, onBack = back,
                         onEdit = { nav.push(Route.FileView(route.path, edit = true)) })

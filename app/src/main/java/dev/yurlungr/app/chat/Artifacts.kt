@@ -1,15 +1,7 @@
 package dev.yurlungr.app.chat
 
-import android.annotation.SuppressLint
-import android.graphics.BitmapFactory
-import android.webkit.WebResourceRequest
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,9 +20,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -38,15 +30,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import dev.yurlungr.app.editor.FilePreview
+import dev.yurlungr.app.editor.FilePreviewBody
+import dev.yurlungr.app.editor.PreviewKind
 import dev.yurlungr.app.ui.AppColors
 import dev.yurlungr.app.ui.AppSheet
 import dev.yurlungr.app.ui.LocalOpenFile
@@ -56,24 +47,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/** A file the agent created or changed in a chat, found from its edit tool calls. */
+/** A file the agent created or changed in a chat. [turn] is the prompt (1-based) that last touched it. */
 data class Artifact(val path: String, val isNew: Boolean, val turn: Int) {
     val file: File get() = File(path)
     val name: String get() = file.name
-    val kind: ArtifactKind get() = ArtifactKind.of(name)
-}
-
-enum class ArtifactKind {
-    Image, Web, Markdown, Code;
-
-    companion object {
-        fun of(name: String): ArtifactKind = when (name.substringAfterLast('.', "").lowercase()) {
-            "png", "jpg", "jpeg", "webp", "gif", "bmp" -> Image
-            "html", "htm", "svg" -> Web
-            "md", "markdown" -> Markdown
-            else -> Code
-        }
-    }
+    val preview: PreviewKind get() = FilePreview.kindOf(name)
 }
 
 object Artifacts {
@@ -83,8 +61,8 @@ object Artifacts {
             PathPolicy.isUnder(path, folder)
 
     /**
-     * Files edited or written in [items], each once (its last version), grouped by the prompt
-     * (turn) that changed it. Works for every agent that reports edits as diffs, remote chats included.
+     * Files edited or written in [items], each once (its last version), by the prompt (turn) that changed it,
+     * from the agent's edit diffs. Works for every agent that reports edits as diffs, remote chats included.
      */
     fun collect(items: List<ChatItem>): List<Artifact> {
         var turn = 0
@@ -103,23 +81,52 @@ object Artifacts {
         }
         return seen.values.toList()
     }
+
+    /**
+     * Joins several views of the same chat's files (edit diffs, and per-prompt snapshots that also see files
+     * made by commands): one entry per path, new if its first sighting was new, in the latest prompt that touched it.
+     */
+    fun merge(vararg sources: List<Artifact>): List<Artifact> {
+        val byPath = LinkedHashMap<String, Artifact>()
+        for (a in sources.flatMap { it }.sortedBy { it.turn }) {
+            val earlier = byPath[a.path]
+            byPath[a.path] = if (earlier == null) a else a.copy(isNew = earlier.isNew)
+        }
+        return byPath.values.toList()
+    }
 }
 
-/** Everything the agent produced in this chat, newest turn first, with previews for images and web files. */
+/** Everything the agent produced in this chat, newest prompt first, with previews for images, pages, tables and JSON. */
 @Composable
 fun ArtifactsSheet(chat: ChatModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
     val open = LocalOpenFile.current
+    val local = chat as? ChatSession
     // Derived from the items' state, so a diff arriving in a tool_call_update shows up too.
-    val artifacts by remember(chat) { androidx.compose.runtime.derivedStateOf { Artifacts.collect(chat.items) } }
+    val fromDiffs by remember(chat) { androidx.compose.runtime.derivedStateOf { Artifacts.collect(chat.items) } }
+    // Per-prompt snapshots also catch what commands wrote (a chart from a script, a build's output).
+    val fromSnapshots by produceState(emptyList<Artifact>(), fromDiffs, chat.state) {
+        value = if (local == null) emptyList() else withContext(Dispatchers.IO) {
+            val turns = Checkpoints.turns(context, chat.id).filter { !it.restore && it.before != null && it.after != null }.takeLast(30)
+            val firstNumber = (Artifacts.collect(chat.items).maxOfOrNull { it.turn } ?: turns.size) - turns.size + 1
+            turns.withIndex().flatMap { (i, t) ->
+                Checkpoints.changedFilesWithStatus(context, chat.id, local.cwd, t.before!!, t.after!!)
+                    .filter { (status, _) -> status != 'D' }
+                    .take(200)
+                    .map { (status, path) -> Artifact(File(local.cwd, path).path, isNew = status == 'A', turn = (firstNumber + i).coerceAtLeast(1)) }
+            }
+        }
+    }
+    val artifacts = remember(fromDiffs, fromSnapshots) { Artifacts.merge(fromSnapshots, fromDiffs) }
     var preview by remember { mutableStateOf<Artifact?>(null) }
-    preview?.let { ArtifactPreview(it, onClose = { preview = null }) }
+    preview?.let { ArtifactPreview(it, onEdit = { f -> open?.invoke(f) }, onClose = { preview = null }) }
     AppSheet(
         "Artifacts", onDismiss = onDismiss, icon = Ph.File, tile = AppColors.tiles.lime,
         subtitle = if (artifacts.isEmpty()) "Nothing created yet" else "${artifacts.size} file${if (artifacts.size == 1) "" else "s"} from this chat",
     ) {
         if (artifacts.isEmpty()) {
             Text(
-                "Files ${chat.agent.displayName} creates or edits show up here, with previews for images, HTML and SVG.",
+                "Files ${chat.agent.displayName} creates or edits show up here, with previews for images, HTML, SVG, CSV and JSON.",
                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             return@AppSheet
@@ -128,7 +135,7 @@ fun ArtifactsSheet(chat: ChatModel, onDismiss: () -> Unit) {
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 460.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             for ((turn, list) in groups) {
                 item(key = "t$turn") {
-                    Text(if (turn == 0) "Before your first message" else "Prompt $turn", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
+                    Text(if (turn <= 0) "Before your first message" else "Prompt $turn", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
                 }
                 items(list, key = { it.path }) { a ->
                     val exists = !chat.isRemote && a.file.isFile
@@ -138,13 +145,13 @@ fun ArtifactsSheet(chat: ChatModel, onDismiss: () -> Unit) {
                             .clip(RoundedCornerShape(14.dp))
                             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
                             .clickable(enabled = exists) {
-                                if (a.kind == ArtifactKind.Image || a.kind == ArtifactKind.Web) preview = a
+                                if (a.preview != PreviewKind.None) preview = a
                                 else { open?.invoke(a.file); onDismiss() }
                             }
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        PhIcon(if (a.kind == ArtifactKind.Image) Ph.Image else if (a.kind == ArtifactKind.Web) Ph.Globe else Ph.FileText, null, size = 20.dp)
+                        PhIcon(when (a.preview) { PreviewKind.Image -> Ph.Image; PreviewKind.Web -> Ph.Globe; else -> Ph.FileText }, null, size = 20.dp)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(a.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -153,7 +160,7 @@ fun ArtifactsSheet(chat: ChatModel, onDismiss: () -> Unit) {
                                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        if (exists && (a.kind == ArtifactKind.Image || a.kind == ArtifactKind.Web)) {
+                        if (exists && a.preview != PreviewKind.None && a.preview != PreviewKind.Image) {
                             IconButton(onClick = { open?.invoke(a.file); onDismiss() }) { PhIcon(Ph.PencilSimple, "Open in editor", size = 18.dp) }
                         }
                     }
@@ -163,88 +170,22 @@ fun ArtifactsSheet(chat: ChatModel, onDismiss: () -> Unit) {
     }
 }
 
-/** Full-screen preview: zoomable image, or the page rendered (HTML, SVG) with scripts allowed but no network escape. */
-@SuppressLint("SetJavaScriptEnabled")
+/** Full-screen preview with Copy path and Share (and Edit for text-based files). */
 @Composable
-private fun ArtifactPreview(a: Artifact, onClose: () -> Unit) {
+private fun ArtifactPreview(a: Artifact, onEdit: (File) -> Unit, onClose: () -> Unit) {
+    val context = LocalContext.current
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().statusBarsPadding()) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onClose) { PhIcon(Ph.X, "Close", size = 22.dp) }
-                    Text(a.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(a.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { FilePreview.copyPath(context, a.file) }) { PhIcon(Ph.Copy, "Copy path", size = 20.dp) }
+                    TextButton(onClick = { FilePreview.share(context, a.file) }) { Text("Share") }
+                    if (a.preview != PreviewKind.Image) TextButton(onClick = { onClose(); onEdit(a.file) }) { Text("Edit") }
                 }
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    if (a.kind == ArtifactKind.Image) ZoomableImage(a.file) else WebFile(a.file)
-                }
+                Box(Modifier.weight(1f).fillMaxWidth()) { FilePreviewBody(a.file) }
             }
         }
     }
-}
-
-@Composable
-private fun ZoomableImage(file: File) {
-    val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, file) {
-        value = withContext(Dispatchers.IO) {
-            runCatching {
-                // Downsampled: a camera-size PNG would not fit in memory at full size.
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }.also { BitmapFactory.decodeFile(file.path, it) }
-                var sample = 1
-                while (bounds.outWidth / sample > 2400 || bounds.outHeight / sample > 2400) sample *= 2
-                BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })?.asImageBitmap()
-            }.getOrNull()
-        }
-    }
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
-    val state = rememberTransformableState { zoom, pan, _ ->
-        scale = (scale * zoom).coerceIn(1f, 8f)
-        offset = if (scale == 1f) androidx.compose.ui.geometry.Offset.Zero else offset + pan
-    }
-    Box(Modifier.fillMaxSize().transformable(state), contentAlignment = Alignment.Center) {
-        val b = bitmap
-        if (b == null) Text("Couldn't open this image", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        else Image(
-            b, file.name, contentScale = ContentScale.Fit,
-            modifier = Modifier.fillMaxSize().graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y),
-        )
-    }
-}
-
-@SuppressLint("SetJavaScriptEnabled")
-@Composable
-private fun WebFile(file: File) {
-    val context = LocalContext.current
-    AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = {
-            WebView(context).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.allowFileAccess = true
-                settings.allowFileAccessFromFileURLs = false
-                settings.allowUniversalAccessFromFileURLs = false
-                settings.allowContentAccess = false
-                // Agent-written (or repo-supplied) HTML is untrusted: no requests leave the phone.
-                settings.blockNetworkLoads = true
-                settings.loadWithOverviewMode = true
-                settings.useWideViewPort = true
-                settings.builtInZoomControls = true
-                settings.displayZoomControls = false
-                val folder = file.parentFile?.path.orEmpty()
-                webViewClient = object : WebViewClient() {
-                    // Links inside the artifact's folder work; anything else stays out of this view.
-                    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
-                        !Artifacts.isInside(request.url.scheme, request.url.path, folder)
-
-                    // Subresources too (images, scripts, fetch, iframes): only files from the artifact's folder load.
-                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? =
-                        if (Artifacts.isInside(request.url.scheme, request.url.path, folder)) null
-                        else android.webkit.WebResourceResponse("text/plain", "utf-8", 403, "Blocked", emptyMap(), java.io.ByteArrayInputStream(ByteArray(0)))
-                }
-                loadUrl(android.net.Uri.fromFile(file).toString())
-            }
-        },
-        onRelease = { it.stopLoading(); it.destroy() },
-    )
 }

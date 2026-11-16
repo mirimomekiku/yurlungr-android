@@ -34,12 +34,15 @@ class ArtifactsTest {
         assertFalse(found.single().isNew)
     }
 
-    @Test fun `kinds follow the file extension`() {
-        assertEquals(ArtifactKind.Image, ArtifactKind.of("shot.PNG"))
-        assertEquals(ArtifactKind.Web, ArtifactKind.of("index.html"))
-        assertEquals(ArtifactKind.Web, ArtifactKind.of("logo.svg"))
-        assertEquals(ArtifactKind.Markdown, ArtifactKind.of("README.md"))
-        assertEquals(ArtifactKind.Code, ArtifactKind.of("Makefile"))
+    @Test fun `merging keeps one entry per file, new if first seen new, in the latest prompt`() {
+        val snapshots = listOf(Artifact("/p/chart.png", isNew = true, turn = 1), Artifact("/p/app.py", isNew = false, turn = 2))
+        val diffs = listOf(Artifact("/p/app.py", isNew = true, turn = 1), Artifact("/p/chart.png", isNew = false, turn = 3))
+        val merged = Artifacts.merge(snapshots, diffs).associateBy { it.path }
+        assertEquals(2, merged.size)
+        assertEquals(3, merged.getValue("/p/chart.png").turn)
+        assertTrue(merged.getValue("/p/chart.png").isNew)
+        assertEquals(2, merged.getValue("/p/app.py").turn)
+        assertTrue("created in prompt 1 by a diff", merged.getValue("/p/app.py").isNew)
     }
 
     @Test fun `search snippets are one line around the match`() {

@@ -173,6 +173,10 @@ object Checkpoints {
     suspend fun changedFiles(context: Context, chatId: String, cwd: File, from: String, to: String): List<String> =
         git(context, chatId, cwd, "diff", "-z", "--name-only", from, to).output.split('\u0000').filter { it.isNotEmpty() }
 
+    /** Files that differ between two snapshots with their status letter (A added, M modified, D deleted…). */
+    suspend fun changedFilesWithStatus(context: Context, chatId: String, cwd: File, from: String, to: String): List<Pair<Char, String>> =
+        parseNameStatusZ(git(context, chatId, cwd, "diff", "-z", "--name-status", from, to).output)
+
     /** `diff -z --name-status` output: (status letter, path) pairs. */
     internal fun parseNameStatusZ(out: String): List<Pair<Char, String>> {
         val parts = out.split('\u0000')
