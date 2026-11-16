@@ -39,6 +39,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.yurlungr.app.projects.Git
 import dev.yurlungr.app.runtime.CommandRunner
 import dev.yurlungr.app.runtime.RuntimePaths
 import dev.yurlungr.app.ui.AppColors
@@ -162,7 +163,7 @@ fun MergeScreen(file: File, onBack: () -> Unit, onOpenEditor: () -> Unit) {
                 if (markResolved) {
                     val paths = RuntimePaths(context)
                     val root = EditorTools.rootOf(file)
-                    check(CommandRunner.run(paths, listOf(File(paths.bin, "git").path, "-C", root.path, "add", "--", file.relativeTo(root).path), cwd = root).ok) { "git add failed" }
+                    check(CommandRunner.run(paths, listOf(File(paths.bin, "git").path, "-C", root.path, "add", "--", file.relativeTo(root).path), cwd = root, extraEnv = Git.ENV).ok) { "git add failed" }
                 }
             }
         }

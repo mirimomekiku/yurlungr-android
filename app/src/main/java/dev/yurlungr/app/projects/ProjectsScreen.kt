@@ -91,6 +91,8 @@ import dev.yurlungr.app.runtime.RuntimePaths
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -190,14 +192,19 @@ fun ProjectsScreen(
                         }
                     }
                 }
-                for (p in projects) {
-                    // One unreadable project must not stop the others (or leave them loading forever).
-                    try {
-                        statuses[p.path] = git.status(p)
-                        git.originSlug(p)?.let { origins[p.path] = it } ?: origins.remove(p.path)
-                    } catch (e: Exception) {
-                        if (e is CancellationException) throw e
-                        statuses[p.path] = GitStatus(isRepo = false, error = GitError(e.message ?: e.toString(), toolMissing = false))
+                // A few at a time: one at a time is slow with many projects, all at once floods the runtime.
+                val slots = Semaphore(3)
+                for (p in projects) launch {
+                    slots.withPermit {
+                        // One unreadable project must not stop the others (or leave them loading forever).
+                        try {
+                            // Counts only: new folders needn't be listed file by file.
+                            statuses[p.path] = git.status(p, allUntracked = false)
+                            git.originSlug(p)?.let { origins[p.path] = it } ?: origins.remove(p.path)
+                        } catch (e: Exception) {
+                            if (e is CancellationException) throw e
+                            statuses[p.path] = GitStatus(isRepo = false, error = GitError(e.message ?: e.toString(), toolMissing = false))
+                        }
                     }
                 }
             }

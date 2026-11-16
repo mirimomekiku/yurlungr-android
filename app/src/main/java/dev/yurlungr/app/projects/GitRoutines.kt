@@ -51,12 +51,15 @@ class GitRoutines(private val git: Git) {
             return RoutineOutcome.Failed("The branch ${status.branch ?: ""} isn't on the remote yet. Push it once first.".replace("  ", " "))
         }
 
-        val dirty = status.changes.isNotEmpty()
         val before = git.head(dir)
-        if (dirty) {
+        // Only what was actually stashed is popped later: `git stash` exits 0 with nothing to save
+        // (e.g. only ignored files changed), and popping then would apply an older, unrelated stash.
+        var stashed = false
+        if (status.changes.isNotEmpty()) {
             onStep("Saving your local changes (git stash)…")
-            val saved = git.stash(dir, STASH_MESSAGE)
+            val (saved, created) = git.stashSaving(dir, STASH_MESSAGE)
             if (!saved.ok) return RoutineOutcome.Failed(saved.describe("Saving your local changes"))
+            stashed = created
         }
 
         onStep("Getting the latest changes (git pull)…")
@@ -65,13 +68,13 @@ class GitRoutines(private val git: Git) {
             val after = git.status(dir)
             if (after.conflicts.isNotEmpty()) {
                 return RoutineOutcome.Conflicts(
-                    after.conflicts, ConflictStage.Pull, stashKept = dirty,
+                    after.conflicts, ConflictStage.Pull, stashKept = stashed,
                     "The latest changes conflict with commits on this branch in ${after.conflicts.size} file(s)." +
-                        if (dirty) " Your uncommitted changes are saved in the stash meanwhile." else "",
+                        if (stashed) " Your uncommitted changes are saved in the stash meanwhile." else "",
                 )
             }
             // Nothing merged: put the user's work back exactly as it was.
-            if (dirty) {
+            if (stashed) {
                 onStep("Putting your changes back…")
                 val back = git.stashPopLatest(dir)
                 if (!back.ok) return RoutineOutcome.Failed(pull.describe("git pull") + "\nYour changes are saved in stash@{0}; restoring them failed.")
@@ -80,7 +83,7 @@ class GitRoutines(private val git: Git) {
         }
         val pulled = if (before != null) git.countCommits(dir, before, "HEAD") else 0
 
-        if (dirty) {
+        if (stashed) {
             onStep("Putting your changes back (git stash pop)…")
             val pop = git.stashPopLatest(dir)
             if (!pop.ok) {
@@ -100,7 +103,7 @@ class GitRoutines(private val git: Git) {
             1 -> "Got 1 new commit."
             else -> "Got $pulled new commits."
         }
-        return RoutineOutcome.Done(got + if (dirty) " Your local changes are back in place." else "")
+        return RoutineOutcome.Done(got + if (stashed) " Your local changes are back in place." else "")
     }
 
     /** [getLatest], then pushes this branch's own commits (if any). */

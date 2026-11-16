@@ -142,8 +142,7 @@ data class GhRepo(
 class Git(private val paths: RuntimePaths) {
     private val git = File(paths.bin, "git").path
 
-    /** Fail fast instead of waiting for a password prompt nobody can answer; no pagers. */
-    private val env = mapOf("GIT_TERMINAL_PROMPT" to "0", "GIT_PAGER" to "cat", "PAGER" to "cat")
+    private val env = ENV
 
     private suspend fun run(dir: File, vararg args: String, timeoutMs: Long = 60_000): CommandResult =
         CommandRunner.run(paths, listOf(git, "-C", dir.path, *args), cwd = dir, timeoutMs = timeoutMs, extraEnv = env)
@@ -153,9 +152,13 @@ class Git(private val paths: RuntimePaths) {
         CommandRunner.run(paths, listOf(git, "-C", dir.path, *args), cwd = dir, timeoutMs = timeoutMs, extraEnv = env, forParsing = true)
             .also { if (it.truncated) android.util.Log.w("Git", "Output of git ${args.firstOrNull()} was truncated") }
 
-    suspend fun status(dir: File): GitStatus {
+    /**
+     * [allUntracked]: every untracked file (for the changes list); false collapses new folders to
+     * one entry, which is much cheaper and enough for counts (the projects list).
+     */
+    suspend fun status(dir: File, allUntracked: Boolean = true): GitStatus {
         if (!File(dir, ".git").exists()) return GitStatus.NotARepo
-        val r = runParsed(dir, "status", "--porcelain=v1", "-b", "-z", "-uall")
+        val r = runParsed(dir, "status", "--porcelain=v1", "-b", "-z", if (allUntracked) "-uall" else "-unormal")
         if (!r.ok) {
             // A broken .git (not an actual repository) is still "not a repo"; anything else is an error.
             if (!r.toolMissing && r.errorOutput.contains("not a git repository", ignoreCase = true)) return GitStatus.NotARepo
@@ -266,20 +269,17 @@ class Git(private val paths: RuntimePaths) {
 
     /** A failure naming the files git still has as unmerged, or null when there are none. */
     private suspend fun unresolved(dir: File): CommandResult? {
-        val names = runParsed(dir, "diff", "--name-only", "--diff-filter=U").output.lines().filter { it.isNotBlank() }
+        // -z: paths verbatim, not C-quoted (non-ASCII names).
+        val names = runParsed(dir, "diff", "--name-only", "-z", "--diff-filter=U").output.split('\u0000').filter { it.isNotBlank() }.distinct()
         return if (names.isEmpty()) null
         else CommandResult(exitCode = 1, output = "Resolve the conflicts first (open each in the merge view): ${names.joinToString()}")
     }
 
     /** A failure when the staged changes add conflict markers, or null when they don't. */
     private suspend fun markersStaged(dir: File): CommandResult? {
-        val diff = runParsed(dir, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff").output
-        var file: String? = null
-        val hits = LinkedHashSet<String>()
-        for (line in diff.lineSequence()) {
-            if (line.startsWith("+++ ")) file = line.removePrefix("+++ ").removePrefix("b/")
-            else if (CONFLICT_MARKER.containsMatchIn(line)) file?.let(hits::add)
-        }
+        // quotePath=false: non-ASCII names as they are (only quotes, tabs, backslashes… still get quoted).
+        val diff = runParsed(dir, "-c", "core.quotePath=false", "diff", "--cached", "-U0", "--no-color", "--no-ext-diff").output
+        val hits = filesWithMarkers(diff)
         return if (hits.isEmpty()) null
         else CommandResult(exitCode = 1, output = "These files still have conflict markers (<<<<<<< / >>>>>>>): ${hits.joinToString()}. Resolve them, then commit.")
     }
@@ -336,7 +336,14 @@ class Git(private val paths: RuntimePaths) {
     suspend fun undoLastCommit(dir: File): CommandResult = run(dir, "reset", "--soft", "HEAD~1")
 
     /** A merge is half done (after a conflicted pull): it needs resolving and committing. */
-    fun mergeInProgress(dir: File): Boolean = File(dir, ".git/MERGE_HEAD").exists()
+    suspend fun mergeInProgress(dir: File): Boolean {
+        // --git-path: .git may be a file pointing elsewhere (worktrees, submodules).
+        val r = runParsed(dir, "rev-parse", "--git-path", "MERGE_HEAD", timeoutMs = 10_000)
+        val path = r.output.trim()
+        if (!r.ok || path.isEmpty()) return withContext(Dispatchers.IO) { File(dir, ".git/MERGE_HEAD").exists() }
+        val f = File(path).let { if (it.isAbsolute) it else File(dir, path) }
+        return withContext(Dispatchers.IO) { f.exists() }
+    }
 
     // ---- Branches & stash --------------------------------------------------------------------
 
@@ -373,6 +380,21 @@ class Git(private val paths: RuntimePaths) {
     suspend fun stash(dir: File, message: String): CommandResult =
         if (message.isBlank()) run(dir, "stash", "push", "--include-untracked")
         else run(dir, "stash", "push", "--include-untracked", "-m", message)
+
+    /** The commit stash@{0} points at, or null when there are no stashes. */
+    suspend fun stashTop(dir: File): String? =
+        runParsed(dir, "rev-parse", "-q", "--verify", "refs/stash").takeIf { it.ok }?.output?.trim()?.ifEmpty { null }
+
+    /**
+     * [stash], and whether it actually saved an entry: git exits 0 when there was nothing to save,
+     * and popping after that would apply an older, unrelated stash.
+     */
+    suspend fun stashSaving(dir: File, message: String): Pair<CommandResult, Boolean> {
+        val before = stashTop(dir)
+        val r = stash(dir, message)
+        if (!r.ok) return r to false
+        return r to stashCreated(before, stashTop(dir))
+    }
 
     suspend fun stashPop(dir: File, stash: GitStash): CommandResult = run(dir, "stash", "pop", stash.ref)
     suspend fun stashApply(dir: File, stash: GitStash): CommandResult = run(dir, "stash", "apply", stash.ref)
@@ -465,6 +487,18 @@ class Git(private val paths: RuntimePaths) {
     private fun <T> failure(r: CommandResult, what: String): Result<T> = Result.failure(GitException(errorOf(r, what)))
 
     companion object {
+        /**
+         * Fail fast instead of waiting for a password prompt nobody can answer; no pagers. Paths
+         * are literal: otherwise git reads `app/[id]/page.tsx` as a glob that also matches
+         * `app/i/page.tsx`, and discarding one file would reset or delete the other.
+         */
+        val ENV: Map<String, String> = mapOf(
+            "GIT_TERMINAL_PROMPT" to "0", "GIT_PAGER" to "cat", "PAGER" to "cat", "GIT_LITERAL_PATHSPECS" to "1",
+        )
+
+        /** Whether `git stash push` made an entry: refs/stash moved (it exits 0 with "No local changes to save" too). */
+        fun stashCreated(before: String?, after: String?): Boolean = after != null && after != before
+
         private val EMAIL = Regex("""^[^\s@]+@[^\s@]+\.[^\s@]+$""")
 
         /** A plausible commit email: something@domain.tld, no spaces. */
@@ -682,6 +716,59 @@ class Git(private val paths: RuntimePaths) {
                 (0 until maxOf(n, 0)).any { buf[it] == 0.toByte() }
             }
         }.getOrDefault(true)
+
+        /**
+         * The files of a `diff -U0` whose added lines open or close a conflict. A file's name is
+         * only read from its header ("+++ b/x", before its first "@@"), so an added content line
+         * that starts with "++ " can't be mistaken for one; C-quoted names are unquoted.
+         */
+        fun filesWithMarkers(diff: String): Set<String> {
+            val hits = LinkedHashSet<String>()
+            var file: String? = null
+            var inHeader = false
+            for (line in diff.lineSequence()) {
+                when {
+                    line.startsWith("diff --git ") -> { inHeader = true; file = null }
+                    inHeader && line.startsWith("@@") -> inHeader = false
+                    inHeader && line.startsWith("+++ ") -> {
+                        val name = unquoteC(line.removePrefix("+++ "))
+                        file = if (name == "/dev/null") null else name.removePrefix("b/")
+                    }
+                    !inHeader && CONFLICT_MARKER.containsMatchIn(line) -> file?.let(hits::add)
+                }
+            }
+            return hits
+        }
+
+        /** Undoes git's C-style quoting of a path (`"caf\303\251"` → café); unquoted text is returned as is. */
+        fun unquoteC(text: String): String {
+            if (text.length < 2 || !text.startsWith('"') || !text.endsWith('"')) return text
+            val body = text.substring(1, text.length - 1)
+            val out = java.io.ByteArrayOutputStream()
+            var i = 0
+            while (i < body.length) {
+                val c = body[i]
+                if (c == '\\' && i + 1 < body.length) {
+                    val octal = body.substring(i + 1, minOf(i + 4, body.length))
+                    if (octal.length == 3 && octal.all { it in '0'..'7' }) {
+                        out.write(octal.toInt(8))
+                        i += 4
+                        continue
+                    }
+                    val escaped = when (val n = body[i + 1]) {
+                        'n' -> '\n'; 't' -> '\t'; 'r' -> '\r'; 'a' -> '\u0007'; 'b' -> '\b'; 'f' -> '\u000c'; 'v' -> '\u000b'
+                        else -> n
+                    }
+                    out.write(escaped.toString().toByteArray(Charsets.UTF_8))
+                    i += 2
+                    continue
+                }
+                val n = if (Character.isHighSurrogate(c) && i + 1 < body.length) 2 else 1
+                out.write(body.substring(i, i + n).toByteArray(Charsets.UTF_8))
+                i += n
+            }
+            return out.toString("UTF-8")
+        }
 
         /** Single-quotes a value for the shell. */
         fun shellQuote(s: String) = "'" + s.replace("'", "'\\''") + "'"

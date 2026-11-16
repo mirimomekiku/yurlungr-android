@@ -46,6 +46,14 @@ object ProjectTasks {
     private fun json(f: File): JsonObject? = runCatching { Json.parseToJsonElement(read(f)) as? JsonObject }.getOrNull()
     private fun keys(obj: JsonObject?, key: String): List<String> = (obj?.get(key) as? JsonObject)?.keys?.toList().orEmpty()
 
+    private val PLAIN_ARG = Regex("^[A-Za-z0-9_.:/@%+=,-]+$")
+
+    /**
+     * A script or target name as one shell word: as is when it's plain ("build", "test:unit"),
+     * otherwise quoted, since package.json keys can be anything ("x; rm -rf ~", "$(id)").
+     */
+    internal fun arg(name: String): String = if (PLAIN_ARG.matches(name)) name else Git.shellQuote(name)
+
     fun detect(root: File, stacks: List<DetectedStack>): List<ProjectTask> = buildList {
         val label = { dir: File -> dir.relativeTo(root).invariantSeparatorsPath.ifEmpty { root.name } }
         for (s in stacks) {
@@ -58,12 +66,12 @@ object ProjectTasks {
                         s.name.contains("bun") -> "bun run"
                         else -> "npm run"
                     }
-                    for (script in keys(json(File(s.dir, "package.json")), "scripts")) add(ProjectTask("$where · package.json", script, "$runner $script", s.dir))
+                    for (script in keys(json(File(s.dir, "package.json")), "scripts")) add(ProjectTask("$where · package.json", script, "$runner ${arg(script)}", s.dir))
                 }
                 "deno" -> for (task in keys(json(listOf("deno.json", "deno.jsonc").map { File(s.dir, it) }.first { it.isFile }), "tasks")) {
-                    add(ProjectTask("$where · deno", task, "deno task $task", s.dir))
+                    add(ProjectTask("$where · deno", task, "deno task ${arg(task)}", s.dir))
                 }
-                "php" -> for (script in keys(json(File(s.dir, "composer.json")), "scripts")) add(ProjectTask("$where · composer", script, "composer run $script", s.dir))
+                "php" -> for (script in keys(json(File(s.dir, "composer.json")), "scripts")) add(ProjectTask("$where · composer", script, "composer run ${arg(script)}", s.dir))
                 "android", "gradle" -> {
                     val gradle = if (File(s.dir, "gradlew").isFile) "./gradlew" else "gradle"
                     val tasks = if (s.id == "android") listOf("assembleDebug", "installDebug", "test", "lint", "clean") else listOf("build", "test", "run", "clean")
@@ -86,9 +94,9 @@ object ProjectTasks {
         // Make and just, wherever the stacks are (and at the root).
         for (dir in (listOf(root) + stacks.map { it.dir }).distinctBy { it.canonicalPath }) {
             val where = label(dir)
-            makeTargets(read(File(dir, "Makefile")).ifEmpty { read(File(dir, "makefile")) }).forEach { add(ProjectTask("$where · make", it, "make $it", dir)) }
+            makeTargets(read(File(dir, "Makefile")).ifEmpty { read(File(dir, "makefile")) }).forEach { add(ProjectTask("$where · make", it, "make ${arg(it)}", dir)) }
             justRecipes(read(listOf("justfile", "Justfile", ".justfile").map { File(dir, it) }.firstOrNull { it.isFile } ?: File(""))).forEach {
-                add(ProjectTask("$where · just", it, "just $it", dir))
+                add(ProjectTask("$where · just", it, "just ${arg(it)}", dir))
             }
         }
     }.distinctBy { it.dir.path + "|" + it.command }

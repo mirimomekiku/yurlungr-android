@@ -244,7 +244,7 @@ fun GitActionsSheet(
                     Ph.MagicWand, "Fix merge conflicts",
                     "${agent?.displayName ?: "The agent"} resolves the ${conflicts.size} conflicted file${if (conflicts.size == 1) "" else "s"}",
                     enabled = running == null, tile = AppColors.tiles.lilac, ai = true,
-                ) { ask(GitRoutines.fixConflictsPrompt(conflicts, git.mergeInProgress(dir))) }
+                ) { scope.launch { ask(GitRoutines.fixConflictsPrompt(conflicts, git.mergeInProgress(dir))) } }
             }
             ActionRow(
                 Ph.GitCommit, "Write commit message & commit",

@@ -87,21 +87,24 @@ fun ProjectSearchSheet(root: File, onDismiss: () -> Unit, onOpenFile: (File, Int
     fun search(now: Boolean) {
         job?.cancel()
         val q = query
-        if (q.isBlank()) { hits = null; error = null; return }
+        if (q.isBlank()) { hits = null; error = null; running = false; return }
         job = scope.launch {
             if (!now) delay(400) // typing: wait for a pause
             running = true
-            val rg = File(paths.bin, "rg")
-            if (!rg.canExecute()) {
-                error = "ripgrep isn't installed. Install the developer tools from System checks."
-                running = false
-                return@launch
+            try {
+                val rg = File(paths.bin, "rg")
+                if (!rg.canExecute()) {
+                    error = "ripgrep isn't installed. Install the developer tools from System checks."
+                    return@launch
+                }
+                val r = CommandRunner.run(paths, ProjectSearch.args(rg, q, regex), cwd = root, timeoutMs = 20_000, forParsing = true)
+                // rg exits 1 when nothing matched, 2 on an error (a bad regex).
+                error = if (r.exitCode == 2 || r.timedOut) r.errorOutput.lines().firstOrNull { it.isNotBlank() } ?: r.describe("Searching") else null
+                hits = ProjectSearch.parse(r.output)
+            } finally {
+                // Cancelled by a newer search: that one owns the spinner now.
+                if (job == null || job === coroutineContext[Job]) running = false
             }
-            val r = CommandRunner.run(paths, ProjectSearch.args(rg, q, regex), cwd = root, timeoutMs = 20_000, forParsing = true)
-            // rg exits 1 when nothing matched, 2 on an error (a bad regex).
-            error = if (r.exitCode == 2 || r.timedOut) r.errorOutput.lines().firstOrNull { it.isNotBlank() } ?: r.describe("Searching") else null
-            hits = ProjectSearch.parse(r.output)
-            running = false
         }
     }
     LaunchedEffect(query, regex) { search(now = false) }
