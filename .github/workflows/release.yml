@@ -1,0 +1,82 @@
+name: Release
+
+# Tags are the bare version (0.0.4); v-prefixed tags (v0.0.5) work too.
+on:
+  push:
+    tags: ["v*", "[0-9]*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches versionName
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          grep -q "versionName = \"$version\"" app/build.gradle.kts \
+            || { echo "::error::tag $GITHUB_REF_NAME doesn't match versionName in app/build.gradle.kts"; exit 1; }
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-36 ndk;28.2.13676358 cmake;3.22.1"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: true
+
+      # Repository secrets: YURLUNGR_KEYSTORE_BASE64 (base64 of the .jks), YURLUNGR_KEYSTORE_PASSWORD,
+      # YURLUNGR_KEY_ALIAS and YURLUNGR_KEY_PASSWORD. See DEVELOPMENT.md, "Release signing".
+      - name: Decode the release key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.YURLUNGR_KEYSTORE_BASE64 }}
+        run: |
+          [ -n "$KEYSTORE_BASE64" ] || { echo "::error::YURLUNGR_KEYSTORE_BASE64 secret is not set"; exit 1; }
+          keystore="$RUNNER_TEMP/release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          echo "YURLUNGR_KEYSTORE=$keystore" >> "$GITHUB_ENV"
+
+      - name: Test and build release APKs
+        env:
+          YURLUNGR_REQUIRE_RELEASE_KEY: "true"
+          YURLUNGR_KEYSTORE_PASSWORD: ${{ secrets.YURLUNGR_KEYSTORE_PASSWORD }}
+          YURLUNGR_KEY_ALIAS: ${{ secrets.YURLUNGR_KEY_ALIAS }}
+          YURLUNGR_KEY_PASSWORD: ${{ secrets.YURLUNGR_KEY_PASSWORD }}
+        run: ./gradlew testDebugUnitTest assembleRelease
+
+      - name: Remove the decoded key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      - name: Rename APKs, write SHA256SUMS.txt and the notes
+        run: |
+          mkdir dist
+          for apk in app/build/outputs/apk/release/app-*-release.apk; do
+            abi=$(basename "$apk" -release.apk); abi=${abi#app-}
+            cp "$apk" "dist/yurlungr-$VERSION-$abi.apk"
+          done
+          ls dist
+          [ "$(ls dist/*.apk | wc -l)" -eq 5 ] || { echo "::error::expected 4 ABI APKs and a universal one"; exit 1; }
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          notes="docs/releases/$VERSION.md"
+          if [ -f "$notes" ]; then cp "$notes" "$RUNNER_TEMP/notes.md"; else echo "Yurlungr $VERSION" > "$RUNNER_TEMP/notes.md"; fi
+
+      - name: Draft GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: Yurlungr ${{ env.VERSION }}
+          body_path: ${{ runner.temp }}/notes.md
+          files: |
+            dist/*.apk
+            dist/SHA256SUMS.txt
