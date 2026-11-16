@@ -168,7 +168,10 @@ terminal processes alive.
 
 `remote/` lets one phone use another's agents. The host runs a WebSocket server (Java-WebSocket, port
 8765, Tailscale address only unless local Wi-Fi is allowed, which still refuses peers outside Tailscale and
-private LAN ranges). Pairing (`RemotePairing.kt`) is a mutual HMAC challenge-response over the pairing code,
+the subnets of this phone's own Wi-Fi/Ethernet interfaces; cellular and VPN interfaces don't count). An address
+that fails to pair is refused for a while (`PairingBackoff`, doubling to 5 minutes), and trusted devices
+reconnect through their own pairing slots. Pairing codes and device secrets are stored encrypted with an
+Android Keystore key (`SecretBox`). Pairing (`RemotePairing.kt`) is a mutual HMAC challenge-response over the pairing code,
 so the code is never sent and the client also verifies the host; afterwards every frame is sealed with
 AES-256-GCM under per-direction keys derived from the code and both nonces (counter nonces reject replay
 and reordering). Unpaired connections get 10 s and 4 KB messages; frames are capped at 64 MB. The protocol (`RemoteProtocol.kt`) sends a snapshot when a chat is opened, then
@@ -182,11 +185,13 @@ JavaScript runtimes, Java & Kotlin, PHP, Dart, .NET, Databases, Swift, Zig, Elix
 Scala, D, Perl, Shell, CLI tools, Servers, DevOps, Media, Local AI, Linux distros, Native libraries, Python
 science, Debugging, Language servers, Networking, Security, Data tools, Task runners, Docs, Archives, OCR & PDF and
 a headless browser) are separate packs.
-Each has its own script (`assets/<pack>-setup.sh`, generic: it reads `YURLUNGR_PACKAGES_<PACK>`, the space need and
-`YURLUNGR_CHECKS_<PACK>` from the generated `toolchain.sh`), its own Install button in System checks (one "(optional)" group
-each; a missing tool is Info, not a warning) and its own `Fix`. To add a pack: a `ToolSetup` entry, its `Tool` probes, a
-`Fix` entry (with its branches in `SetupScreen`), and a copy of a pack script. `browser-setup.sh` is the one custom script: it
-enables Termux's x11 repository first. The managed agent notes list the packs that are installed, refreshed on app launch.
+Each has its own script in the runtime (`libexec/yurlungr/<pack>-setup.sh`, so its own log and status file), its own
+Install button in System checks (one "(optional)" group each; a missing tool is Info, not a warning) and its own `Fix`.
+The scripts are all one asset, `assets/pack-setup.sh` (`ToolSetup.asset`), which `RuntimeAssets` installs under each
+pack's script name; it picks its pack from that name (`YURLUNGR_PACK_OF_SCRIPT` in the generated `toolchain.sh`) and
+reads that pack's `YURLUNGR_PACKAGES_<PACK>`, space need, title and `YURLUNGR_CHECKS_<PACK>`. To add a pack: a
+`ToolSetup` entry, its `Tool` probes and a `Fix` entry (with its branches in `SetupScreen`). `browser-setup.sh` is the one
+custom script: it enables Termux's x11 repository first. The managed agent notes list the packs that are installed, refreshed on app launch.
 
 Tools with `onlyIf` (optional agents) are checked only when installed, by System checks and by the scripts
 (`YURLUNGR_ONLY_IF` in `toolchain.sh`). JVM tools have a longer probe time (`Tool.timeoutS`).
@@ -215,7 +220,7 @@ Transitions come from `ui/Motion.kt`.
 |---|---|
 | `runtime/` | Bootstrap, environment, command runner, foreground service, bridges and MOTD status |
 | `acp/` | JSON-RPC 2.0 over the agent's stdio |
-| `chat/` | Chat sessions, persistence, attachments, the chat and new-chat screens, the composer |
+| `chat/` | Chat sessions, persistence, attachments, the chat and new-chat screens, the composer; approval rules (`ApprovalRules`), the artifacts sheet (`Artifacts`), the Activity screen (`ActivityScreen`), saved prompts (`PromptLibrary`) and search inside chats (`ChatSearch`) |
 | `agents/` | Agent launch recipes, install / sign-in detection, logos |
 | `home/` | The Agents screen |
 | `projects/` | Git operations, the workspace, history graph, branches, project list |
@@ -225,7 +230,8 @@ Transitions come from `ui/Motion.kt`.
 | `remote/` | Phone-to-phone protocol, server and client |
 | `setup/` | System checks (first-run screen), Settings and Development environment |
 | `ui/` | Theme, shared components, motion, loaders, icons, sidebar |
+| `widgets/` | Quick Settings tiles, the home-screen widget (with its quick-ask bar) and launcher shortcuts |
 | `MainActivity.kt` | Routes and navigation |
 
-`app/src/main/assets/` holds the runtime scripts (`agents-setup.sh`, `android-sdk-setup.sh`, the `*-setup.sh` optional packs,
+`app/src/main/assets/` holds the runtime scripts (`agents-setup.sh`, `android-sdk-setup.sh`, `pack-setup.sh` for the optional packs plus the custom `browser-setup.sh`,
 `spike-test.sh`, `motd.sh`, `web-runner.cjs`) and the bundled licences.

@@ -23,8 +23,12 @@ Release builds are split per CPU architecture (`splits.abi` in `app/build.gradle
 # app/build/outputs/apk/release/app-{arm64-v8a,armeabi-v7a,x86_64,x86,universal}-release.apk
 ```
 
-For the alpha, release builds are signed with the debug key so they install over debug builds without
-losing the runtime and chats. Switching to a dedicated release key will require one reinstall.
+Release builds are signed with the release key when one is configured (see [Release signing](#release-signing)).
+Without one they fall back to this machine's debug key, with a Gradle warning, so they install over debug
+builds without losing the runtime and chats (the alpha workflow).
+
+Minification (`isMinifyEnabled`) is off. Before a wide release, turn it on with R8 keep rules for what
+reflection, JNI (`libtermux`) and kotlinx.serialization need, and test a release build on a device.
 
 ## Test
 
@@ -112,10 +116,11 @@ from the other. To add a tool to an existing setup, add it to `Toolchain` and no
 
 - **A new optional pack** needs:
   - a `ToolSetup` entry (packages, disk space, marker file, one-line blurb) and its `Tool` probes;
-  - a `Fix` entry, plus its branches in `SetupScreen`;
-  - a script copied from `assets/go-setup.sh`.
+  - a `Fix` entry, plus its branches in `SetupScreen`.
 
-  `HardeningTest` checks that every pack has all of these.
+  No script to write: the generic `assets/pack-setup.sh` is installed under the pack's script name and
+  installs that pack (a pack needing custom steps gets its own asset, like `browser-setup.sh`, and an
+  exception in `ToolSetup.asset`). `HardeningTest` checks that every pack has all of these.
 - **Probes:**
   - print a version line and exit 0;
   - avoid `head` in a pipe: `pipefail` turns its early exit (SIGPIPE) into a failure, so use `sed -n 1p`;
@@ -189,6 +194,64 @@ python3 <repo>/tools/phosphor-gen.py > <repo>/app/src/main/java/dev/yurlungr/app
 Never edit `PhosphorIcons.kt` by hand. Icons whose inner chambers render filled in Compose go in the
 generator's `EVEN_ODD` set.
 
+## Release signing
+
+The release key is read from these values, each from a Gradle property (`-P…` or
+`~/.gradle/gradle.properties`), an environment variable, or `local.properties`, in that order:
+
+| Name | Value |
+|---|---|
+| `YURLUNGR_KEYSTORE` | Path to the keystore (relative paths are from the repository root) |
+| `YURLUNGR_KEYSTORE_PASSWORD` | Keystore password |
+| `YURLUNGR_KEY_ALIAS` | Key alias |
+| `YURLUNGR_KEY_PASSWORD` | Key password (defaults to the keystore password, as in PKCS12 keystores) |
+
+Create the key once, outside the repository (`*.jks` and `*.keystore` are gitignored anyway), and back it
+up together with its passwords: every future update must be signed with it.
+
+```sh
+keytool -genkeypair -v -keystore ~/keys/yurlungr-release.jks -alias yurlungr   -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=Yurlungr"
+```
+
+Then, for example in `local.properties`:
+
+```properties
+YURLUNGR_KEYSTORE=/home/me/keys/yurlungr-release.jks
+YURLUNGR_KEYSTORE_PASSWORD=…
+YURLUNGR_KEY_ALIAS=yurlungr
+```
+
+**Switching keys is a one-time, deliberate step.** Android refuses to install an APK over one signed with a
+different key, so the first release-key build needs the old app uninstalled, which wipes its data: the
+embedded Linux environment, installed packs, agent sign-ins and all chats (projects in shared storage
+stay). Do it once, announce it in the release notes, and never change the key again.
+
+For the GitHub release workflow, add the repository secrets `YURLUNGR_KEYSTORE_BASE64`
+(`base64 -w0 yurlungr-release.jks`), `YURLUNGR_KEYSTORE_PASSWORD`, `YURLUNGR_KEY_ALIAS` and
+`YURLUNGR_KEY_PASSWORD`. It sets `YURLUNGR_REQUIRE_RELEASE_KEY=true`, which makes the build fail rather
+than fall back to a debug key.
+
+## Release workflow
+
+`.github/workflows/release.yml` runs when a tag is pushed (`0.0.5`, or `v0.0.5`). It checks that the tag
+matches `versionName`, builds `assembleRelease` with the release key from the repository secrets, renames
+the APKs to `yurlungr-<version>-<abi>.apk`, writes `SHA256SUMS.txt`, and creates a **draft** GitHub release
+with them and `docs/releases/<version>.md` as notes. Review the draft and publish it.
+
+The Gradle wrapper's download is pinned by `distributionSha256Sum` in
+`gradle/wrapper/gradle-wrapper.properties`; update it with the wrapper version (the checksum is published
+at `https://services.gradle.org/distributions/gradle-<version>-bin.zip.sha256`).
+
+Dependencies are checked against `gradle/verification-metadata.xml` (SHA-256). After adding or upgrading a
+dependency or plugin, regenerate it and review the diff:
+
+```sh
+./gradlew --write-verification-metadata sha256 help testDebugUnitTest lintDebug assembleDebug assembleRelease
+```
+
+AGP's `aapt2` jar is per OS: the generated file only lists the one for the machine that ran it, so add the
+`-linux` (release workflow) and `-osx` entries by hand from `https://dl.google.com/android/maven2/com/android/tools/build/aapt2/`.
+
 ## Release
 
 1. Pull remote changes, finish feature commits, update docs/release notes, and bump `versionName` plus
@@ -198,7 +261,8 @@ generator's `EVEN_ODD` set.
 3. From that clean tagged commit, run `./gradlew testDebugUnitTest lintDebug assembleRelease` and
    `node --test tools/test-web-*.cjs`. Keep the four ABI APKs and the universal APK, rename them to
    `yurlungr-<version>-<abi>.apk`, and generate `SHA256SUMS.txt`. Check package version, included ABI and signatures.
-4. Push the branch and tag without force. Create the GitHub release with `gh release create <version>
+4. Push the branch and tag without force. With the signing secrets set, the release workflow builds the APKs
+   and `SHA256SUMS.txt` and opens a draft release: check its APKs (version, ABI, signing certificate) and publish it. Without the workflow, create the release with `gh release create <version>
    --verify-tag --title "Yurlungr <version>" --notes-file docs/releases/<version>.md`, passing all APKs and
    `SHA256SUMS.txt` as assets. Publish as a full release so the README's latest-release link resolves.
 
