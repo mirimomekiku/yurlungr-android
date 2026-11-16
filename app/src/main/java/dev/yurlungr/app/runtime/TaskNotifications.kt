@@ -30,14 +30,32 @@ object TaskNotifications {
             if (exit == 0) dev.yurlungr.app.ui.Feedback.Kind.Done else dev.yurlungr.app.ui.Feedback.Kind.Failed)
     }
 
-    /** `yurlungr-notify "title" "text"`: first line is the title. */
+    /** The app's own notice (e.g. a device paired): first line is the title. */
     fun notify(context: Context, value: String) {
         val title = value.substringBefore('\n').take(120).ifBlank { return }
         post(context, title, value.substringAfter('\n', "").take(400), null)
     }
 
+    /** Marks notices that scripts and agents asked for, so they can't pass as the app's own. */
+    const val RUNTIME_LABEL = "From terminal/agent"
+
+    /**
+     * `yurlungr-notify "title" "text"` from inside the runtime: first line is the title. Labelled
+     * as coming from the runtime (title prefix and subtext), since any agent can post one.
+     */
+    fun notifyFromRuntime(context: Context, value: String) {
+        val (title, text) = runtimeNotice(value) ?: return
+        post(context, title, text, null, subText = RUNTIME_LABEL)
+    }
+
+    /** Title and text for a runtime notice, the title labelled; null if it has no title. */
+    internal fun runtimeNotice(value: String): Pair<String, String>? {
+        val title = value.substringBefore('\n').trim().take(120).ifBlank { return null }
+        return "$RUNTIME_LABEL: $title" to value.substringAfter('\n', "").take(400)
+    }
+
     @SuppressLint("MissingPermission") // targetSdk 28: notifications need no runtime grant
-    private fun post(context: Context, title: String, text: String, terminalId: String?, kind: dev.yurlungr.app.ui.Feedback.Kind = dev.yurlungr.app.ui.Feedback.Kind.Done) {
+    private fun post(context: Context, title: String, text: String, terminalId: String?, kind: dev.yurlungr.app.ui.Feedback.Kind = dev.yurlungr.app.ui.Feedback.Kind.Done, subText: String? = null) {
         if (ChatSessions.appVisible) {
             Toast.makeText(context, title, Toast.LENGTH_SHORT).show()
             dev.yurlungr.app.ui.Feedback.signal(context, kind)
@@ -51,6 +69,7 @@ object TaskNotifications {
             .setSmallIcon(dev.yurlungr.app.R.drawable.ic_stat_terminal)
             .setContentTitle(title)
             .setContentText(text)
+            .apply { subText?.let { setSubText(it) } }
             .setContentIntent(open)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)

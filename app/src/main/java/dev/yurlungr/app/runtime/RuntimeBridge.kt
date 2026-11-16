@@ -15,6 +15,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.io.File
+import kotlin.concurrent.thread
 
 /**
  * Receives requests from inside the runtime: "open this URL" from the `xdg-open` /
@@ -81,40 +82,64 @@ object RuntimeBridge {
             }
         }.getOrNull()
         claimed.delete()
-        if (value.isNullOrEmpty()) return
+        if (value.isNullOrEmpty() || kind !in KINDS) return
+        // Anything in the runtime can write here: a loop mustn't flood notifications or prompts.
+        if (!limiter.tryAcquire(kind)) {
+            Log.w(TAG, "Dropping $kind request: more than ${RATE_MAX} in ${RATE_WINDOW_MS / 1000} s")
+            return
+        }
         main.post {
             when (kind) {
                 "open" -> open(context, value)
                 "install" -> install(context, File(value))
-                "notify" -> TaskNotifications.notify(context, value)
+                "notify" -> TaskNotifications.notifyFromRuntime(context, value)
                 "done" -> TaskNotifications.commandDone(context, value)
             }
         }
     }
 
-    /** Hands an APK from the runtime to Android's package installer (the user confirms). */
+    /**
+     * Hands an APK from the runtime to Android's package installer (the user confirms). The APK
+     * (anywhere in the app's files) is first copied into [ApkStaging.APK_OUT], the only folder
+     * FileProvider shares (res/xml/file_paths.xml), so the grant can't reach anything else.
+     */
     fun install(context: Context, apk: File) {
         val paths = RuntimePaths(context)
-        val root = paths.filesDir.canonicalPath + File.separator
-        val canonical = runCatching { apk.canonicalPath }.getOrNull()
-        if (canonical == null || !canonical.startsWith(root) || !canonical.endsWith(".apk")) {
+        val source = ApkStaging.installSource(paths.filesDir, apk)
+        if (source == null) {
             Log.w(TAG, "Refusing to install $apk")
             return
         }
         // FileProvider resolves against Context.getFilesDir() (/data/user/0/...), not /data/data/.
-        val shareable = File(context.filesDir, canonical.removePrefix(root))
-        try {
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", shareable)
-            context.startActivity(
-                Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(uri, "application/vnd.android.package-archive")
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Couldn't open installer for $apk", e)
-            Toast.makeText(context, "Couldn't open the installer: ${e.message}", Toast.LENGTH_LONG).show()
+        val outDir = File(context.filesDir, ApkStaging.APK_OUT)
+        thread(name = "apk-stage", isDaemon = true) {
+            val staged = try {
+                ApkStaging.stage(source, outDir, System.currentTimeMillis())
+            } catch (e: Exception) {
+                Log.w(TAG, "Couldn't stage $apk for install", e)
+                main.post { Toast.makeText(context, "Couldn't prepare the APK: ${e.message}", Toast.LENGTH_LONG).show() }
+                return@thread
+            }
+            main.post {
+                try {
+                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", staged)
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW)
+                            .setDataAndType(uri, "application/vnd.android.package-archive")
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Couldn't open installer for $apk", e)
+                    Toast.makeText(context, "Couldn't open the installer: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
+
+    private val KINDS = setOf("open", "install", "notify", "done")
+    private const val RATE_MAX = 10
+    private const val RATE_WINDOW_MS = 10_000L
+    private val limiter = InboxRateLimiter(RATE_MAX, RATE_WINDOW_MS)
 
     fun open(context: Context, url: String) {
         val uri = url.toUri()

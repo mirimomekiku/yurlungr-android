@@ -51,12 +51,11 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
                 val sha = download(release.url, zip) { done ->
                     progress.update("Downloading ${release.tag}", if (release.size > 0) done.toFloat() / release.size else null)
                 }
-                if (release.sha256 == null) {
-                    // Older API responses have no asset digest; the download still came over TLS from GitHub.
-                    Log.w(TAG, "No published SHA-256 for ${release.tag}; not verified beyond TLS (got $sha)")
-                } else if (!release.sha256.equals(sha, ignoreCase = true)) {
-                    error("Checksum mismatch for ${release.tag}: expected ${release.sha256}, got $sha")
+                val expected = expectedSha256(release.tag, arch, release.sha256)
+                if (!expected.equals(sha, ignoreCase = true)) {
+                    error("Checksum mismatch for ${release.tag}: expected $expected, got $sha")
                 }
+                Log.i(TAG, "Verified ${release.tag} ($arch): $sha${if (BOOTSTRAP_PINS.containsKey(release.tag)) " (pinned)" else ""}")
                 extract(zip, progress) { prefixReplaced = true }
             } finally {
                 zip.delete()
@@ -244,6 +243,51 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
 
     companion object {
         private const val TAG = "BootstrapInstaller"
+
+        /**
+         * Known bootstrap archives: release tag → arch → SHA-256, copied from the asset digests
+         * GitHub publishes for termux/termux-packages (read 2026-11-16). A release listed here
+         * must match its pin, whatever the API says; add newer releases here as they're vetted.
+         */
+        internal val BOOTSTRAP_PINS: Map<String, Map<String, String>> = mapOf(
+            "bootstrap-2026.11.15-r1+apt.android-7" to mapOf(
+                "aarch64" to "388acf91cc247e7062d80cd8aa791fe72f360515fb78dc54ff45742120facae7",
+                "arm" to "ff77211b7e71366b494d6b7d04211081b94de4a291ec5f783bc4ce77333a0c92",
+                "i686" to "bb397db1a71c65ce8a0928b0c3015c0926f523726214a182e098570d15789afe",
+                "x86_64" to "fb95765f2ffb4cf5648891199dedb820ed19a63334352fb0bc69b7b7c917e002",
+            ),
+            "bootstrap-2026.11.08-r1+apt.android-7" to mapOf(
+                "aarch64" to "ad0df6ac4e8524684ac0b25ccf41459b0aaa515da9557a238d497b44f9034e46",
+                "arm" to "12296b1e82c192ac8c59e69b2b18cd84c5f56c389c056f0502e227dbe841232e",
+                "i686" to "bb72be24209d636087faf6dbe742e17ac0dca17fc28cc13b1d235c983ca7dfd2",
+                "x86_64" to "41453bd2ec3f9690e2474085fbfe8d3406476b3cdd9627502d0ae4fb0d3eecb0",
+            ),
+            "bootstrap-2026.11.01-r1+apt.android-7" to mapOf(
+                "aarch64" to "5a1429b6c68ee3bdc17b5fd6e47ba42933ec924cd7283fe74992574e1d5badae",
+                "arm" to "99660c5a95733765c9967309a0c91c67335e9804b9e2027cfba71926fa4a3140",
+                "i686" to "3ebf0424a9ffee25724c3ebb03d6e78bdd2c6d8e8fee9c421bb6db4efd0d143c",
+                "x86_64" to "c0321730de9440ee8ea6f192151d5ecbe74f2391f07ffa9bf38584b4a0cbe616",
+            ),
+            "bootstrap-2026.10.25-r1+apt.android-7" to mapOf(
+                "aarch64" to "964e0473a9fa881600927c0151b99896089fb595b81afdcd74b1a6743b8b5889",
+                "arm" to "137d3a4a887194811dcc36e1c73c6f476105279648565b87491d67d0ab6abe3d",
+                "i686" to "b2e6aeafd937df1890dff86eff4938894d19db2cd3f444e070cd2ac8e93adcd2",
+                "x86_64" to "cb0ffc9f35dbb13971aad9683c393e6652bc95a4ba0eac905ca35065687f7de4",
+            ),
+        )
+
+        /**
+         * The SHA-256 the archive for [tag]/[arch] must have: the pinned one for a known release
+         * (a pinned release with no pin for this arch is refused), else the digest from the API.
+         * Fails closed: no pin and no published digest means no install.
+         */
+        internal fun expectedSha256(tag: String, arch: String, apiDigest: String?, pins: Map<String, Map<String, String>> = BOOTSTRAP_PINS): String {
+            pins[tag]?.let { byArch ->
+                return byArch[arch] ?: error("No pinned checksum for $tag on $arch; refusing to install it")
+            }
+            val digest = apiDigest?.trim()?.lowercase()?.takeIf { it.length == 64 && it.all { c -> c in '0'..'9' || c in 'a'..'f' } }
+            return digest ?: error("No published SHA-256 for $tag; refusing to install an unverified base system")
+        }
 
         /** A relative path that stays inside its base folder: not absolute, no ".." segment. */
         internal fun isContainedRelativePath(path: String): Boolean =
