@@ -337,8 +337,8 @@ Then, on the phone:
 - **File previews:** some files open as a preview instead of text, from the Files tab, chat links or
   Artifacts. Each has **Copy path** and **Share** (files inside the app's storage):
   - pictures (PNG, JPG, WebP, GIF, BMP, ICO): a viewer with pinch zoom, pan and double-tap to zoom or reset;
-  - HTML and SVG pages, rendered with scripts on; links stay within the file's folder, but a page's own
-    scripts can reach the network like in any browser, so use it for your own files;
+  - HTML and SVG pages, rendered with scripts on but sandboxed: network loads are blocked and only files from
+    the page's own folder load, since agent-written or downloaded HTML is untrusted;
   - CSV and TSV as a scrollable table (quoted fields, first 2,000 rows and 40 columns);
   - JSON as formatted text in Artifacts (a `.json` file from the Files tab still opens in the editor);
   - HTML, SVG and tables have **Edit** for the source. Files over 5 MB aren't previewed as tables or JSON.
