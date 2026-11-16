@@ -189,6 +189,7 @@ internal object WebRunSessions {
     private fun finish(context: Context, run: WebRun) {
         if (run.finalized) return
         run.finalized = true
+        TunnelSessions.stopForPort(context, run.config.port)
         dev.yurlungr.app.widgets.OpenIn.refresh(context)
         if (run.state.active) {
             run.state = if (run.state == WebRunState.Stopping) WebRunState.Stopped else WebRunState.Failed

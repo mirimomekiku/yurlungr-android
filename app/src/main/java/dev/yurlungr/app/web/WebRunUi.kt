@@ -32,6 +32,8 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
     val run = WebRunSessions.get(root) ?: return
     var confirmation by remember(run.id) { mutableStateOf<String?>(null) }
     var menu by remember { mutableStateOf(false) }
+    var sharing by remember { mutableStateOf(false) }
+    if (sharing) TunnelSheet(run.config.port, "${run.config.project.framework} · ${run.config.project.directory.name}", onDismiss = { sharing = false }, onOpenTerminal = onLogs)
     val colors = MaterialTheme.colorScheme
     val tones = dev.yurlungr.app.ui.AppColors.status
     val tile = dev.yurlungr.app.ui.AppColors.tiles.lime
@@ -75,6 +77,10 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
                     if (run.state == WebRunState.Running) DropdownMenuItem(text = { Text("Open in browser") },
                         leadingIcon = { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Globe, null, size = 18.dp) },
                         onClick = { menu = false; WebRunSessions.open(context, run) })
+                    if (run.state == WebRunState.Running) DropdownMenuItem(
+                        text = { Text(if (TunnelSessions.get(run.config.port)?.active == true) "Public link (on)" else "Share public link") },
+                        leadingIcon = { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Globe, null, size = 18.dp) },
+                        onClick = { menu = false; sharing = true })
                     DropdownMenuItem(text = { Text("Restart") }, enabled = run.state != WebRunState.Stopping,
                         leadingIcon = { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.ArrowClockwise, null, size = 18.dp) },
                         onClick = { menu = false; confirmation = "Restart" })

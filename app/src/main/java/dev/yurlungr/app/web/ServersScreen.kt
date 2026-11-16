@@ -122,6 +122,8 @@ fun ServersScreen(onBack: () -> Unit, onPreview: (url: String, title: String) ->
     var processes by remember { mutableStateOf<List<RuntimeProcess>?>(null) }
     var reload by remember { mutableIntStateOf(0) }
     var stopping by remember { mutableStateOf<RuntimeProcess?>(null) }
+    var sharePort by remember { mutableStateOf<Pair<Int, String>?>(null) }
+    sharePort?.let { (port, label) -> TunnelSheet(port, label, onDismiss = { sharePort = null }, onOpenTerminal = onOpenTerminal) }
     val runs = WebRunSessions.all()
     LaunchedEffect(reload) {
         while (true) {
@@ -167,6 +169,24 @@ fun ServersScreen(onBack: () -> Unit, onPreview: (url: String, title: String) ->
                 }
             }
 
+            val links = TunnelSessions.tunnels.values.filter { it.active }
+            if (links.isNotEmpty()) {
+                item { SectionLabel("Public links") }
+                item {
+                    Group {
+                        for (t in links) GroupRow(
+                            t.url ?: "Starting…",
+                            subtitle = "${t.label} · port ${t.port} · ${t.state.label}",
+                            icon = Ph.Globe,
+                            tile = if (t.state == TunnelState.Live) AppColors.tiles.sky else null,
+                            trailing = {
+                                TextButton(onClick = { sharePort = t.port to t.label }) { Text("Share") }
+                                IconButton(onClick = { TunnelSessions.stop(context, t) }) { PhIcon(Ph.Stop, "Stop sharing", size = 18.dp, tint = colors.error) }
+                            },
+                        )
+                    }
+                }
+            }
             item { SectionLabel("Listening ports") }
             item {
                 Group {
@@ -183,6 +203,9 @@ fun ServersScreen(onBack: () -> Unit, onPreview: (url: String, title: String) ->
                                 subtitle = label,
                                 leading = { Box(Modifier.size(9.dp).clip(CircleShape).background(AppColors.status.success)) },
                                 trailing = {
+                                    IconButton(onClick = { sharePort = port to label }) {
+                                        PhIcon(Ph.Globe, "Share public link", size = 16.dp, tint = if (TunnelSessions.get(port)?.active == true) AppColors.status.success else colors.onSurfaceVariant)
+                                    }
                                     TextButton(onClick = { onPreview(url, label) }) { Text("Preview") }
                                     IconButton(onClick = { dev.yurlungr.app.runtime.RuntimeBridge.open(context, url) }) { PhIcon(Ph.ArrowUp, "Open in browser", size = 16.dp) }
                                 },
