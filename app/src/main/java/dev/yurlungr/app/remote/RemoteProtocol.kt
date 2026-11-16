@@ -45,13 +45,82 @@ object RemoteProtocol {
     /** A folder name under ~/projects: no separators, and not "." or ".." (which would leave it). */
     fun isValidFolder(name: String): Boolean = FOLDER.matches(name) && name.trim('.').isNotEmpty()
 
-    /** Tailscale's 100.64.0.0/10 always; private LAN ranges only when local Wi-Fi is allowed. */
-    fun isAllowedPeer(address: String?, allowLan: Boolean): Boolean {
-        val o = address?.split('.')?.mapNotNull { it.toIntOrNull() }?.takeIf { it.size == 4 } ?: return false
-        val tailscale = o[0] == 100 && o[1] in 64..127
-        val lan = o[0] == 10 || (o[0] == 172 && o[1] in 16..31) || (o[0] == 192 && o[1] == 168)
-        return tailscale || (allowLan && lan)
+    /**
+     * Handshake header a paired client sends with its device id (the same id its hello carries in
+     * the clear), so the host can give it a pairing slot apart from unknown devices.
+     */
+    const val DEVICE_HEADER = "X-Yurlungr-Device"
+
+    /** An IPv4 subnet: [network] as a 32-bit int, [prefix] bits long. */
+    data class Subnet(val network: Int, val prefix: Int) {
+        private val mask: Int get() = if (prefix <= 0) 0 else (-1 shl (32 - prefix.coerceAtMost(32)))
+        operator fun contains(ip: Int): Boolean = (ip and mask) == (network and mask)
+
+        companion object {
+            /** The subnet [address]/[prefix] is on, or null for anything but a dotted IPv4 address. */
+            fun of(address: String, prefix: Int): Subnet? {
+                val ip = ipv4(address) ?: return null
+                if (prefix !in 0..32) return null
+                return Subnet(ip, prefix)
+            }
+        }
     }
+
+    /** A dotted IPv4 address as a 32-bit int, or null. */
+    fun ipv4(address: String?): Int? {
+        val parts = address?.split('.')?.takeIf { it.size == 4 } ?: return null
+        var ip = 0
+        for (p in parts) {
+            val o = p.toIntOrNull()?.takeIf { it in 0..255 && p.length in 1..3 } ?: return null
+            ip = (ip shl 8) or o
+        }
+        return ip
+    }
+
+    private val TAILSCALE = Subnet(ipv4("100.64.0.0")!!, 10)
+    private val PRIVATE = listOf(Subnet(ipv4("10.0.0.0")!!, 8), Subnet(ipv4("172.16.0.0")!!, 12), Subnet(ipv4("192.168.0.0")!!, 16))
+
+    /**
+     * Tailscale's 100.64.0.0/10 always; otherwise only a private address on one of [localSubnets]
+     * (this phone's own Wi-Fi / hotspot / Ethernet subnets, see [lanSubnets]; empty unless local
+     * Wi-Fi is allowed). Not a whole private range: a carrier or VPN that hands out 10.x
+     * addresses must not reach the server.
+     */
+    fun isAllowedPeer(address: String?, localSubnets: List<Subnet>): Boolean {
+        val ip = ipv4(address) ?: return false
+        if (ip in TAILSCALE) return true
+        return PRIVATE.any { ip in it } && localSubnets.any { ip in it }
+    }
+
+    /** An interface name that looks cellular, VPN or virtual: never a local Wi-Fi subnet. */
+    private val NOT_LAN = Regex("^(rmnet|ccmni|ccemni|pdp|wwan|ppp|tun|tap|ipsec|wg|clat|v4-|dummy|lo|ifb|sit|ip6|gre|r_rmnet|seth|epdg|qmi|usb_rmnet).*", RegexOption.IGNORE_CASE)
+
+    /**
+     * The subnets local Wi-Fi peers may come from: each private IPv4 address on a non-cellular,
+     * non-VPN interface with its prefix length. Prefixes shorter than /16 are narrowed to /16 so
+     * one odd interface can't open a whole /8.
+     */
+    fun lanSubnets(interfaces: List<Pair<String, List<Pair<String, Int>>>>): List<Subnet> =
+        interfaces.filterNot { (name, _) -> NOT_LAN.matches(name) }.flatMap { (_, addrs) ->
+            addrs.mapNotNull { (addr, prefix) ->
+                val ip = ipv4(addr) ?: return@mapNotNull null
+                if (PRIVATE.none { ip in it }) return@mapNotNull null
+                Subnet.of(addr, prefix.coerceAtLeast(16))
+            }
+        }.distinct()
+
+    /**
+     * A boolean config option that looks like it turns permission prompts or safety off
+     * (auto-approve, skip/bypass permissions, YOLO, dangerous or unsandboxed modes). Without
+     * allow-remote-skip, a paired device may not change these either way: some agents phrase
+     * them as "require approval", where false is the risky value.
+     */
+    fun isRiskyConfigToggle(id: String, name: String?): Boolean {
+        val text = "$id ${name.orEmpty()}".lowercase()
+        return RISKY_TOGGLE.containsMatchIn(text)
+    }
+
+    private val RISKY_TOGGLE = Regex("auto[-_ ]?approv|approv|permission|skip|bypass|yolo|danger|unsafe|sandbox|confirm|full[-_ ]?access|trust|allow[-_ ]?all")
 
     fun encodeState(state: ChatState): Pair<String, String?> = when (state) {
         ChatState.Saved -> "saved" to null

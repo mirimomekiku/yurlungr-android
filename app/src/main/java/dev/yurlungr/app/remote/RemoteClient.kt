@@ -42,23 +42,44 @@ data class RemoteChatSummary(val id: String, val agent: Agent, val title: String
 
 data class RemoteAgentStatus(val agent: Agent, val installed: Boolean, val signedIn: Boolean?)
 
-/** Saved hosts (app-private prefs). */
+/** Saved hosts (app-private prefs; codes and secrets sealed by [SecretBox]). */
 object RemoteHosts {
     private const val PREFS = "remote_hosts"
     val hosts = mutableStateListOf<RemoteHost>()
     private lateinit var appContext: Context
+    private val box get() = SecretBox.app
 
     fun init(context: Context) {
         appContext = context.applicationContext
         hosts.clear()
         val raw = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("hosts", null) ?: return
-        runCatching {
-            Json.parseToJsonElement(raw).jsonArray.forEach { el ->
-                val o = el.jsonObject
-                hosts += RemoteHost(o.str("id") ?: return@forEach, o.str("name").orEmpty(), o.str("address").orEmpty(), o.str("code").orEmpty(), o.str("deviceId"), o.str("secret"))
-            }
-        }
+        val (list, migrate) = decode(raw, box)
+        hosts += list
+        if (migrate) save()
     }
+
+    /** Hosts in [raw], with codes and secrets opened; true if a plaintext one should be re-saved sealed. */
+    internal fun decode(raw: String, box: SecretBox): Pair<List<RemoteHost>, Boolean> {
+        var migrate = false
+        fun open(stored: String?): String? = box.read(stored).also { if (it.rewrite != null) migrate = true }.value
+        val list = runCatching {
+            Json.parseToJsonElement(raw).jsonArray.mapNotNull { el ->
+                val o = el.jsonObject
+                // A sealed value that can't be opened (keystore key lost): no secret means pair
+                // again with the code; no code means the user re-enters it.
+                RemoteHost(o.str("id") ?: return@mapNotNull null, o.str("name").orEmpty(), o.str("address").orEmpty(), open(o.str("code")).orEmpty(), o.str("deviceId"), open(o.str("secret")))
+            }
+        }.getOrDefault(emptyList())
+        return list to migrate
+    }
+
+    internal fun encode(list: List<RemoteHost>, box: SecretBox): String = JsonArray(list.map { h ->
+        buildJsonObject {
+            put("id", h.id); put("name", h.name); put("address", h.address); put("code", box.seal(h.code))
+            h.deviceId?.let { put("deviceId", it) }
+            h.secret?.let { put("secret", box.seal(it)) }
+        }
+    }).toString()
 
     fun add(name: String, address: String, code: String): RemoteHost {
         val host = RemoteHost(UUID.randomUUID().toString(), name.trim().ifEmpty { address.trim() }, address.trim(), code.trim())
@@ -83,14 +104,7 @@ object RemoteHosts {
     }
 
     private fun save() {
-        val arr = JsonArray(hosts.map { h ->
-            buildJsonObject {
-                put("id", h.id); put("name", h.name); put("address", h.address); put("code", h.code)
-                h.deviceId?.let { put("deviceId", it) }
-                h.secret?.let { put("secret", it) }
-            }
-        })
-        appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { putString("hosts", arr.toString()) }
+        appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { putString("hosts", encode(hosts.toList(), box)) }
     }
 }
 
@@ -146,7 +160,9 @@ class RemoteConnection(val host: RemoteHost) {
             status = Status.Failed("Invalid address: ${host.address}", retrying = false)
             return
         }
-        socket = object : WebSocketClient(uri, Draft_6455(emptyList(), RemoteProtocol.MAX_FRAME_BYTES)) {
+        // A paired phone names itself up front so the host gives it a slot apart from unknown devices.
+        val headers = deviceId?.takeIf { secret != null }?.let { mapOf(RemoteProtocol.DEVICE_HEADER to it) }.orEmpty()
+        socket = object : WebSocketClient(uri, Draft_6455(emptyList(), RemoteProtocol.MAX_FRAME_BYTES), headers) {
             // Pairing runs on this socket's thread, so the channel exists before any sealed frame is read.
             private var hostNonce: ByteArray? = null
             private var clientNonce: ByteArray? = null

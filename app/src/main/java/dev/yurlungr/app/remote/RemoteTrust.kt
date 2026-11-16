@@ -20,11 +20,24 @@ import java.security.SecureRandom
  */
 data class TrustedDevice(val id: String, val name: String, val secret: String, val added: Long, val lastSeen: Long)
 
-/** The host's trusted devices, in app-private preferences. */
-class RemoteTrust(private val context: Context) {
+/**
+ * The host's trusted devices, in app-private preferences. Each secret is stored sealed by
+ * [SecretBox] (runtime processes share this app's uid and could otherwise read them); plaintext
+ * secrets from older versions are sealed on first read.
+ */
+class RemoteTrust(private val context: Context, private val box: SecretBox = SecretBox.app) {
     private val prefs get() = context.getSharedPreferences("remote_trust", Context.MODE_PRIVATE)
+    /** Last list read, by its stored form: opening secrets goes through the keystore. */
+    private var cache: Pair<String, List<TrustedDevice>>? = null
 
-    fun all(): List<TrustedDevice> = decode(prefs.getString(KEY, null))
+    @Synchronized
+    fun all(): List<TrustedDevice> {
+        val raw = prefs.getString(KEY, null) ?: return emptyList()
+        cache?.let { (stored, list) -> if (stored == raw) return list }
+        val (list, migrate) = openAll(decode(raw), box)
+        if (migrate) save(list) else cache = raw to list
+        return list
+    }
 
     fun find(id: String?): TrustedDevice? = id?.let { wanted -> all().firstOrNull { it.id == wanted } }
 
@@ -40,7 +53,12 @@ class RemoteTrust(private val context: Context) {
 
     fun revoke(id: String) = save(all().filterNot { it.id == id })
 
-    private fun save(list: List<TrustedDevice>) = prefs.edit { putString(KEY, encode(list)) }
+    @Synchronized
+    private fun save(list: List<TrustedDevice>) {
+        val raw = encode(list.map { it.copy(secret = box.seal(it.secret)) })
+        prefs.edit { putString(KEY, raw) }
+        cache = raw to list
+    }
 
     companion object {
         private const val KEY = "devices"
@@ -49,6 +67,21 @@ class RemoteTrust(private val context: Context) {
         private val random = SecureRandom()
 
         fun randomHex(bytes: Int): String = RemotePairing.toHex(ByteArray(bytes).also(random::nextBytes))
+
+        /**
+         * Opens each stored secret. A device whose sealed secret can't be opened (keystore key
+         * lost) is left out: it pairs again with the code. True when a plaintext secret should be
+         * re-saved sealed.
+         */
+        internal fun openAll(stored: List<TrustedDevice>, box: SecretBox): Pair<List<TrustedDevice>, Boolean> {
+            var migrate = false
+            val list = stored.mapNotNull { d ->
+                val r = box.read(d.secret)
+                if (r.rewrite != null) migrate = true
+                r.value?.let { d.copy(secret = it) }
+            }
+            return list to migrate
+        }
 
         internal fun encode(list: List<TrustedDevice>): String = JsonArray(list.map { d ->
             buildJsonObject {

@@ -69,6 +69,15 @@ object RemoteServer : ChatListener {
     internal const val MAX_UNPAIRED_FRAME = 64 * 1024L
     /** Connections still pairing, at most (and one per address): each may buffer a frame. */
     private const val MAX_UNPAIRED = 4
+    /**
+     * Separate slots for connections that name a trusted device (handshake header
+     * [RemoteProtocol.DEVICE_HEADER]), so a flood of anonymous pairing attempts can't lock paired
+     * devices out. They still have to prove the device's secret, within the same time limit.
+     */
+    private const val MAX_TRUSTED_PENDING = 4
+
+    /** Failed pairings per address: refused for a growing while (see [PairingBackoff]). */
+    private val backoff = PairingBackoff()
 
     sealed interface Status {
         data object Off : Status
@@ -127,7 +136,8 @@ object RemoteServer : ChatListener {
     fun init(context: Context) {
         appContext = context.applicationContext
         allowLan = prefs.getBoolean("allow_lan", false)
-        code = prefs.getString("code", null) ?: newCode().also { c -> prefs.edit { putString("code", c) } }
+        // Sealed at rest (runtime processes share this uid); a plaintext code from before is sealed now.
+        code = SecretBox.app.readPref(prefs, "code") ?: newCode().also { c -> SecretBox.app.writePref(prefs, "code", c) }
         trusted = trust.all()
         if (enabled && RuntimePaths(appContext).isBootstrapInstalled) start()
     }
@@ -149,7 +159,7 @@ object RemoteServer : ChatListener {
      */
     fun resetCode() {
         code = newCode()
-        prefs.edit { putString("code", code) }
+        SecretBox.app.writePref(prefs, "code", code)
         server?.connections?.filter { it.client?.authed != true }?.forEach { it.close(CLOSE_BAD_CODE, "Pairing code changed") }
     }
 
@@ -234,9 +244,12 @@ object RemoteServer : ChatListener {
         var trustedId: String? = null
         var since = 0L
         val subscriptions = mutableSetOf<String>()
+        /** Named a trusted device when connecting: counted in the trusted pairing slots. */
+        var claimsTrusted = false
     }
 
     private val WebSocket.client: Client? get() = getAttachment<Client>()
+    private val WebSocket.peerAddress: String? get() = runCatching { remoteSocketAddress?.address?.hostAddress }.getOrNull()
 
     /** Sends to a paired device, sealed with its session keys. */
     private fun send(conn: WebSocket, msg: JsonObject) = sendText(conn, msg.toString())
@@ -311,20 +324,24 @@ object RemoteServer : ChatListener {
         val client = conn.client ?: return
         if (client.authed || !conn.isOpen) return
         val msg = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
-        if (msg?.str("t") != "hello") return reject(conn, CLOSE_POLICY, "Pair first")
+        if (msg?.str("t") != "hello") return failPairing(conn, CLOSE_POLICY, "Pair first")
         if (msg.str("token") != null || (msg.long("v") ?: 1L) < RemoteProtocol.VERSION) {
             return reject(conn, CLOSE_OLD_VERSION, "Update Yurlungr on this phone to connect to this host.")
         }
         val clientNonce = RemotePairing.fromHex(msg.str("nonce"), RemotePairing.NONCE_BYTES)
-            ?: return reject(conn, CLOSE_POLICY, "Bad hello")
+            ?: return failPairing(conn, CLOSE_POLICY, "Bad hello")
         val known = msg.str("id")?.let(trust::find)
-        if (msg.str("id") != null && known == null) return reject(conn, CLOSE_BAD_CODE, "This device was removed by the host")
+        if (msg.str("id") != null && known == null) return failPairing(conn, CLOSE_BAD_CODE, "This device was removed by the host")
         // A trusted device's secret stands in for the code, in the same handshake.
         val pairingCode = known?.secret ?: code
         val expected = RemotePairing.clientProof(pairingCode, client.hostNonce, clientNonce)
         if (!RemotePairing.matches(expected, RemotePairing.fromHex(msg.str("proof"), expected.size))) {
-            return reject(conn, CLOSE_BAD_CODE, if (known != null) "This device was removed by the host" else "Wrong pairing code")
+            return failPairing(conn, CLOSE_BAD_CODE, if (known != null) "This device was removed by the host" else "Wrong pairing code")
         }
+        // The channel first: once the client reads auth it may send sealed frames at once, and
+        // the socket thread must already be able to open them (else it drops them as unpaired).
+        client.channel = RemotePairing.channel(pairingCode, client.hostNonce, clientNonce, isHost = true)
+        backoff.succeeded(conn.peerAddress)
         // Prove we know the code too, in the clear, before anything sealed follows.
         runCatching {
             conn.send(buildJsonObject {
@@ -332,7 +349,6 @@ object RemoteServer : ChatListener {
                 put("proof", RemotePairing.toHex(RemotePairing.hostProof(pairingCode, client.hostNonce, clientNonce)))
             }.toString())
         }
-        client.channel = RemotePairing.channel(pairingCode, client.hostNonce, clientNonce, isHost = true)
         client.device = msg.str("device")?.take(80)
         client.since = System.currentTimeMillis()
         val device = known ?: trust.add(client.device.orEmpty())
@@ -357,6 +373,12 @@ object RemoteServer : ChatListener {
         })
         refreshClients()
         Log.i(TAG, "Paired: ${client.device} from ${conn.remoteSocketAddress}")
+    }
+
+    /** A failed pairing attempt: the address waits longer before its next one. */
+    private fun failPairing(conn: WebSocket, code: Int, reason: String) {
+        backoff.failed(conn.peerAddress)
+        reject(conn, code, reason)
     }
 
     private fun reject(conn: WebSocket, code: Int, reason: String) {
@@ -396,9 +418,19 @@ object RemoteServer : ChatListener {
             "config" -> {
                 val id = msg.str("id") ?: return
                 val value = msg["value"] as? JsonPrimitive ?: return
-                if (value.isString && !allowRemoteSkip && dev.yurlungr.app.chat.PermissionModes.isSkipMode(value.content)) return
-                if (value.isString) chat?.setConfigOption(id, value.content)
-                else value.booleanOrNull?.let { chat?.setConfigOption(id, it) }
+                if (value.isString) {
+                    if (!allowRemoteSkip && dev.yurlungr.app.chat.PermissionModes.isSkipMode(value.content)) return
+                    chat?.setConfigOption(id, value.content)
+                } else {
+                    val on = value.booleanOrNull ?: return
+                    // Toggles that turn approvals or safety off (either way: some are "require approval").
+                    val name = chat?.configOptions?.firstOrNull { it.id == id }?.name
+                    if (!allowRemoteSkip && RemoteProtocol.isRiskyConfigToggle(id, name)) {
+                        Log.w(TAG, "Refused remote change of config option $id (allow remote skip is off)")
+                        return
+                    }
+                    chat?.setConfigOption(id, on)
+                }
             }
             "cancel" -> chat?.cancel()
             "permission" -> {
@@ -427,19 +459,29 @@ object RemoteServer : ChatListener {
         }
 
         override fun onOpen(conn: WebSocket, handshake: ClientHandshake) {
-            val remote = conn.remoteSocketAddress?.address?.hostAddress
-            if (!RemoteProtocol.isAllowedPeer(remote, allowLan)) {
-                Log.w(TAG, "Refused connection from $remote (not Tailscale or local Wi-Fi)")
+            val remote = conn.peerAddress
+            if (!RemoteProtocol.isAllowedPeer(remote, if (allowLan) localSubnets() else emptyList())) {
+                Log.w(TAG, "Refused connection from $remote (not Tailscale or this phone's local network)")
                 conn.close(CLOSE_POLICY, "Not allowed from this network")
                 return
             }
+            if (backoff.isBlocked(remote)) {
+                Log.w(TAG, "Refused connection from $remote (failed pairing recently; ${backoff.remainingMs(remote)} ms to wait)")
+                conn.close(CLOSE_POLICY, "Busy: try again in a moment")
+                return
+            }
+            // A connection naming a trusted device pairs in its own slots (it must still prove the secret).
+            val claimed = runCatching { handshake.getFieldValue(RemoteProtocol.DEVICE_HEADER) }.getOrNull().orEmpty()
+            val claimsTrusted = claimed.isNotEmpty() && trusted.any { it.id == claimed }
             val pending = connections.filter { it !== conn && it.getAttachment<Client>()?.authed != true }
-            if (pending.size >= MAX_UNPAIRED || pending.any { it.remoteSocketAddress?.address?.hostAddress == remote }) {
+            // One not yet set up (no attachment) counts as unknown.
+            val samePool = pending.count { (it.getAttachment<Client>()?.claimsTrusted ?: false) == claimsTrusted }
+            if (samePool >= (if (claimsTrusted) MAX_TRUSTED_PENDING else MAX_UNPAIRED) || pending.any { it.peerAddress == remote }) {
                 Log.w(TAG, "Refused connection from $remote (too many pairing at once)")
                 conn.close(CLOSE_POLICY, "Busy: try again in a moment")
                 return
             }
-            val client = Client()
+            val client = Client().also { it.claimsTrusted = claimsTrusted }
             conn.setAttachment(client)
             runCatching {
                 conn.send(buildJsonObject {
@@ -448,7 +490,7 @@ object RemoteServer : ChatListener {
                     put("nonce", RemotePairing.toHex(client.hostNonce))
                 }.toString())
             }
-            main.postDelayed({ if (!client.authed && conn.isOpen) reject(conn, CLOSE_POLICY, "Pairing timed out") }, PAIRING_TIMEOUT_MS)
+            main.postDelayed({ if (!client.authed && conn.isOpen) failPairing(conn, CLOSE_POLICY, "Pairing timed out") }, PAIRING_TIMEOUT_MS)
         }
 
         override fun onClose(conn: WebSocket, code: Int, reason: String?, remote: Boolean) {
@@ -580,16 +622,25 @@ object RemoteServer : ChatListener {
             .mapNotNull { cm.getLinkProperties(it)?.interfaceName }.toSet()
     }.getOrDefault(emptySet())
 
-    private fun lanAddresses(): List<String> = ipv4Addresses().filter { addr ->
-        val o = addr.split('.').map { it.toInt() }
-        o[0] == 10 || (o[0] == 172 && o[1] in 16..31) || (o[0] == 192 && o[1] == 168)
+    /** This phone's addresses on its local networks (what [localSubnets] accepts peers from). */
+    private fun lanAddresses(): List<String> {
+        val subnets = localSubnets()
+        return interfaceAddresses().flatMap { it.second }.map { it.first }
+            .filter { addr -> RemoteProtocol.ipv4(addr)?.let { ip -> subnets.any { ip in it } } == true }
+            .distinct()
     }
 
-    private fun ipv4Addresses(): List<String> = runCatching {
+    /** Subnets of this phone's Wi-Fi / hotspot / Ethernet interfaces, read now (networks change). */
+    private fun localSubnets(): List<RemoteProtocol.Subnet> = RemoteProtocol.lanSubnets(interfaceAddresses())
+
+    /** Each up, non-loopback interface with its IPv4 addresses and prefix lengths. */
+    private fun interfaceAddresses(): List<Pair<String, List<Pair<String, Int>>>> = runCatching {
         NetworkInterface.getNetworkInterfaces().toList()
             .filter { it.isUp && !it.isLoopback }
-            .flatMap { it.inetAddresses.toList() }
-            .filterIsInstance<Inet4Address>()
-            .mapNotNull { it.hostAddress }
+            .map { nif ->
+                nif.name to nif.interfaceAddresses
+                    .filter { it.address is Inet4Address }
+                    .mapNotNull { a -> a.address.hostAddress?.let { it to a.networkPrefixLength.toInt() } }
+            }
     }.getOrDefault(emptyList())
 }
