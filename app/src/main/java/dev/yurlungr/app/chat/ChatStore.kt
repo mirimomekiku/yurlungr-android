@@ -31,6 +31,8 @@ data class SavedChat(
     val skipPermissions: Boolean = false,
     /** A first message shown but not yet delivered (the agent wasn't ready); sent on resume. */
     val pendingText: String? = null,
+    /** Messages queued behind a running turn, sent in order once the agent is free (text only). */
+    val queuedTexts: List<String> = emptyList(),
 )
 
 /**
@@ -77,6 +79,7 @@ object ChatStore {
         put("title", chat.title)
         put("skipPermissions", chat.skipPermissions)
         chat.pendingText?.let { put("pending", it) }
+        if (chat.queuedTexts.isNotEmpty()) putJsonArray("queued") { chat.queuedTexts.forEach { add(JsonPrimitive(it)) } }
         chat.acpSessionId?.let { put("acpSessionId", it) }
         put("updatedAt", chat.updatedAt)
         putJsonArray("items") { chat.items.forEach { add(encodeItem(it)) } }
@@ -155,6 +158,7 @@ object ChatStore {
         title = obj.str("title") ?: "Chat",
         skipPermissions = (obj["skipPermissions"] as? JsonPrimitive)?.booleanOrNull ?: false,
         pendingText = obj.str("pending"),
+        queuedTexts = (obj["queued"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull },
         acpSessionId = obj.str("acpSessionId"),
         updatedAt = (obj["updatedAt"] as? JsonPrimitive)?.longOrNull ?: 0L,
         items = (obj["items"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonObject)?.let(::decodeItem) },

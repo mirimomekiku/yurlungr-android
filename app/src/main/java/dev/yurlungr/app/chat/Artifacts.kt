@@ -77,6 +77,11 @@ enum class ArtifactKind {
 }
 
 object Artifacts {
+    /** A file: URL inside [folder] (by whole path segments, so `/p/app` doesn't cover `/p/app-secrets`). */
+    fun isInside(scheme: String?, path: String?, folder: String): Boolean =
+        scheme == "file" && path != null && folder.isNotEmpty() && !path.split('/').contains("..") &&
+            PathPolicy.isUnder(path, folder)
+
     /**
      * Files edited or written in [items], each once (its last version), grouped by the prompt
      * (turn) that changed it. Works for every agent that reports edits as diffs, remote chats included.
@@ -104,7 +109,8 @@ object Artifacts {
 @Composable
 fun ArtifactsSheet(chat: ChatModel, onDismiss: () -> Unit) {
     val open = LocalOpenFile.current
-    val artifacts = remember(chat.items.size, chat.state) { Artifacts.collect(chat.items) }
+    // Derived from the items' state, so a diff arriving in a tool_call_update shows up too.
+    val artifacts by remember(chat) { androidx.compose.runtime.derivedStateOf { Artifacts.collect(chat.items) } }
     var preview by remember { mutableStateOf<Artifact?>(null) }
     preview?.let { ArtifactPreview(it, onClose = { preview = null }) }
     AppSheet(
@@ -216,17 +222,27 @@ private fun WebFile(file: File) {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.allowFileAccess = true
+                settings.allowFileAccessFromFileURLs = false
                 settings.allowUniversalAccessFromFileURLs = false
+                settings.allowContentAccess = false
+                // Agent-written (or repo-supplied) HTML is untrusted: no requests leave the phone.
+                settings.blockNetworkLoads = true
                 settings.loadWithOverviewMode = true
                 settings.useWideViewPort = true
                 settings.builtInZoomControls = true
                 settings.displayZoomControls = false
+                val folder = file.parentFile?.path.orEmpty()
                 webViewClient = object : WebViewClient() {
                     // Links inside the artifact's folder work; anything else stays out of this view.
                     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
-                        !(request.url.scheme == "file" && request.url.path?.startsWith(file.parent.orEmpty()) == true)
+                        !Artifacts.isInside(request.url.scheme, request.url.path, folder)
+
+                    // Subresources too (images, scripts, fetch, iframes): only files from the artifact's folder load.
+                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? =
+                        if (Artifacts.isInside(request.url.scheme, request.url.path, folder)) null
+                        else android.webkit.WebResourceResponse("text/plain", "utf-8", 403, "Blocked", emptyMap(), java.io.ByteArrayInputStream(ByteArray(0)))
                 }
-                loadUrl("file://" + file.path)
+                loadUrl(android.net.Uri.fromFile(file).toString())
             }
         },
         onRelease = { it.stopLoading(); it.destroy() },

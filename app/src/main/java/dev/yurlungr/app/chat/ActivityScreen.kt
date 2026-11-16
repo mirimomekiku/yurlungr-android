@@ -51,14 +51,16 @@ object Activity {
         Row(c, needs, plan)
     }
 
-    class AgentUsage(val agent: Agent, val chats: Int, val prompts: Int, val cost: Double?, val currency: String?, val tokens: Long)
+    /**
+     * [costs] is summed per currency (agents may report different ones). [contextInUse] adds up
+     * what each chat's context window holds now, as ACP reports it: not the tokens ever used.
+     */
+    class AgentUsage(val agent: Agent, val chats: Int, val prompts: Int, val costs: Map<String, Double>, val contextInUse: Long)
 
     fun usage(chats: List<ChatSession>): List<AgentUsage> = chats.groupBy { it.agent }.map { (agent, list) ->
-        val costs = list.mapNotNull { it.usage?.costAmount }
-        AgentUsage(
-            agent, list.size, list.sumOf { c -> c.items.count { it is ChatItem.User } },
-            costs.takeIf { it.isNotEmpty() }?.sum(), list.firstNotNullOfOrNull { it.usage?.currency }, list.sumOf { it.usage?.used ?: 0L },
-        )
+        val costs = list.mapNotNull { c -> c.usage?.costAmount?.let { (c.usage?.currency ?: "USD") to it } }
+            .groupBy({ it.first }, { it.second }).mapValues { (_, v) -> v.sum() }
+        AgentUsage(agent, list.size, list.sumOf { c -> c.items.count { it is ChatItem.User } }, costs, list.sumOf { it.usage?.used ?: 0L })
     }.sortedByDescending { it.prompts }
 }
 
@@ -68,7 +70,8 @@ fun ActivityScreen(onBack: () -> Unit, onOpenChat: (String) -> Unit) {
     val chats = ChatSessions.chats.toList()
     val working = Activity.working(chats)
     val usage = Activity.usage(chats)
-    val totals by produceState(Checkpoints.Stats(0, 0, 0), chats.size) {
+    // Keyed on the latest activity too, so totals refresh after a turn, not only when a chat is added.
+    val totals by produceState(Checkpoints.Stats(0, 0, 0), chats.size, chats.maxOfOrNull { it.updatedAt }) {
         value = withContext(Dispatchers.IO) {
             chats.map { Checkpoints.stats(context, it.id) }.let { s -> Checkpoints.Stats(s.sumOf { it.turns }, s.sumOf { it.millis }, s.sumOf { it.filesChanged }) }
         }
@@ -131,14 +134,14 @@ fun ActivityScreen(onBack: () -> Unit, onOpenChat: (String) -> Unit) {
                         Text("${u.chats} chat${if (u.chats == 1) "" else "s"} · ${u.prompts} prompts", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                     }
                     Column(horizontalAlignment = Alignment.End) {
-                        Text(u.cost?.let { String.format(Locale.US, "%.2f %s", it, u.currency ?: "USD") } ?: "cost n/a", fontWeight = FontWeight.Medium)
-                        if (u.tokens > 0) Text("${u.tokens / 1000}k tokens", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        Text(u.costs.entries.joinToString(" · ") { (cur, v) -> String.format(Locale.US, "%.2f %s", v, cur) }.ifEmpty { "cost n/a" }, fontWeight = FontWeight.Medium)
+                        if (u.contextInUse > 0) Text("${u.contextInUse / 1000}k in context now", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                     }
                 }
             }
             item {
                 Text(
-                    "Cost and tokens are what each agent reports for chats opened since the app started; agents that don't report them show n/a.",
+                    "Cost and context use are what each agent reports for chats opened since the app started; agents that don't report them show n/a.",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                 )
             }

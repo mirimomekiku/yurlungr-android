@@ -95,6 +95,11 @@ fun Composer(chat: ChatModel) {
         kotlinx.coroutines.delay(400)
         Drafts.set(appContext, chat.id, input.text)
     }
+    // Leaving within the debounce would otherwise keep an older draft (or bring back a sent message).
+    val latest by androidx.compose.runtime.rememberUpdatedState(input.text)
+    androidx.compose.runtime.DisposableEffect(chat.id) {
+        onDispose { Drafts.set(appContext, chat.id, latest) }
+    }
     val attachments = remember(chat.id) { mutableStateListOf<Attachment>() }
     Column {
     QueueChips(chat)
@@ -111,6 +116,7 @@ fun Composer(chat: ChatModel) {
         onSend = { text, files ->
             // While the agent works the message waits its turn; otherwise it goes out now.
             chat.enqueue(text, files)
+            Drafts.set(appContext, chat.id, "")
             input = TextFieldValue("")
             attachments.clear()
         },

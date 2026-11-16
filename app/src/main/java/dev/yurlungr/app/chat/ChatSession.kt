@@ -257,7 +257,7 @@ class ChatSession(
                 if (skipPermissions) applySkipPermissions(conn)
                 state = ChatState.Ready
                 changed()
-                flushPending()
+                if (pendingPrompt != null) flushPending() else drainQueue()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: AcpException) {
@@ -383,8 +383,14 @@ class ChatSession(
 
     override fun delete() = ChatSessions.delete(appContext, this)
 
+    /** Set by [close]: the chat is deleted and nothing about it may be saved again. */
+    @Volatile private var closed = false
+
     /** Ends the process for good (chat deleted). */
     fun close() {
+        closed = true
+        onChanged = null
+        saveJob?.cancel()
         cancel()
         abandonWork()
         resolvePendingPermissions()
@@ -406,6 +412,7 @@ class ChatSession(
         items = items.toList(),
         skipPermissions = skipPermissions,
         pendingText = pendingPrompt?.first,
+        queuedTexts = queued.map { it.text },
     )
 
     // ---- user actions ------------------------------------------------------------------
@@ -439,16 +446,25 @@ class ChatSession(
 
     private val defaultTitle get() = "${agent.displayName} · ${cwd.name}"
 
-    override val queued = mutableStateListOf<QueuedMessage>()
+    // Restored without attachments, like the pending prompt: those lived only in memory.
+    override val queued = mutableStateListOf<QueuedMessage>().apply {
+        restored?.queuedTexts?.forEach { add(QueuedMessage(it, emptyList())) }
+    }
 
     override fun enqueue(text: String, attachments: List<Attachment>) {
         if (text.isBlank() && attachments.isEmpty()) return
         if (state == ChatState.Ready) send(text, attachments)
-        else if (state == ChatState.Running || state == ChatState.Starting) queued += QueuedMessage(text, attachments)
+        else if (state == ChatState.Running || state == ChatState.Starting) {
+            queued += QueuedMessage(text, attachments)
+            changed()
+        }
     }
 
     override fun removeQueued(index: Int) {
-        if (index in queued.indices) queued.removeAt(index)
+        if (index in queued.indices) {
+            queued.removeAt(index)
+            changed()
+        }
     }
 
     override fun sendQueuedNow() {
@@ -464,7 +480,7 @@ class ChatSession(
 
     /** Sends the oldest queued message if the agent is idle. */
     private fun drainQueue() {
-        if (state != ChatState.Ready || queued.isEmpty()) return
+        if (state != ChatState.Ready || queued.isEmpty() || pendingPrompt != null) return
         val next = queued.removeAt(0)
         send(next.text, next.attachments)
     }
@@ -555,12 +571,14 @@ class ChatSession(
                 }
                 // Not delivered: resend automatically once the user has signed in and the agent restarts.
                 if (state == ChatState.AuthRequired) pendingPrompt = text to attachments
+                if (state == ChatState.Ready) drainQueue()
             } catch (e: Exception) {
                 // E.g. attachments couldn't be written (disk full, read-only folder).
                 if (gen != generation) return@launch
                 Log.e(TAG, "prompt failed", e)
                 add(ChatItem.Notice("Couldn't send: ${e.message ?: e.toString()}", isError = true))
                 state = ChatState.Ready
+                drainQueue()
             } finally {
                 // And after, whatever happened (done, stopped, failed): what the turn changed.
                 turn?.let { t -> withContext(kotlinx.coroutines.NonCancellable) { runCatching { Checkpoints.end(appContext, id, cwd, t) } } }
@@ -797,7 +815,7 @@ class ChatSession(
         val toolKind = toolCall?.string("kind") ?: toolCall?.string("toolCallId")?.let { toolCalls[it]?.kind }
         // A standing rule for this kind of tool call in this project: approve once, quietly, and say so.
         val auto = options.firstOrNull { it.kind == "allow_once" } ?: options.firstOrNull { it.isAllow }
-        if (auto != null && ApprovalRules.matches(appContext, cwd.path, toolKind)) {
+        if (auto != null && ApprovalRules.matches(appContext, cwd.path, toolKind, toolCallPaths(toolCall), pathPolicy)) {
             add(ChatItem.Notice("Auto-approved: $toolTitle (rule: allow ${ApprovalRules.label(toolKind!!).lowercase()} here)"))
             return buildJsonObject { putJsonObject("outcome") { put("outcome", "selected"); put("optionId", auto.optionId) } }
         }
@@ -817,8 +835,37 @@ class ChatSession(
         }
     }
 
+    private val pathPolicy by lazy { PathPolicy(paths.dataDir, paths.filesDir, paths.home) }
+
+    /** Every file a tool call names: its locations and the paths of its diffs. */
+    private fun toolCallPaths(toolCall: JsonObject?): List<String> {
+        toolCall ?: return emptyList()
+        val out = ArrayList<String>()
+        (toolCall["locations"] as? JsonArray)?.forEach { (it as? JsonObject)?.string("path")?.let(out::add) }
+        (toolCall["content"] as? JsonArray)?.forEach { el ->
+            val o = el as? JsonObject ?: return@forEach
+            if (o.string("type") == "diff") o.string("path")?.let(out::add)
+        }
+        // A permission request for a call announced earlier may carry only its id.
+        if (out.isEmpty()) toolCall.string("toolCallId")?.let { id ->
+            toolCalls[id]?.let { tc ->
+                tc.locations.forEach { out += it.replace(LINE_SUFFIX, "") }
+                tc.content.forEach { if (it is ToolContent.Diff) out += it.path }
+            }
+        }
+        return out
+    }
+
+    /** The agent's path, if it's absolute and not one of the app's own files. */
+    private fun agentFile(params: JsonObject): File {
+        val raw = params.string("path") ?: throw AcpException(-32602, "path required")
+        val file = pathPolicy.resolve(raw) ?: throw AcpException(-32602, "path must be absolute: $raw")
+        if (!pathPolicy.allowsAccess(file)) throw AcpException(-32002, "Access denied: $raw is one of the app's own files")
+        return file
+    }
+
     private suspend fun readTextFile(params: JsonObject): JsonElement = withContext(Dispatchers.IO) {
-        val file = File(params.string("path") ?: throw AcpException(-32602, "path required"))
+        val file = agentFile(params)
         if (!file.isFile) throw AcpException(-32002, "File not found: ${file.path}")
         val line = params["line"]?.jsonPrimitive?.intOrNull
         val limit = params["limit"]?.jsonPrimitive?.intOrNull
@@ -829,25 +876,22 @@ class ChatSession(
             }
             file.readText()
         } else {
-            file.useLines { lines ->
-                lines.drop(((line ?: 1) - 1).coerceAtLeast(0))
-                    .let { if (limit != null) it.take(limit) else it }
-                    .joinToString("\n")
-            }
+            readLines(file, line, limit)
         }
         buildJsonObject { put("content", text) }
     }
 
     private suspend fun writeTextFile(params: JsonObject): JsonElement = withContext(Dispatchers.IO) {
-        val file = File(params.string("path") ?: throw AcpException(-32602, "path required"))
-        file.parentFile?.mkdirs()
-        file.writeText(params.string("content") ?: "")
+        val file = agentFile(params)
+        writeAtomically(file, params.string("content") ?: "")
         JsonObject(emptyMap())
     }
 
     // ---- helpers -----------------------------------------------------------------------
 
     private fun changed() {
+        // A deleted chat's late work (a turn's final checkpoint, a pending stream save) must not save it again.
+        if (closed) return
         updatedAt = System.currentTimeMillis()
         onChanged?.invoke(this)
     }
@@ -880,6 +924,44 @@ class ChatSession(
         private const val STREAM_SAVE_MS = 2_000L
         private const val TAG = "ChatSession"
         private const val MAX_READ_BYTES = 16L * 1024 * 1024
+        private val LINE_SUFFIX = Regex(":\\d+$")
+
+        /**
+         * Lines [line] (1-based) onwards, at most [limit] of them, and never more than [maxChars]
+         * of text: a read with a start line but no limit used to load the rest of a log of any size.
+         */
+        internal fun readLines(file: File, line: Int?, limit: Int?, maxChars: Long = MAX_READ_BYTES): String =
+            file.useLines { lines ->
+                val sb = StringBuilder()
+                var count = 0
+                for (l in lines.drop(((line ?: 1) - 1).coerceAtLeast(0))) {
+                    if (limit != null && count >= limit) break
+                    if (sb.length + l.length + 1 > maxChars) {
+                        throw AcpException(-32603, "Too much text to read at once; pass a smaller limit")
+                    }
+                    if (count > 0) sb.append('\n')
+                    sb.append(l)
+                    count++
+                }
+                sb.toString()
+            }
+
+        /** Writes via a temporary file and a rename, so a crash mid-write can't leave half a file. */
+        internal fun writeAtomically(file: File, text: String) {
+            val dir = file.absoluteFile.parentFile
+            dir?.mkdirs()
+            val tmp = File(dir, ".${file.name}.yurlungr-tmp")
+            try {
+                java.io.FileOutputStream(tmp).use { out ->
+                    out.write(text.toByteArray(Charsets.UTF_8))
+                    out.fd.sync()
+                }
+                // Some filesystems (FAT on shared storage) won't rename over an existing file.
+                if (!tmp.renameTo(file)) file.writeText(text)
+            } finally {
+                tmp.delete()
+            }
+        }
         private val URL_REGEX = Regex("""https://\S+""")
         private val LOGIN_HINT = Regex("(?i)auth|login|log in|sign in|oauth")
     }

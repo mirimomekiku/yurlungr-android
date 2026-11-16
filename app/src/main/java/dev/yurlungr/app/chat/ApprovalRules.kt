@@ -69,8 +69,23 @@ object ApprovalRules {
 
     fun remove(context: Context, rule: ApprovalRule) = store(context, load(context) - rule)
 
-    fun matches(context: Context, project: String, kind: String?): Boolean =
-        kind != null && kind in kinds && load(context).any { it.kind == kind && (it.scope == "*" || it.scope == project) }
+    /** Kinds that act on files: a rule covers them only when the call names the files, all inside the project. */
+    private val fileKinds = setOf("read", "edit")
+
+    fun matches(context: Context, project: String, kind: String?, paths: List<String>, policy: PathPolicy): Boolean =
+        allows(load(context), project, kind, paths, policy)
+
+    /**
+     * Whether [rules] approve a [kind] tool call in [project] that names [paths]. The agent reports
+     * the kind and paths itself, so the paths are checked too: a rule for "edit" here must not
+     * approve an edit of ~/.bashrc or of the app's own settings.
+     */
+    fun allows(rules: List<ApprovalRule>, project: String, kind: String?, paths: List<String>, policy: PathPolicy): Boolean {
+        if (kind == null || kind !in kinds) return false
+        if (rules.none { it.kind == kind && (it.scope == "*" || it.scope == project) }) return false
+        if (kind in fileKinds && paths.isEmpty()) return false
+        return policy.allowsAutoApproval(java.io.File(project), paths)
+    }
 }
 
 /** Switches per kind of tool call for this project. */

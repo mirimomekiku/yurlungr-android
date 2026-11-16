@@ -123,6 +123,9 @@ fun NewChatScreen(
 ) {
     val context = LocalContext.current
     val paths = remember { RuntimePaths(context) }
+    // Quick ask (widget, shortcut) focuses the composer once; a later plain "New chat" doesn't.
+    val quickAsk = remember { dev.yurlungr.app.widgets.QuickAsk.pending }
+    androidx.compose.runtime.LaunchedEffect(Unit) { dev.yurlungr.app.widgets.QuickAsk.pending = false }
     val statuses = remember(refreshTick) { agentStatuses(paths) }
     var agent by rememberSaveable {
         mutableStateOf(
@@ -233,9 +236,8 @@ fun NewChatScreen(
             commands = emptyList(),
             acceptsImages = null,
             agentName = agent.displayName,
-            autoFocus = dev.yurlungr.app.widgets.QuickAsk.pending,
+            autoFocus = quickAsk,
             onSend = { text, files ->
-                dev.yurlungr.app.widgets.QuickAsk.pending = false
                 NewChatPrefs.save(context, agent, folder)
                 val chat = ChatSessions.create(context, agent, File(paths.projects, folder), skipPermissions = skipPermissions)
                 chat.queue(text, files)

@@ -6,7 +6,7 @@ data class ChatHit(val chat: ChatSession, val snippet: String, val fromUser: Boo
 object ChatSearch {
     /** Messages (yours and the agent's) containing [query] across all chats, newest chats first; one hit per chat message. */
     fun search(chats: List<ChatSession>, query: String, limit: Int = 30): List<ChatHit> {
-        val q = query.trim().lowercase()
+        val q = query.trim()
         if (q.length < 3) return emptyList()
         val hits = ArrayList<ChatHit>()
         for (chat in chats.sortedByDescending { it.updatedAt }) {
@@ -17,7 +17,8 @@ object ChatSearch {
                     is ChatItem.AgentText -> item.text to false
                     else -> continue
                 }
-                val at = text.lowercase().indexOf(q)
+                // On the original text: lowercase() can change the length (İ → i̇) and shift the index.
+                val at = text.indexOf(q, ignoreCase = true)
                 if (at < 0) continue
                 hits += ChatHit(chat, snippet(text, at, q.length), user)
                 if (++inChat >= 3 || hits.size >= limit) break
@@ -29,8 +30,9 @@ object ChatSearch {
 
     /** A one-line excerpt around the match. */
     fun snippet(text: String, at: Int, length: Int): String {
-        val from = (at - 40).coerceAtLeast(0)
-        val to = (at + length + 60).coerceAtMost(text.length)
+        val start = at.coerceIn(0, text.length)
+        val from = (start - 40).coerceAtLeast(0)
+        val to = (start + length + 60).coerceIn(start, text.length)
         return (if (from > 0) "…" else "") + text.substring(from, to).replace(Regex("\\s+"), " ").trim() + (if (to < text.length) "…" else "")
     }
 }

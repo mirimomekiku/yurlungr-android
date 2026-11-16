@@ -78,6 +78,7 @@ object ChatSessions {
         onRegistryChanged?.invoke()
         NotificationManagerCompat.from(context).cancel(chat.id.hashCode())
         val id = chat.id
+        Drafts.set(context, id, "")
         io.execute { ChatStore.delete(appContext, id); kotlinx.coroutines.runBlocking { runCatching { Checkpoints.delete(appContext, id) } } }
         RuntimeService.refresh(context)
     }
