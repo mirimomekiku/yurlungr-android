@@ -37,8 +37,9 @@ agents running inside it.
 - **Agent notes.** On every launch the app rewrites a managed "you're on an Android phone" block in each
   agent's instructions file (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`).
 - **Staying alive.** `runtime/RuntimeService.kt` is a foreground service that keeps agents and terminal processes running (with an
-  optional user-controlled wake lock) while the app is in the background; `chat/ChatSessions.kt` notifies when an agent finishes or
-  needs approval.
+  optional user-controlled wake lock) while the app is in the background; `chat/ChatSessions.kt` raises a high-priority "Needs
+  your answer" notification only when an agent needs an approval (finished turns are silent), and keeps
+  the list `chat/UrgentBanner.kt` draws as a sticky in-app banner until it's answered.
 
 - **Terminal welcome.** `runtime/RuntimeStatus.kt` exports session counts and public agent/approval
   summaries. `assets/motd.sh` reads them through Termux's dynamic MOTD hook; `yurlungr-status` refreshes
@@ -69,6 +70,24 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
     anchors, and allowlists safe HTML (`HtmlLite`).
   - `chat/Markdown.kt` renders the blocks: code with the editor's lexer and theme, images (remote ones
     only after a tap), callouts, and find highlighting.
+- Queue: while a turn runs, `enqueue` adds to `ChatSession.queued`; the turn's end sends the oldest
+  (unless the user pressed Stop; `sendQueuedNow` cancels and then drains). It is client-side because
+  agents differ: Claude's adapter queues a mid-turn prompt and Codex's waits for the running turn, but
+  Gemini aborts the running turn. `ChatModel` has defaults so remote chats compile without it.
+- `chat/Artifacts.kt` derives a chat's artifacts from its edit tool calls (`ToolContent.Diff` with an
+  absolute path) and merges them with each prompt's checkpoint snapshot (`Checkpoints.changedFilesWithStatus`),
+  which also sees files commands wrote; one entry per file, by prompt. `editor/FilePreview.kt` is the shared
+  viewer for pictures, HTML/SVG, CSV/TSV tables and JSON (used by the file route and the Artifacts dialog), with
+  Share through FileProvider for files under the app's storage. `chat/ApprovalRules.kt` stores standing answers
+  (kind × project) that `ChatSession.requestPermission` checks before showing a card.
+  `chat/PromptLibrary.kt` holds saved prompts and per-chat drafts; the composer adds @file mentions
+  (`ChatModel.suggestFiles`) and speech input. `chat/ChatSearch.kt` backs in-chat text search in the
+  command palette, and `chat/ActivityScreen.kt` the Activity screen.
+- `agents/AgentExtensions.kt` is a table of where each agent keeps skills, custom commands and how its plugin CLI is
+  called (only sub-commands seen in that CLI), plus the file operations: scan (skills one or two levels down, command
+  files by format), create from templates, delete (only inside the known folders) and the validated shell commands
+  for plugins and `git clone`. `agents/AgentExtensionsScreen.kt` is the screen (`Route.Extensions`, opened through
+  `LocalOpenExtensions`); `chat/CommandsSheet.kt` lists the agent's advertised slash commands.
 - `chat/ChatSessions.kt` is the app-wide registry; saved chats cost nothing until opened.
 - `chat/ChatModel.kt` is the interface the chat screen draws, implemented by local sessions and by remote
   chats mirrored from another phone.
@@ -164,6 +183,13 @@ state even if its terminal remains visible. The registry is process-local; start
 to stop rather than adopting saved PIDs. The runtime foreground service remains responsible for keeping
 terminal processes alive.
 
+## Public links
+
+`web/TunnelSessions.kt` shares a local port through cloudflared's account-free Quick Tunnel: one managed terminal per
+port runs `cloudflared tunnel --url http://127.0.0.1:PORT`, and the https link is read from its output (live only once
+cloudflared reports a registered connection). `web/TunnelUi.kt` is the sheet (confirmation first, then Copy / Share /
+Open / Stop) opened from a run's menu or from Servers, which also lists active links. A tunnel stops with its server.
+
 ## Two phones
 
 `remote/` lets one phone use another's agents. The host runs a WebSocket server (Java-WebSocket, port
@@ -204,7 +230,8 @@ Tools with `onlyIf` (optional agents) are checked only when installed, by System
 ## Navigation
 
 `MainActivity.kt` defines the `Route`s and a small `Navigator`:
-- sidebar places (New chat, Projects, Terminal, Servers, Agents, Devices, Settings) replace the stack, with ☰ shown;
+- sidebar places (New chat, Projects, Terminal, Servers, Activity, Agents, Devices, Settings) replace the stack, with ☰ shown;
+  opening the sidebar hides the keyboard;
 - drilling in pushes, with ‹ shown;
 - editor tabs replace the top;
 - back closes the sidebar, then pops, then returns to New chat.
@@ -226,7 +253,8 @@ Transitions come from `ui/Motion.kt`.
 | `projects/` | Git operations, the workspace, history graph, branches, project list |
 | `editor/` | Markdown viewer, lexer, themes, Prettier formatting and text editor |
 | `terminal/` | Terminal sessions and screen |
-| `web/` | Project detection, saved run configuration, supervisor registry, Run UI, Preview and Servers |
+| `web/` | Project detection, saved run configuration, supervisor registry, Run UI, Preview, Servers and public-link tunnels |
+| `widgets/` | Home-screen widget, Quick Settings tiles, launcher shortcuts and the quick-ask entry |
 | `remote/` | Phone-to-phone protocol, server and client |
 | `setup/` | System checks (first-run screen), Settings and Development environment |
 | `ui/` | Theme, shared components, motion, loaders, icons, sidebar |

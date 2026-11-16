@@ -33,7 +33,7 @@ reflection, JNI (`libtermux`) and kotlinx.serialization need, and test a release
 ## Test
 
 ```sh
-./gradlew testDebugUnitTest   # git, editor/Markdown, chat persistence/permissions, remote protocol, MOTD and web detection
+./gradlew testDebugUnitTest   # git, editor/Markdown, chat persistence/permissions/artifacts, remote protocol, MOTD, web detection and tunnels
 ./gradlew lintDebug
 node --test tools/test-web-*.cjs  # launch adapters, readiness, SSR/HMR, failures, process cleanup
 # Explicit device smoke check (requires Node.js in the installed app's runtime):

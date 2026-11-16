@@ -40,8 +40,9 @@
 - **A real terminal.** Termux's terminal view with sessions, a floating session rail and extra keys.
 - **Two phones, one workspace.** Share one phone's agents with another over Tailscale with a pairing
   code; the other phone drives the same chats.
-- **Stays alive.** A foreground service keeps agents running with the screen off and notifies you when
-  one finishes or needs approval.
+- **Stays alive.** A foreground service keeps agents running with the screen off. When an agent needs your
+  answer you get a heads-up notification with sound, and a sticky banner inside the app; finished turns
+  stay quiet.
 
 ## Download
 
@@ -93,7 +94,8 @@ Then, on the phone:
   folder chip and suggestion tiles. The first message is queued until the agent is ready, including
   after a sign-in detour.
 - The chat header is the agent pill (`● Claude · Sonnet 5.5 ⌄`); its dot shows the state and its menu has
-  the title, folder, context use, *End session* and *Delete chat*. The agent's model, effort and mode are
+  the title, folder, context use, *Checkpoints*, *Approval rules*, *Artifacts*, *Usage*, *End session* and
+  *Delete chat*. The agent's model, effort and mode are
   pill pickers below it.
 - Attachments (＋): photos and files go to `<project>/.yurlungr/attachments/` (git-ignored) and are sent as
   ACP images, embedded text resources or file links, depending on what the agent accepts. Large photos
@@ -123,7 +125,38 @@ Then, on the phone:
 - **Usage:** Chat ⋮ → **Usage** shows prompts, time working and files changed, plus the context window
   and cost when the agent reports them over ACP (nothing is estimated). A project's Chats tab adds
   them up.
-- Code: `chat/` (`ChatSession`, `ChatScreen`, `Composer`, `AcpExtras`, `Attachments`, `ChatStore`, `Checkpoints`),
+- **Message queue:** while an agent works, Send becomes **Add to queue**. Queued messages show as chips
+  above the message box (tap one to remove it) and go out in order when the turn ends. **Send now** stops
+  the running turn and sends the first one; after a manual Stop the queue waits. The queue lives in the
+  app, so it behaves the same for every agent (Gemini, for one, would cancel the running turn if a second
+  prompt reached it). It isn't available on chats mirrored from another phone yet.
+- **Prompts, mentions, drafts and voice:** ＋ → **Prompts** opens a library you can add to (what you typed
+  can be saved as a prompt). Typing `@` suggests project files to mention. Unsent text is kept per chat
+  across restarts, and the mic button dictates with the phone's speech recognizer.
+- **Copy:** long-press your own message to copy all of it; agent replies are selectable.
+- **Artifacts:** Chat ⋮ → **Artifacts** lists the files the agent created or edited, grouped by prompt and
+  marked New or Edited. It combines the agent's edit diffs with each prompt's checkpoint snapshot, so files
+  a command wrote (a chart from a script, a build's output) show up too; chats mirrored from another phone
+  list only what the diffs show, and can't open the files. Tap one to preview it (see **File previews**
+  below), with Copy path, Share and Edit.
+- **Approval rules:** Chat ⋮ → **Approval rules** switches on auto-approval per kind of tool call (read,
+  search, fetch, think, edit, run) for the project; the permission card also offers *Always allow … here*.
+  A matching request is approved once, quietly, and the chat says so. Edit and run are marked as risky;
+  anything not switched on still asks.
+- **Commands:** ＋ → **Commands** lists every slash command the agent advertises (Claude and Kilo include
+  their skills and plugin commands), with search; tap one to insert it. Typing `/` still suggests them inline.
+- **Skills & commands** (Chat ⋮, or the wrench on the Agents screen): per agent, lists its skills (folders with a
+  `SKILL.md`) and custom command files from the project and your user folders, opens them in the editor, creates
+  new ones from a template, installs skills from a Git repository (a `git clone` in a terminal) and deletes them
+  (confirmed, only inside the skills folders). Plugins run the agent's own command in a terminal: Claude
+  (`claude plugin`), Codex (`codex plugin`), Gemini (`gemini extensions`), Qwen, Auggie, MiniMax, Qoder and Pi,
+  limited to the sub-commands each CLI documents. Skill folders are known for Claude, Codex, Gemini, Qwen, Kimi,
+  Auggie, Command Code, MiniMax, Pi, Qoder, OpenCode, Cline, Kilo, Kiro and Amp; Copilot, Goose, Cursor, Antigravity
+  and the others aren't managed yet. Skills and plugins can make an agent run code, so only add ones you trust.
+- **Needs your answer:** only an approval request notifies (its own high-priority channel, with sound
+  and vibration). In the app the same request shows a sticky banner that stays until it's answered, and
+  tapping it opens the chat.
+- Code: `chat/` (`ChatSession`, `ChatScreen`, `Composer`, `PromptLibrary`, `Artifacts`, `ApprovalRules`, `UrgentBanner`, `AcpExtras`, `Attachments`, `ChatStore`, `Checkpoints`),
   `acp/AcpConnection.kt`.
 
 </details>
@@ -156,6 +189,11 @@ Then, on the phone:
 - **Pull** (`--ff-only`) and **Push**, which sets the upstream on
   the first push, run in a live terminal in a bottom sheet, showing git's progress and any prompts.
   The terminal session ends when git exits. The sheet stays open with the result until you close it.
+- **Git actions** (dock → More): one tap each for *Get latest changes* (stash, pull, stash pop), *Sync*,
+  *Publish branch* / *Push*, and *Undo last commit*, plus agent versions (fix conflicts, write the commit
+  message, review changes). With `gh` signed in, **Open pull request #N** opens the branch's pull
+  request, or **Create pull request** makes one (title and description from its commits) once the branch
+  is pushed.
 - **Branches** (tap the Branch tile): pull, create, switch (remote branches become tracking branches;
   uncommitted changes can be stashed first or brought along), and stash pop / apply / drop.
 - **History** is a commit graph like `git log --graph`, grouped under Today / Yesterday / dates (each
@@ -182,6 +220,12 @@ Then, on the phone:
   Webpack Dev Server, plain static sites and projects with development/start scripts are detected.
   Detection reads manifests and common app folders without executing configuration. Android's Build
   action remains available when both capabilities are present. Workspace installs use the workspace root.
+- **Public link:** a running web server's ⋮ menu has **Share public link** (also the globe next to a
+  port in Servers). It uses cloudflared's account-free Quick Tunnel from the *Servers & tunnels* pack: no
+  account, no domain, and a random `trycloudflare.com` address that changes every run. A confirmation
+  comes first, because anyone with the link can reach the server. Copy, Share, Open or Stop sharing; the
+  link is live only once Cloudflare registers the connection, and it stops with the server. Quick
+  Tunnels have no uptime guarantee, no server-sent events and a 200-request cap.
 - Run setup offers **Framework CLI**, **Project script**, or **Custom command**, plus npm, pnpm, Yarn or Bun,
   dependency installation, public port, readiness route and startup timeout. Framework CLI checks the
   installed CLI's options and skips project script setup steps. Script mode preserves compound commands;
@@ -290,6 +334,15 @@ Then, on the phone:
   size (Settings → Editor).
 - *Format with Prettier* runs `npx prettier@3.3.3` in the file's folder (so project config applies) for
   JS/TS/JSON/CSS/SCSS/HTML/Markdown/YAML.
+- **File previews:** some files open as a preview instead of text, from the Files tab, chat links or
+  Artifacts. Each has **Copy path** and **Share** (files inside the app's storage):
+  - pictures (PNG, JPG, WebP, GIF, BMP, ICO): a viewer with pinch zoom, pan and double-tap to zoom or reset;
+  - HTML and SVG pages, rendered with scripts on; links stay within the file's folder, but a page's own
+    scripts can reach the network like in any browser, so use it for your own files;
+  - CSV and TSV as a scrollable table (quoted fields, first 2,000 rows and 40 columns);
+  - JSON as formatted text in Artifacts (a `.json` file from the Files tab still opens in the editor);
+  - HTML, SVG and tables have **Edit** for the source. Files over 5 MB aren't previewed as tables or JSON.
+  There's no PDF preview yet.
 - Markdown opens in a read-only rendered viewer with an **Edit** action; other text files open directly
   in the editor. CRLF files are edited as LF and saved back as CRLF; files over 1 MB or binary files
   are not opened. The viewer:
@@ -358,11 +411,12 @@ Then, on the phone:
   While the app is open these show as a toast. The *Finished tasks* channel can be turned off in
   Android's settings.
 - **Search everything** (the sidebar's first item, or long-press ☰ / ‹ on any screen) finds
-  screens and actions, projects, recently opened files, chats, and the last project's scripts and
-  files. It ranks matches that start a word first, and Enter runs the top result.
+  screens and actions, projects, recently opened files, chats (by title, and by what was said in them,
+  from 3 letters), and the last project's scripts and files. It ranks matches that start a word first, and Enter runs the top result.
 - **Shortcuts outside the app:**
   - Quick Settings tiles: **Dev servers** (how many run, tap for Servers) and **Terminal**;
-  - a home-screen widget with New chat, your last project, and Servers with a running count.
+  - a home-screen widget with New chat, your last project, Servers with a running count, and an
+    **Ask an agent…** bar that opens New chat with the keyboard up.
 - **Share to Yurlungr** from any app: text, links, images or files. Pick a project and an agent, edit
   the message, then **Ask** (files go as attachments, up to 10 MB each) or **Save to project**.
 - **Wide screens** (tablets, unfolded foldables): a file opened from a project shows beside it.
@@ -371,14 +425,18 @@ Then, on the phone:
 - **Feedback** (Settings): vibration and sound when a task finishes, fails or an agent needs you,
   each switchable. **Battery and heat warnings** ask before builds, installs, tests and setups when
   the battery is under 20% and not charging, or the phone is over 42 °C.
-- **Launcher shortcuts:** long-press the app icon for New chat, your last project, Servers and Terminal.
+- **Launcher shortcuts:** long-press the app icon for New chat, Ask an agent, your last project, Servers and Terminal.
 - **Tour:** a first-run walkthrough (also in Settings) with a sample project to try Run, Preview and
   an agent on.
 - **Accessibility:** section labels are headings, tabs announce their selection, Git status letters
   are read as words ("Modified"), and dock dots say what they mean. Terminal and diff text follow
   Android's font size.
+- **Activity** (sidebar): the chats that are working or waiting for you, with their plan steps, queued
+  messages and a Stop button, and per-agent totals of chats, prompts, tokens and cost (what each agent
+  reports, for chats opened since the app started). Opening the sidebar also puts the keyboard away.
 - **Servers** (sidebar):
   - the web apps the app runs (Preview, Logs, Stop);
+  - **Public links** that are live, with Share and Stop;
   - listening ports: the usual development ports (Vite, Next.js, Astro, Angular, Django, Flask,
     Expo, PostgreSQL, Redis, MariaDB, Ollama…), each with Preview. Android doesn't let apps list
     every open port, so these are found by trying to connect;
