@@ -12,3 +12,7 @@
 
 # Branding sources (mascot, poses) are kept locally, not in the repo.
 /branding/
+
+# Release signing keys never go in the repo (see DEVELOPMENT.md, Release signing).
+*.jks
+*.keystore

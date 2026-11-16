@@ -1,3 +1,4 @@
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -7,6 +8,24 @@ plugins {
 }
 
 val runtimeAppId: String = providers.gradleProperty("yurlungr.applicationId").getOrElse("com.termux")
+
+// Release signing (see DEVELOPMENT.md, "Release signing"). Each value comes from a Gradle property
+// (-P or ~/.gradle/gradle.properties), an environment variable, or local.properties, in that order.
+val localProperties = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.isFile }?.inputStream()?.use { load(it) }
+}
+fun signingValue(name: String): String? =
+    (providers.gradleProperty(name).orNull ?: providers.environmentVariable(name).orNull ?: localProperties.getProperty(name))
+        ?.takeIf { it.isNotBlank() }
+val releaseKeystore: File? = signingValue("YURLUNGR_KEYSTORE")?.let { rootProject.file(it) }
+// CI release builds set this so a missing key fails the build instead of shipping debug-signed APKs.
+val requireReleaseKey = signingValue("YURLUNGR_REQUIRE_RELEASE_KEY").toBoolean()
+if (releaseKeystore != null && !releaseKeystore.isFile) {
+    throw GradleException("YURLUNGR_KEYSTORE points to $releaseKeystore, which doesn't exist.")
+}
+if (releaseKeystore == null && requireReleaseKey) {
+    throw GradleException("YURLUNGR_REQUIRE_RELEASE_KEY is set but no release key is configured (YURLUNGR_KEYSTORE).")
+}
 
 // Keep the matching upstream Java classes, but replace JitPack's 4 KB JNI binaries
 // with libtermux built below. A generated AAR avoids duplicate-library pickFirst rules.
@@ -57,12 +76,27 @@ android {
         }
     }
 
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = signingValue("YURLUNGR_KEYSTORE_PASSWORD")
+                    ?: throw GradleException("YURLUNGR_KEYSTORE is set but YURLUNGR_KEYSTORE_PASSWORD isn't.")
+                keyAlias = signingValue("YURLUNGR_KEY_ALIAS")
+                    ?: throw GradleException("YURLUNGR_KEYSTORE is set but YURLUNGR_KEY_ALIAS isn't.")
+                // PKCS12 keystores (keytool's default) use the store password for the key too.
+                keyPassword = signingValue("YURLUNGR_KEY_PASSWORD") ?: storePassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            // Off for now; turn on (with keep rules for reflection/JNI) before a wide release.
             isMinifyEnabled = false
-            // Alpha: release is signed with the debug key so it can be sideloaded over a debug
-            // install (same signature keeps the runtime and chats). A real release key comes later.
-            signingConfig = signingConfigs.getByName("debug")
+            // Without a release key (alpha workflow), release falls back to this machine's debug key so
+            // it can be sideloaded over a debug install (same signature keeps the runtime and chats).
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 
@@ -78,7 +112,15 @@ android {
     lint {
         // targetSdk 28 is deliberate, see above.
         disable += setOf("ExpiredTargetSdkVersion", "OldTargetApi")
-        checkReleaseBuilds = false
+        checkReleaseBuilds = true
+    }
+}
+
+if (releaseKeystore == null) {
+    gradle.taskGraph.whenReady {
+        if (allTasks.any { it.project == project && it.name.contains("Release") }) {
+            logger.warn("Warning: no release key configured (YURLUNGR_KEYSTORE); release APKs are signed with this machine's debug key.")
+        }
     }
 }
 
