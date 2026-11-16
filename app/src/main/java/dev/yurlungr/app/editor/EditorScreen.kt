@@ -139,6 +139,9 @@ private fun readForEdit(file: File): Load = when {
     }
 }
 
+/** Find's results ([ranges]) for [query] in [text]. */
+private data class Found(val text: String, val query: String, val matchCase: Boolean, val ranges: List<IntRange>)
+
 private sealed interface SaveOutcome {
     data object Saved : SaveOutcome
     data object ChangedOnDisk : SaveOutcome
@@ -173,7 +176,11 @@ fun EditorScreen(
 
     var load by remember(file) { mutableStateOf<Load>(Load.Loading) }
     LaunchedEffect(file) {
-        load = withContext(Dispatchers.IO) { readForEdit(file) }
+        OpenFiles.attach(context)
+        load = withContext(Dispatchers.IO) {
+            // Edits backed up before the process was killed come back as this tab's unsaved text.
+            readForEdit(file).also { if (it is Load.Ready) OpenFiles.restore(file.path, it.text) }
+        }
     }
 
     when (val l = load) {
@@ -285,7 +292,16 @@ private fun Editor(
     var replacement by remember { mutableStateOf("") }
     var matchCase by remember { mutableStateOf(false) }
     var currentMatch by remember { mutableIntStateOf(0) }
-    val matches = remember(value.text, query, matchCase) { findAll(value.text, query, matchCase) }
+    // Searched off the main thread, shortly after typing pauses. Results only count for the exact
+    // text, query and case they were found in, so replacing never uses stale offsets.
+    var found by remember { mutableStateOf(Found("", "", false, emptyList())) }
+    LaunchedEffect(value.text, query, matchCase, findOpen) {
+        val text = value.text
+        if (query.isEmpty() || !findOpen) { found = Found(text, query, matchCase, emptyList()); return@LaunchedEffect }
+        delay(120)
+        found = Found(text, query, matchCase, withContext(Dispatchers.Default) { findAll(text, query, matchCase) })
+    }
+    val matches = found.takeIf { it.query == query && it.matchCase == matchCase && it.text == value.text }?.ranges ?: emptyList()
 
     var tokens by remember { mutableStateOf(emptyList<Token>()) }
     LaunchedEffect(value.text) {
@@ -415,6 +431,12 @@ private fun Editor(
     BackHandler(onBack = ::tryBack)
     val latest = androidx.compose.runtime.rememberUpdatedState(Triple(value.text, saved, diskStamp))
     LaunchedEffect(dirty) { OpenFiles.dirty[file.path] = dirty }
+    // Back up unsaved edits a second after typing pauses (and drop the backup once saved).
+    LaunchedEffect(value.text, saved, diskStamp) {
+        delay(1_000)
+        val (text, onDisk, stamp) = latest.value
+        if (!discarded) OpenFiles.backup(file.path, if (text != onDisk) OpenFiles.Kept(text, onDisk, stamp) else null)
+    }
     androidx.compose.runtime.DisposableEffect(file.path) {
         onDispose {
             val (text, onDisk, stamp) = latest.value
@@ -658,6 +680,8 @@ private fun Editor(
             Row(Modifier.fillMaxSize().verticalScroll(vScroll).padding(top = 6.dp)) {
                 // Line numbers, drawn only for what's on screen; they follow wrapped lines too.
                 val gutterStyle = textStyle.copy(color = Mono.Dim)
+                // Measured numbers, reused across frames (by number and whether it's the cursor's line).
+                val numberCache = remember(fontSp, theme) { HashMap<Long, androidx.compose.ui.text.TextLayoutResult>() }
                 Box(
                     Modifier
                         .width(gutterWidth)
@@ -666,17 +690,21 @@ private fun Editor(
                             val lay = layout ?: return@drawBehind
                             val top = vScroll.value - 40f
                             val bottom = vScroll.value + viewportPx + 40f
-                            for (i in lineStarts.indices) {
-                                val start = lineStarts[i].coerceAtMost(lay.layoutInput.text.length)
-                                val visual = lay.getLineForOffset(start)
+                            val textLength = lay.layoutInput.text.length
+                            fun visualOf(i: Int) = lay.getLineForOffset(lineStarts[i].coerceAtMost(textLength))
+                            val first = firstLineAtOrBelow(lineStarts.size, top) { lay.getLineTop(visualOf(it)) }
+                            if (numberCache.size > 1_000) numberCache.clear()
+                            for (i in first until lineStarts.size) {
+                                val visual = visualOf(i)
                                 val y = lay.getLineTop(visual)
-                                if (y < top) continue
                                 if (y > bottom) break
                                 diagnosticLines[i]?.let { error ->
                                     drawCircle(if (error) Color(0xFFE5534B) else Mono.Modified, radius = 3.dp.toPx(), center = Offset(5.dp.toPx(), lay.getLineTop(visual) + (lay.getLineBottom(visual) - lay.getLineTop(visual)) / 2))
                                 }
-                                val label = (i + 1).toString()
-                                val measured = measurer.measure(label, gutterStyle.copy(color = if (i == cursorLine) Mono.Fg else Mono.Dim))
+                                val isCursor = i == cursorLine
+                                val measured = numberCache.getOrPut(i.toLong() * 2 + if (isCursor) 1 else 0) {
+                                    measurer.measure((i + 1).toString(), gutterStyle.copy(color = if (isCursor) Mono.Fg else Mono.Dim))
+                                }
                                 // Baseline-aligned with the code line, whatever the line-height padding.
                                 val labelTop = lay.getLineBaseline(visual) - measured.firstBaseline
                                 drawText(measured, topLeft = Offset(size.width - measured.size.width - 12.dp.toPx(), labelTop))
@@ -982,6 +1010,20 @@ internal fun lineIndexOf(starts: IntArray, offset: Int): Int {
     while (lo < hi) {
         val mid = (lo + hi + 1) / 2
         if (starts[mid] <= offset) lo = mid else hi = mid - 1
+    }
+    return lo
+}
+
+/**
+ * The first of [count] lines whose top ([topOf], never decreasing) is at or below [y]; [count]
+ * when none is. A binary search, so the gutter needn't walk every line above the screen.
+ */
+internal fun firstLineAtOrBelow(count: Int, y: Float, topOf: (Int) -> Float): Int {
+    var lo = 0
+    var hi = count
+    while (lo < hi) {
+        val mid = (lo + hi) ushr 1
+        if (topOf(mid) < y) lo = mid + 1 else hi = mid
     }
     return lo
 }

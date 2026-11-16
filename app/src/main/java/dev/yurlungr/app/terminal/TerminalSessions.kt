@@ -191,6 +191,8 @@ object TerminalSessions {
 
     /** Used after a managed process has finished its own cleanup. */
     fun closeDirect(context: Context, session: TerminalSession) {
+        // A restart still waiting for the old process to exit must not bring a closed tab back.
+        pendingRestarts.remove(session)
         managed.remove(session)
         stopProcess(session)
         sessions.remove(session)

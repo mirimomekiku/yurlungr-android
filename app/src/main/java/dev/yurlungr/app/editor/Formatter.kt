@@ -22,6 +22,12 @@ object Formatter {
 
     fun supports(lang: Language) = lang.prettier
 
+    /**
+     * The editor's buffer is LF-only (CRLF files are converted on load and save): Prettier's
+     * `endOfLine: crlf` (or `auto` on a CRLF file) output is brought back to LF.
+     */
+    internal fun normalize(output: String): String = output.replace("\r\n", "\n")
+
     /** Never throws: any failure (no Node, unwritable cache, broken shell) is a [Result.Failed]. */
     suspend fun prettier(paths: RuntimePaths, file: File, text: String): Result = try {
         runPrettier(paths, file, text)
@@ -54,7 +60,7 @@ object Formatter {
                 r.toolMissing -> Result.Failed(r.describe("Prettier") + "\nCheck Node.js in System checks.")
                 !r.ok -> Result.Failed(r.output.trim().lines().filter { it.isNotBlank() }.take(6).joinToString("\n").ifBlank { "Prettier failed (exit ${r.exitCode})" })
                 !output.isFile -> Result.Failed("Prettier produced no output")
-                else -> Result.Formatted(output.readText())
+                else -> Result.Formatted(normalize(output.readText()))
             }
         } finally {
             input.delete()

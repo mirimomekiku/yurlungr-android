@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.setValue
+import dev.yurlungr.app.projects.Git
 import dev.yurlungr.app.runtime.RuntimeEnv
 import dev.yurlungr.app.runtime.RuntimePaths
 import kotlinx.coroutines.CompletableDeferred
@@ -29,6 +30,8 @@ import java.io.BufferedInputStream
 import java.io.File
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /** A language server: how to start it, and the language id it expects. */
@@ -79,6 +82,12 @@ class LspClient(private val paths: RuntimePaths, val root: File, val server: Lsp
     /** uri → diagnostics, observable by the editor. */
     val diagnostics = mutableStateMapOf<String, List<LspDiagnostic>>()
     private val versions = HashMap<String, Int>()
+    /**
+     * Framed messages waiting for the writer thread, in send order. Sending only enqueues, so the
+     * main thread (the editor's effects) and the reader thread never block on a busy server's pipe.
+     */
+    private val outbox = LinkedBlockingQueue<ByteArray>()
+    private val writerStopped = AtomicBoolean(false)
     @Volatile var alive = true
         private set
 
@@ -87,7 +96,7 @@ class LspClient(private val paths: RuntimePaths, val root: File, val server: Lsp
         private set
 
     init {
-        val script = "${RuntimeEnv.PROFILE_SNIPPET}; exec " + server.command.joinToString(" ") { "'" + it.replace("'", "'\\''") + "'" }
+        val script = "${RuntimeEnv.PROFILE_SNIPPET}; exec " + server.command.joinToString(" ") { Git.shellQuote(it) }
         process = ProcessBuilder(paths.bash.path, "-c", script).directory(root)
             .apply { environment().run { clear(); putAll(RuntimeEnv.map(paths, root)) } }
             .start()
@@ -95,6 +104,33 @@ class LspClient(private val paths: RuntimePaths, val root: File, val server: Lsp
         // Servers log to stderr; read it so a full pipe can't block them.
         Thread({ runCatching { val buf = ByteArray(4096); val err = process.errorStream; while (err.read(buf) >= 0) Unit } }, "lsp-err").apply { isDaemon = true }.start()
         Thread({ readLoop() }, "lsp-${server.name}").apply { isDaemon = true }.start()
+        Thread({ writeLoop() }, "lsp-write-${server.name}").apply { isDaemon = true }.start()
+    }
+
+    /** The only writer to the server's stdin: one message at a time, in order, until [stopWriter]. */
+    private fun writeLoop() {
+        try {
+            while (true) {
+                val frame = outbox.take()
+                if (frame === STOP) break
+                out.write(frame)
+                // Flush once a burst is written (typing can queue several changes at once).
+                if (outbox.isEmpty()) out.flush()
+            }
+            out.flush()
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } catch (e: Exception) {
+            alive = false
+        } finally {
+            outbox.clear()
+            runCatching { out.close() }
+        }
+    }
+
+    /** Ends the writer once what's already queued is written. */
+    private fun stopWriter() {
+        if (writerStopped.compareAndSet(false, true)) outbox.offer(STOP)
     }
 
     private fun readLoop() {
@@ -117,6 +153,7 @@ class LspClient(private val paths: RuntimePaths, val root: File, val server: Lsp
             Log.w("Lsp", "${server.name} stopped: ${e.message}")
         } finally {
             alive = false
+            stopWriter()
             pending.values.forEach { it.complete(null) }
             android.os.Handler(android.os.Looper.getMainLooper()).post { running = false }
         }
@@ -164,11 +201,10 @@ class LspClient(private val paths: RuntimePaths, val root: File, val server: Lsp
         else -> JsonNull
     }
 
-    @Synchronized
+    /** Queues [msg] for the writer thread; never blocks. */
     private fun send(msg: JsonObject) {
-        if (!alive) return
-        val bytes = msg.toString().toByteArray(Charsets.UTF_8)
-        runCatching { out.write("Content-Length: ${bytes.size}\r\n\r\n".toByteArray()); out.write(bytes); out.flush() }.onFailure { alive = false }
+        if (!alive || writerStopped.get()) return
+        outbox.offer(frame(msg))
     }
 
     private fun notify(method: String, params: JsonObject) = send(buildJsonObject { put("jsonrpc", "2.0"); put("method", method); put("params", params) })
@@ -232,7 +268,9 @@ class LspClient(private val paths: RuntimePaths, val root: File, val server: Lsp
             val target = (o["uri"] ?: o["targetUri"])?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
             val range = (o["range"] ?: o["targetSelectionRange"]) as? JsonObject
             val l = ((range?.get("start") as? JsonObject)?.get("line"))?.jsonPrimitive?.intOrNull ?: 0
-            LspLocation(File(java.net.URI(target)), l + 1)
+            // Only files on this device: servers can answer with jdt:, untitled: or other schemes.
+            val file = fileOf(target) ?: return@mapNotNull null
+            LspLocation(file, l + 1)
         }
     }
 
@@ -260,16 +298,30 @@ class LspClient(private val paths: RuntimePaths, val root: File, val server: Lsp
     }
 
     fun stop() {
-        if (!alive) { process.destroy(); return }
+        if (!alive) { stopWriter(); process.destroy(); return }
         Thread {
             runCatching { kotlinx.coroutines.runBlocking { request("shutdown", JsonObject(emptyMap()), 3_000) } }
             notify("exit", JsonObject(emptyMap()))
+            stopWriter()
             Thread.sleep(500)
             process.destroy()
         }.start()
     }
 
     companion object {
+        /** Tells the writer thread to finish (compared by identity). */
+        private val STOP = ByteArray(0)
+
+        /** [msg] with its Content-Length header, written as one frame. */
+        internal fun frame(msg: JsonObject): ByteArray {
+            val body = msg.toString().toByteArray(Charsets.UTF_8)
+            return "Content-Length: ${body.size}\r\n\r\n".toByteArray(Charsets.US_ASCII) + body
+        }
+
+        /** A location target as a local file, or null for other schemes (jdt:, untitled:…) or a malformed URI. */
+        internal fun fileOf(uri: String): File? =
+            runCatching { java.net.URI(uri).takeIf { it.scheme.equals("file", ignoreCase = true) }?.let(::File) }.getOrNull()
+
         fun uri(f: File): String = f.toURI().toString().replace("file:/", "file:///").replace("file:////", "file:///")
     }
 }

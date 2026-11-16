@@ -27,6 +27,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.edit
+import dev.yurlungr.app.projects.Git
 import dev.yurlungr.app.projects.ProjectSearch
 import dev.yurlungr.app.projects.SearchHit
 import dev.yurlungr.app.runtime.CommandRunner
@@ -35,11 +36,13 @@ import dev.yurlungr.app.ui.AppColors
 import dev.yurlungr.app.ui.AppSheet
 import dev.yurlungr.app.ui.Ph
 import dev.yurlungr.app.ui.SkeletonListItem
+import kotlinx.coroutines.launch
 import java.io.File
 
 /**
  * The editor's open files (tabs) and their unsaved text: switching tabs keeps edits in memory
- * instead of asking to save. Lost when the app's process ends, like any unsaved edit.
+ * instead of asking to save. Unsaved text is also backed up to disk ([UnsavedBackups]), so it
+ * survives the process being killed in the background, until it's saved, discarded or closed.
  */
 object OpenFiles {
     val tabs = androidx.compose.runtime.mutableStateListOf<String>()
@@ -51,16 +54,48 @@ object OpenFiles {
      */
     data class Kept(val text: String, val saved: String, val stamp: DiskStamp)
 
-    private val buffers = HashMap<String, Kept>()
+    private val buffers = java.util.concurrent.ConcurrentHashMap<String, Kept>()
+
+    /** Where backups go; set by [attach]. */
+    @Volatile private var backupDir: File? = null
+    /** Backup writes and deletes, one at a time in the order asked (a delete never loses to an older write). */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val backups = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO.limitedParallelism(1),
+    )
+
+    fun attach(context: Context) {
+        if (backupDir == null) backupDir = File(context.applicationContext.filesDir, "unsaved")
+    }
 
     fun open(path: String) { if (path !in tabs) tabs += path }
-    fun close(path: String) { tabs.remove(path); buffers.remove(path); dirty.remove(path) }
+    fun close(path: String) { tabs.remove(path); buffers.remove(path); dirty.remove(path); backup(path, null) }
     fun buffer(path: String): Kept? = buffers[path]
 
     /** Unsaved edits for [path], or null once it's saved or discarded. */
     fun keep(path: String, kept: Kept?) {
         if (kept == null) buffers.remove(path) else buffers[path] = kept
         dirty[path] = kept != null
+        backup(path, kept)
+    }
+
+    /** Writes (or, for null, removes) the on-disk backup of [path]'s unsaved edits, off the main thread. */
+    fun backup(path: String, kept: Kept?) {
+        val dir = backupDir ?: return
+        backups.launch {
+            if (kept == null) UnsavedBackups.delete(dir, path)
+            else UnsavedBackups.write(dir.apply { mkdirs() }, path, kept)
+        }
+    }
+
+    /**
+     * After the process was killed: brings back [path]'s backed-up edits when nothing is in memory
+     * and they differ from the file now ([diskText]). Call off the main thread, before [buffer].
+     */
+    fun restore(path: String, diskText: String) {
+        val dir = backupDir ?: return
+        if (buffers.containsKey(path)) return
+        UnsavedBackups.restore(dir, path, diskText)?.let { buffers.putIfAbsent(path, it) }
     }
 }
 
@@ -143,7 +178,7 @@ fun BlameSheet(file: File, onDismiss: () -> Unit, onLine: (Int) -> Unit) {
     val root = remember(file) { EditorTools.rootOf(file) }
     val result by produceState<Result<List<BlameRange>>?>(null, file) {
         val r = CommandRunner.run(paths, listOf(File(paths.bin, "git").path, "-C", root.path, "blame", "--line-porcelain", "--", file.relativeTo(root).path),
-            cwd = root, timeoutMs = 30_000, forParsing = true)
+            cwd = root, timeoutMs = 30_000, forParsing = true, extraEnv = Git.ENV)
         value = if (r.ok) Result.success(EditorTools.parseBlame(r.output))
         else Result.failure(IllegalStateException(r.errorOutput.lines().firstOrNull { it.isNotBlank() } ?: r.describe("git blame")))
     }
