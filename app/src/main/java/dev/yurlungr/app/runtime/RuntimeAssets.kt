@@ -11,8 +11,9 @@ import java.io.File
 object RuntimeAssets {
     private val EXEC = "700".toInt(8)
 
-    private fun scripts(paths: RuntimePaths) = ToolSetup.entries.filter { it.optional }.mapNotNull { it.script }
-        .associateWith { File(paths.libexec, it) } + mapOf(
+    /** (asset, destination) pairs; one asset can be installed under several names ([ToolSetup.asset]). */
+    private fun scripts(paths: RuntimePaths) = ToolSetup.entries.filter { it.optional && it.script != null }
+        .map { it.asset!! to File(paths.libexec, it.script!!) } + listOf(
         "setup-common.sh" to File(paths.libexec, "setup-common.sh"),
         "spike-test.sh" to File(paths.home, "spike-test.sh"),
         "agents-setup.sh" to File(paths.libexec, "agents-setup.sh"),

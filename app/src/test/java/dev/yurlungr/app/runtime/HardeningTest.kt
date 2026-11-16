@@ -79,11 +79,32 @@ class HardeningTest {
             assertTrue(manifest.contains("YURLUNGR_CHECKS_${p.name.uppercase()}=("))
             assertEquals(p, Fix.entries.first { it.setup == p }.setup)
             assertTrue(setupScriptCommand(p.script!!).contains(p.script!!))
-            // The script ships with the app and reads its own pack's lists.
-            val script = java.io.File("src/main/assets/${p.script}")
-            assertTrue("${p.script} exists", script.isFile)
-            assertTrue("${p.script} uses its pack", script.readText().contains("YURLUNGR_PACKAGES_${p.name.uppercase()}[@]"))
+            // The script's asset ships with the app; installed under the pack's script name, it finds its pack.
+            val script = java.io.File("src/main/assets/${p.asset}")
+            assertTrue("${p.asset} exists", script.isFile)
+            assertTrue("${p.script} maps to its pack", manifest.contains("  ['${p.script}']=${p.name.uppercase()}\n"))
+            assertTrue(manifest.contains("YURLUNGR_TITLE_${p.name.uppercase()}="))
+            if (p.asset != "pack-setup.sh") {
+                assertTrue("${p.script} uses its pack", script.readText().contains("YURLUNGR_PACKAGES_${p.name.uppercase()}[@]"))
+            }
         }
+        assertEquals(listOf(ToolSetup.Browser), packs.filter { it.asset != "pack-setup.sh" })
+    }
+
+    @Test fun `the generic pack script keeps the per-pack behavior`() {
+        val text = java.io.File("src/main/assets/pack-setup.sh").readText()
+        // Log and status file named after the script it's installed as (go-setup.log, go-setup.status).
+        assertTrue(text.contains("NAME=\$(basename \"\$0\" .sh)"))
+        assertTrue(text.contains("setup_init \"\$HOME/\$NAME.log\""))
+        assertTrue(text.contains("YURLUNGR_PACK_OF_SCRIPT[\$NAME.sh]"))
+        for (part in listOf("YURLUNGR_SPACE_MB_", "YURLUNGR_TITLE_", "YURLUNGR_PACKAGES_", "YURLUNGR_CHECKS_")) {
+            assertTrue(part, text.contains(part))
+        }
+        for (call in listOf("require_space", "apt_prepare && install_pkgs", "run_checks", "setup_finish \"\$title ready.")) {
+            assertTrue(call, text.contains(call))
+        }
+        // The pack name is used in eval: only A-Z gets through.
+        assertTrue(text.contains("''|*[!A-Z]*)"))
     }
 
     @Test fun `a missing optional tool is info with an Install fix, not a warning`() {

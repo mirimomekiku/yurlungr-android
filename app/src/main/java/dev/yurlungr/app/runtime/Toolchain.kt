@@ -60,6 +60,13 @@ enum class ToolSetup(
     Archives("archives-setup.sh", "Archives", true, listOf("7zip", "xz-utils", "zstd", "brotli"), 60, "bin/zstd", "7-Zip, xz, zstd and brotli"),
     Ocr("ocr-pdf-setup.sh", "OCR & PDF", true, listOf("tesseract", "poppler", "qpdf"), 250, "bin/tesseract", "Tesseract OCR, poppler (pdftotext…) and qpdf"),
     Browser("browser-setup.sh", "Headless browser", true, listOf("chromium"), 900, "bin/chromium-browser", "Chromium (from Termux's x11 repository) for Puppeteer and Selenium tests; Playwright doesn't support Android"),
+    ;
+
+    /**
+     * The bundled file installed as [script]. Packs that only install their packages share the generic
+     * `pack-setup.sh`, which picks its pack from the name it runs under; the rest have their own.
+     */
+    val asset: String? get() = if (optional && this != Browser) "pack-setup.sh" else script
 }
 
 /**
@@ -336,7 +343,13 @@ object Toolchain {
         for (setup in ToolSetup.entries.filter { it.optional }) {
             appendLine("YURLUNGR_PACKAGES_${setup.name.uppercase()}=(${setup.packages.joinToString(" ")})")
             appendLine("YURLUNGR_SPACE_MB_${setup.name.uppercase()}=${setup.spaceMb}")
+            appendLine("YURLUNGR_TITLE_${setup.name.uppercase()}=${shellQuote(setup.title)}")
         }
+        // pack-setup.sh is installed under each pack's script name and looks its pack up here.
+        appendLine("declare -gA YURLUNGR_PACK_OF_SCRIPT=(")
+        ToolSetup.entries.filter { it.optional && it.script != null }
+            .forEach { appendLine("  [${shellQuote(it.script!!)}]=${it.name.uppercase()}") }
+        appendLine(")")
         appendLine("YURLUNGR_SDK_PLATFORM=$SDK_PLATFORM")
         appendLine("YURLUNGR_SDK_BUILD_TOOLS=$SDK_BUILD_TOOLS")
         // "name<TAB>command" per tool and setup, for the scripts' final version checks.

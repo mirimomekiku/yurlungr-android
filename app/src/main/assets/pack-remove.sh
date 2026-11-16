@@ -58,7 +58,7 @@ if [ "${#remove[@]}" -gt 0 ]; then
     bad "removing this pack would also remove${blocked} (used by the core setups or another pack); nothing was removed"
     setup_finish ""
   fi
-  if run_logged with_timeout 1800 apt-get remove -y "${remove[@]}"; then ok "removed"; else bad "apt-get remove"; fi
+  if run_logged with_timeout 1800 apt-get remove -y "${APT_LOCK[@]}" "${remove[@]}"; then ok "removed"; else bad "apt-get remove"; fi
   hash -r
 fi
 
