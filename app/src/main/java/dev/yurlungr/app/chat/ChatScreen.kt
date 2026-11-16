@@ -220,6 +220,13 @@ private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Un
                     text = { Text("Approval rules") },
                     onClick = { menu = false; sheet = "rules" },
                 )
+                dev.yurlungr.app.ui.LocalOpenExtensions.current?.let { openExt ->
+                    DropdownMenuItem(
+                        leadingIcon = { PhIcon(Ph.Wrench, null, size = 18.dp) },
+                        text = { Text("Skills & commands") },
+                        onClick = { menu = false; openExt(chat.agent.name, (chat as? ChatSession)?.cwd?.path) },
+                    )
+                }
                 DropdownMenuItem(
                     leadingIcon = { PhIcon(Ph.File, null, size = 18.dp) },
                     text = { Text("Artifacts") },

@@ -86,6 +86,9 @@ fun AgentsScreen(
             .systemBarsPadding(),
     ) {
         ScreenHeader("Agents", onBack) {
+            dev.yurlungr.app.ui.LocalOpenExtensions.current?.let { openExt ->
+                IconButton(onClick = { openExt(null, null) }) { PhIcon(Ph.Wrench, "Skills and commands", size = 20.dp) }
+            }
             IconButton(onClick = onInstallAgents) { PhIcon(Ph.ArrowClockwise, "Install or update agents", size = 20.dp) }
         }
         LazyColumn(

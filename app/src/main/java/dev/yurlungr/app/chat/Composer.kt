@@ -187,6 +187,14 @@ fun ComposerField(
     val scope = rememberCoroutineScope()
     var attachMenu by remember { mutableStateOf(false) }
     var showPrompts by remember { mutableStateOf(false) }
+    var showCommands by remember { mutableStateOf(false) }
+    val openExtensions = dev.yurlungr.app.ui.LocalOpenExtensions.current
+    if (showCommands) CommandsSheet(
+        agentName, commands,
+        onPick = { c -> val t = "/${c.name} "; onValueChange(TextFieldValue(t, selection = TextRange(t.length))) },
+        onDismiss = { showCommands = false },
+        onManage = openExtensions?.let { open -> { open(null, null) } },
+    )
     val speech = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         val spoken = r.data?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
         if (!spoken.isNullOrBlank()) {
@@ -369,6 +377,10 @@ fun ComposerField(
                         DropdownMenuItem(leadingIcon = { PhIcon(Ph.ListChecks, null) }, text = { Text("Prompts") }, onClick = {
                             attachMenu = false
                             showPrompts = true
+                        })
+                        if (commands.isNotEmpty()) DropdownMenuItem(leadingIcon = { PhIcon(Ph.Terminal, null) }, text = { Text("Commands") }, onClick = {
+                            attachMenu = false
+                            showCommands = true
                         })
                     }
                 }

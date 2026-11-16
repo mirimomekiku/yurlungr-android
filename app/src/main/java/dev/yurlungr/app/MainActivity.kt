@@ -78,6 +78,7 @@ sealed interface Route {
     data object Terminal : Route
     data object Agents : Route
     data object Activity : Route
+    data class Extensions(val agent: String?, val project: String?) : Route
     data object Devices : Route
     data class RemoteHome(val hostId: String) : Route
     data class RemoteChat(val hostId: String, val chatId: String) : Route
@@ -229,6 +230,7 @@ class MainActivity : ComponentActivity() {
                     CompositionLocalProvider(
                         dev.yurlungr.app.ui.LocalOpenFile provides { nav.push(Route.FileView(it.path)) },
                         LocalOpenDrawer provides { scope.launch { drawer.open() } },
+                        dev.yurlungr.app.ui.LocalOpenExtensions provides { agent, project -> nav.push(Route.Extensions(agent, project)) },
                         LocalTopLevel provides nav.isTopLevel,
                         dev.yurlungr.app.ui.LocalOpenPalette provides { showPalette = true },
                     ) {
@@ -329,6 +331,11 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+            is Route.Extensions -> dev.yurlungr.app.agents.AgentExtensionsScreen(
+                route.agent, route.project, onBack = back,
+                onOpenFile = { nav.push(Route.FileView(it.path, edit = true)) },
+                onRun = { command, title -> runInTerminal(context, nav, command, title) },
+            )
             Route.Activity -> dev.yurlungr.app.chat.ActivityScreen(onBack = back, onOpenChat = { nav.reset(Route.Chat(it)) })
             Route.Agents -> AgentsScreen(
                 refreshTick = resumeTick,

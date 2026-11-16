@@ -24,3 +24,6 @@ fun NavButton(onBack: () -> Unit) {
         IconButton(onClick = onBack) { PhIcon(Ph.CaretLeft, "Back", size = 24.dp) }
     }
 }
+
+/** Opens Skills & commands for an agent (by name) and a project folder; both null for the general view. */
+val LocalOpenExtensions = compositionLocalOf<((String?, String?) -> Unit)?> { null }
