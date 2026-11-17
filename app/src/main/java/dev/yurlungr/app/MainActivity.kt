@@ -58,6 +58,7 @@ import dev.yurlungr.app.ui.screenTransition
 import dev.yurlungr.app.ui.AppTheme
 import dev.yurlungr.app.ui.LocalOpenDrawer
 import dev.yurlungr.app.ui.LocalTopLevel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.lifecycle.lifecycleScope
@@ -202,6 +203,9 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(pendingChatId) {
+                    if (pendingChatId == null) return@LaunchedEffect
+                    // Saved chats load in the background at startup; a notification tap can come first.
+                    androidx.compose.runtime.snapshotFlow { ChatSessions.loaded }.first { it }
                     pendingChatId?.let { id -> if (ChatSessions.get(id) != null) nav.reset(Route.Chat(id)) }
                     pendingChatId = null
                 }
@@ -319,7 +323,8 @@ class MainActivity : ComponentActivity() {
             is Route.Chat -> {
                 val chat = ChatSessions.get(route.id)
                 if (chat == null) {
-                    LaunchedEffect(route) { nav.reset(Route.NewChat) }
+                    // Not loaded yet (startup) isn't gone: wait for the saved chats before giving up on it.
+                    if (ChatSessions.loaded) LaunchedEffect(route) { nav.reset(Route.NewChat) }
                 } else {
                     ChatScreen(
                         chat,

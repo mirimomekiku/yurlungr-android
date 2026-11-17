@@ -4,7 +4,12 @@ import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import dev.yurlungr.app.MainActivity
@@ -12,6 +17,10 @@ import dev.yurlungr.app.R
 import dev.yurlungr.app.YurlungrApp
 import dev.yurlungr.app.agents.Agent
 import dev.yurlungr.app.runtime.RuntimeService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -40,14 +49,33 @@ object ChatSessions {
     /** Single thread: saves of the same chat land in order. */
     private val io = Executors.newSingleThreadExecutor { r -> Thread(r, "chat-store").apply { isDaemon = true } }
 
-    /** Loads saved chats (history only; agents start when a chat is opened). */
+    /** Deleting a chat's checkpoints can take a long gc: kept off [io], so saves don't wait for it. */
+    private val cleanup = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /** Saved chats have been read (they load in the background at startup). */
+    var loaded by mutableStateOf(false)
+        private set
+
+    /**
+     * Loads saved chats (history only; agents start when a chat is opened). Parsing runs on
+     * [io], so it's ordered with saves and off the main thread; the chats appear when it's done.
+     */
     fun init(context: Context) {
+        if (::appContext.isInitialized) return
         appContext = context.applicationContext
-        if (chats.isNotEmpty()) return
-        for (saved in ChatStore.readAll(appContext)) {
-            val agent = Agent.entries.firstOrNull { it.name == saved.agent } ?: continue
-            chats += wire(ChatSession(appContext, agent, File(saved.cwd), saved))
-            io.execute { Checkpoints.closeInterrupted(appContext, saved.id) }
+        val main = Handler(Looper.getMainLooper())
+        io.execute {
+            val saved = runCatching { ChatStore.readAll(appContext) }.getOrDefault(emptyList())
+            main.post {
+                for (s in saved) {
+                    val agent = Agent.entries.firstOrNull { it.name == s.agent } ?: continue
+                    if (get(s.id) != null) continue
+                    chats += wire(ChatSession(appContext, agent, File(s.cwd), s))
+                    io.execute { Checkpoints.closeInterrupted(appContext, s.id) }
+                }
+                loaded = true
+                if (saved.isNotEmpty()) onRegistryChanged?.invoke()
+            }
         }
     }
 
@@ -79,7 +107,8 @@ object ChatSessions {
         NotificationManagerCompat.from(context).cancel(chat.id.hashCode())
         val id = chat.id
         Drafts.set(context, id, "")
-        io.execute { ChatStore.delete(appContext, id); kotlinx.coroutines.runBlocking { runCatching { Checkpoints.delete(appContext, id) } } }
+        io.execute { ChatStore.delete(appContext, id) }
+        cleanup.launch { runCatching { Checkpoints.delete(appContext, id) } }
         RuntimeService.refresh(context)
     }
 
