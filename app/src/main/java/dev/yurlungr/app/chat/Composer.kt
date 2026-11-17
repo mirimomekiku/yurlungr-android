@@ -98,7 +98,8 @@ fun Composer(chat: ChatModel) {
     // Leaving within the debounce would otherwise keep an older draft (or bring back a sent message).
     val latest by androidx.compose.runtime.rememberUpdatedState(input.text)
     androidx.compose.runtime.DisposableEffect(chat.id) {
-        onDispose { Drafts.set(appContext, chat.id, latest) }
+        // Not for a chat just deleted: that would bring its draft back.
+        onDispose { if (chat.isRemote || ChatSessions.get(chat.id) != null) Drafts.set(appContext, chat.id, latest) }
     }
     val attachments = remember(chat.id) { mutableStateListOf<Attachment>() }
     Column {

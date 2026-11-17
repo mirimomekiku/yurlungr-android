@@ -17,6 +17,8 @@ import java.io.File
 /** Turning picked files/images into ACP prompt content. */
 object Attachments {
     const val MAX_BYTES = 10 * 1024 * 1024
+    /** Photos may be bigger, as they're downscaled, but are still read into memory first. */
+    const val MAX_IMAGE_READ_BYTES = 40 * 1024 * 1024
     private const val MAX_EMBEDDED_TEXT = 256 * 1024
     /** Longest image side sent to models; larger photos are downscaled (and re-encoded as JPEG). */
     private const val MAX_IMAGE_SIDE = 2000
@@ -96,14 +98,29 @@ object Attachments {
         }
         val mime = resolver.getType(uri) ?: guessMime(name)
         // Photos can be big but get downscaled; other files must fit as-is.
-        if (size > MAX_BYTES && !mime.startsWith("image/")) return null to "$name is larger than 10 MB"
-        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return null to "Couldn't read $name"
-        if (!mime.startsWith("image/")) {
-            return if (bytes.size > MAX_BYTES) null to "$name is larger than 10 MB" else Attachment(name, mime, bytes) to null
-        }
+        val image = mime.startsWith("image/")
+        val cap = if (image) MAX_IMAGE_READ_BYTES else MAX_BYTES
+        val tooLarge = "$name is larger than ${cap / (1024 * 1024)} MB"
+        if (size > cap) return null to tooLarge
+        // SIZE can be missing (or wrong), so the cap holds while reading too.
+        val bytes = resolver.openInputStream(uri)?.use { readCapped(it, cap) ?: return null to tooLarge }
+            ?: return null to "Couldn't read $name"
+        if (!image) return Attachment(name, mime, bytes) to null
         val (data, type) = prepareImage(bytes, mime)
         val finalName = if (type == "image/jpeg" && mime != "image/jpeg") name.substringBeforeLast('.') + ".jpg" else name
         return Attachment(finalName, type, data) to null
+    }
+
+    /** All of [input], or null as soon as it passes [max] bytes (the rest isn't read). */
+    internal fun readCapped(input: java.io.InputStream, max: Int): ByteArray? {
+        val buf = ByteArrayOutputStream()
+        val chunk = ByteArray(64 * 1024)
+        while (true) {
+            val n = input.read(chunk)
+            if (n < 0) return buf.toByteArray()
+            if (buf.size() + n > max) return null
+            buf.write(chunk, 0, n)
+        }
     }
 
     /** Downscales/re-encodes images that exceed model limits; small ones pass through unchanged. */

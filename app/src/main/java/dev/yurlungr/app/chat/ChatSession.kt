@@ -25,6 +25,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -249,7 +250,7 @@ class ChatSession(
                 })
                 val agentCaps = (init as? JsonObject)?.get("agentCapabilities") as? JsonObject
                 caps = AcpExtras.parseCaps(agentCaps)
-                val canLoad = agentCaps?.get("loadSession")?.jsonPrimitive?.contentOrNull == "true"
+                val canLoad = (agentCaps?.get("loadSession") as? JsonPrimitive)?.booleanOrNull == true
                 val previous = acpSessionId
                 val session = if (previous != null && canLoad) loadOrNew(conn, previous) else newSession(conn)
                 readModes(session["modes"] as? JsonObject)
@@ -262,16 +263,28 @@ class ChatSession(
                 throw e
             } catch (e: AcpException) {
                 if (gen != generation) return@launch
-                state = if (e.code == AcpException.AUTH_REQUIRED) ChatState.AuthRequired else ChatState.Failed(failureText(e))
+                // Signing in keeps the process: it may print the sign-in link, and "I've signed in" restarts it.
+                if (e.code == AcpException.AUTH_REQUIRED) state = ChatState.AuthRequired
+                else failStart(conn, failureText(e))
             } catch (e: Exception) {
                 if (gen != generation) return@launch
                 Log.e(TAG, "start failed", e)
-                state = ChatState.Failed(failureText(e))
+                failStart(conn, failureText(e))
             } finally {
                 // Cancelled (stop/delete) between spawning and handing the process to a connection.
                 if (conn == null) spawned.get()?.destroy()
             }
         }
+    }
+
+    /** A start that failed: ends its process too, so the chat doesn't stay "active" with no session. */
+    private fun failStart(conn: AcpConnection?, message: String) {
+        // Text first: the process ending must not replace this reason with "Agent exited".
+        state = ChatState.Failed(message)
+        if (conn == null) return
+        if (connection === conn) connection = null
+        conn.close()
+        onActiveChanged?.invoke(this)
     }
 
     /** Ends the running start/prompt work and makes any late failures from it stale. */
@@ -324,7 +337,7 @@ class ChatSession(
         val session = conn.request("session/new", buildJsonObject {
             put("cwd", cwd.path)
             putJsonArray("mcpServers") {}
-        }).jsonObject
+        }) as? JsonObject ?: throw AcpException(AcpException.INTERNAL, "${agent.displayName} returned no session for session/new")
         sessionId = session.string("sessionId")
         acpSessionId = sessionId
         return session
@@ -520,6 +533,8 @@ class ChatSession(
         promptJob = scope.launch {
             var turn: ChatTurn? = null
             try {
+                // Held back while a restore puts files back: the agent would work on (and write) a half-restored project.
+                Checkpoints.awaitRestore()
                 // A checkpoint of the project before the agent works, so this turn can be undone.
                 turn = runCatching { Checkpoints.begin(appContext, id, cwd, text) }.getOrNull()
                 val blocks = withContext(Dispatchers.IO) { Attachments.toPromptBlocks(cwd, attachments, caps) }
@@ -950,7 +965,8 @@ class ChatSession(
         internal fun writeAtomically(file: File, text: String) {
             val dir = file.absoluteFile.parentFile
             dir?.mkdirs()
-            val tmp = File(dir, ".${file.name}.yurlungr-tmp")
+            // A unique name: two writes to the same file at once mustn't share (and clobber) one temp file.
+            val tmp = File.createTempFile(".${file.name}.", ".tmp", dir)
             try {
                 java.io.FileOutputStream(tmp).use { out ->
                     out.write(text.toByteArray(Charsets.UTF_8))
