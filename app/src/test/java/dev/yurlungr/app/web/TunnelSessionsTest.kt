@@ -37,4 +37,10 @@ class TunnelSessionsTest {
         assertTrue(line, line.startsWith("failed to request quick Tunnel"))
         assertEquals("cloudflared exited", TunnelSessions.failureLine(""))
     }
+
+    @Test fun `the API host in an error is not taken for the public link`() {
+        val err = "ERR failed to request quick Tunnel: Post \"https://api.trycloudflare.com/tunnel\": dial tcp"
+        assertNull(TunnelSessions.parseUrl(err))
+        assertEquals("https://calm-river-bird.trycloudflare.com", TunnelSessions.parseUrl(err + "\n|  https://calm-river-bird.trycloudflare.com  |"))
+    }
 }

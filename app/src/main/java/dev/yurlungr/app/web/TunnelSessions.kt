@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 enum class TunnelState(val label: String) { Starting("Starting"), Connecting("Connecting"), Live("Live"), Failed("Failed"), Stopped("Stopped") }
@@ -35,6 +36,11 @@ object TunnelSessions {
     val tunnels = mutableStateMapOf<Int, Tunnel>()
     private val URL = Regex("https://[a-z0-9][a-z0-9-]*\\.trycloudflare\\.com")
     private const val GIVE_UP_MS = 60_000L
+    private const val PORT_CHECK_MS = 5_000L
+
+    private fun isListening(port: Int): Boolean = runCatching {
+        java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 1_000) }
+    }.isSuccess
 
     fun get(port: Int): Tunnel? = tunnels[port]
     fun live(): List<Tunnel> = tunnels.values.filter { it.active }
@@ -47,8 +53,8 @@ object TunnelSessions {
         return "exec cloudflared tunnel --no-autoupdate --url http://127.0.0.1:$port"
     }
 
-    /** The public link in cloudflared's [output], once it has printed one. */
-    internal fun parseUrl(output: String): String? = URL.find(output)?.value
+    /** The public link in cloudflared's [output], once it has printed one (not the API host its errors mention). */
+    internal fun parseUrl(output: String): String? = URL.findAll(output).map { it.value }.firstOrNull { it != "https://api.trycloudflare.com" }
 
     /** cloudflared says this once the edge accepted the tunnel; before that the link doesn't work yet. */
     internal fun isRegistered(output: String): Boolean = output.contains("Registered tunnel connection")
@@ -89,20 +95,38 @@ object TunnelSessions {
         val terminal = tunnel.terminal ?: return tunnel
         scope.launch {
             val started = System.currentTimeMillis()
+            var portMisses = 0
+            var lastPortCheck = 0L
             while (tunnel.active) {
-                val text = terminal.emulator?.screen?.transcriptText.orEmpty()
-                val url = parseUrl(text)
-                if (url != null) {
-                    tunnel.url = url
-                    tunnel.state = if (isRegistered(text)) TunnelState.Live else TunnelState.Connecting
+                // The transcript is only read until the link is live: rebuilding it every tick for hours costs battery.
+                if (tunnel.state != TunnelState.Live) {
+                    val text = terminal.emulator?.screen?.transcriptText.orEmpty()
+                    val url = parseUrl(text)
+                    if (url != null) {
+                        tunnel.url = url
+                        tunnel.state = if (isRegistered(text)) TunnelState.Live else TunnelState.Connecting
+                    }
                 }
                 if (!terminal.isRunning) { if (tunnel.active) fail(tunnel, terminal); break }
-                if (tunnel.state == TunnelState.Starting && System.currentTimeMillis() - started > GIVE_UP_MS) {
-                    tunnel.message = "No link after a minute. Check the network, then try again."
+                if (tunnel.state != TunnelState.Live && System.currentTimeMillis() - started > GIVE_UP_MS) {
+                    tunnel.message = if (tunnel.state == TunnelState.Starting) "No link after a minute. Check the network, then try again."
+                        else "Cloudflare gave a link but it never went live. Try again."
                     stop(app, tunnel, failed = true)
                     break
                 }
-                delay(500)
+                // Not every shared port belongs to a web run (whose stop ends the link): when nothing listens
+                // any more, the public link goes too.
+                val now = System.currentTimeMillis()
+                if (tunnel.state == TunnelState.Live && now - lastPortCheck >= PORT_CHECK_MS) {
+                    lastPortCheck = now
+                    portMisses = if (withContext(Dispatchers.IO) { isListening(port) }) 0 else portMisses + 1
+                    if (portMisses >= 3) {
+                        tunnel.message = "The server on port $port stopped, so its public link was closed."
+                        stop(app, tunnel, failed = true)
+                        break
+                    }
+                }
+                delay(if (tunnel.state == TunnelState.Live) 2_000 else 500)
             }
         }
         return tunnel
