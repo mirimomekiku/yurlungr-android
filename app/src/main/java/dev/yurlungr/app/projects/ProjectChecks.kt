@@ -25,6 +25,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -41,6 +43,7 @@ import dev.yurlungr.app.ui.AppColors
 import dev.yurlungr.app.ui.Ph
 import dev.yurlungr.app.ui.PhIcon
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -316,11 +319,16 @@ internal fun ChecksTab(
     var checkedAt by remember(root.path) { mutableStateOf<Long?>(null) }
     var testedAt by remember(root.path) { mutableStateOf<Long?>(null) }
     val checks = remember(stacks) { ProjectChecks.checkCommands(stacks) }
-    val testRuns = remember(stacks) { ProjectChecks.testCommands(root, stacks) }
+    // Reads package.json and friends, so off the main thread.
+    val testRuns by produceState(emptyList<CheckCommand>(), root, stacks) {
+        value = withContext(Dispatchers.IO) { runCatching { ProjectChecks.testCommands(root, stacks) }.getOrDefault(value) }
+    }
+    val scope = rememberCoroutineScope()
     LaunchedEffect(root, stacks, refreshKey) {
         withContext(Dispatchers.IO) {
             val log = ProjectChecks.problemsLog(root)
-            problems = if (log.isFile) ProjectChecks.parseProblems(log.readText(), root) else null
+            // The log may be mid-rewrite by a running check: unreadable just means no results yet.
+            problems = if (log.isFile) runCatching { ProjectChecks.parseProblems(log.readText(), root) }.getOrNull() else null
             checkedAt = log.takeIf { it.isFile }?.lastModified()
             tests = runCatching { ProjectChecks.loadTests(root, stacks) }.getOrNull()?.takeIf { ProjectChecks.testsLog(root).isFile }
             testedAt = ProjectChecks.testsLog(root).takeIf { it.isFile }?.lastModified()
@@ -328,7 +336,8 @@ internal fun ChecksTab(
     }
     val colors = MaterialTheme.colorScheme
     val tones = AppColors.status
-    fun open(path: String, line: Int?) { ProjectChecks.resolve(root, path)?.let { onOpenAt(it, line) } }
+    // A bare file name means walking the tree: never on the main thread.
+    fun open(path: String, line: Int?) = scope.launch { withContext(Dispatchers.IO) { ProjectChecks.resolve(root, path) }?.let { onOpenAt(it, line) } }
     fun ago(t: Long?) = t?.let { android.text.format.DateUtils.getRelativeTimeSpanString(it).toString() }
 
     LazyColumn(contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxSize()) {

@@ -246,7 +246,8 @@ fun ProjectAgentsScreen(dir: File, onBack: () -> Unit, onOpenFile: (File) -> Uni
                             name, subtitle = "Read by $readers" + if (exists) "" else " · not created",
                             icon = Ph.FileText, iconTint = if (exists) colors.primary else colors.outline,
                             onClick = {
-                                if (!exists) f.writeText("# ${dir.name}\n\nNotes for coding agents working in this project: how to build, test and run it, and conventions to follow.\n")
+                                // Only when still missing: an agent may have written it since this row was drawn.
+                                if (!exists) runCatching { if (f.createNewFile()) f.writeText("# ${dir.name}\n\nNotes for coding agents working in this project: how to build, test and run it, and conventions to follow.\n") }
                                 onOpenFile(f)
                             },
                             trailing = { Text(if (exists) "Open" else "Create", color = colors.primary, style = MaterialTheme.typography.labelLarge) },

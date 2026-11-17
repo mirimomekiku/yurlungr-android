@@ -104,7 +104,11 @@ internal fun ChangesTab(
         if (expanded.containsKey(key)) expanded.remove(key)
         else {
             expanded[key] = null
-            scope.launch { expanded[key] = git.diff(dir, change, status?.unborn == true) }
+            scope.launch {
+                val diff = git.diff(dir, change, status?.unborn == true)
+                // Collapsed (or reopened by a newer load) while this one ran: leave it.
+                if (expanded.containsKey(key) && expanded[key] == null) expanded[key] = diff
+            }
         }
     }
     fun showFull(change: GitChange) = scope.launch { fullScreen = change to git.diff(dir, change, status?.unborn == true) }
