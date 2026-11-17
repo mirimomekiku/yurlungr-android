@@ -219,6 +219,8 @@ object AgentExtensions {
     }
 
     /** True when [f] is a symbolic link. java.nio where it exists (API 26+); below that, a link's canonical path isn't where it sits. */
+    // On API 24-25 java.nio.file is missing: the NoClassDefFoundError lands in runCatching and the fallback runs.
+    @android.annotation.SuppressLint("NewApi")
     internal fun isLink(f: File): Boolean = runCatching { java.nio.file.Files.isSymbolicLink(f.toPath()) }.getOrElse {
         val parent = f.absoluteFile.parentFile?.canonicalFile ?: return false
         runCatching { f.canonicalFile != File(parent, f.name) }.getOrDefault(true)
