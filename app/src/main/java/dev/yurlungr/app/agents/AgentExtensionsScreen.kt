@@ -42,6 +42,7 @@ import dev.yurlungr.app.ui.PhIcon
 import dev.yurlungr.app.ui.ScreenHeader
 import dev.yurlungr.app.ui.SectionLabel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -72,6 +73,7 @@ fun AgentExtensionsScreen(
     var agent by remember { mutableStateOf(supported.firstOrNull { it.name == initialAgent } ?: supported.first()) }
     var tick by remember { mutableIntStateOf(0) }
     var dialog by remember { mutableStateOf<Dialog?>(null) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     val layout = AgentExtensions.layout(agent)!!
     val found by produceState(emptyList<Skill>() to emptyList<CommandFile>(), agent, project, tick) {
         value = withContext(Dispatchers.IO) { AgentExtensions.skills(agent, project, paths.home) to AgentExtensions.commands(agent, project, paths.home) }
@@ -205,8 +207,13 @@ fun AgentExtensionsScreen(
             actions = {
                 OutlinedButton(onClick = { dialog = null }, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Cancel") }
                 Button(onClick = {
-                    AgentExtensions.delete(d.target, roots).onFailure { android.widget.Toast.makeText(context, it.message, android.widget.Toast.LENGTH_LONG).show() }
-                    dialog = null; tick++
+                    dialog = null
+                    // A cloned skills repo can be large: delete off the main thread, then refresh.
+                    scope.launch {
+                        withContext(Dispatchers.IO) { AgentExtensions.delete(d.target, roots) }
+                            .onFailure { android.widget.Toast.makeText(context, it.message, android.widget.Toast.LENGTH_LONG).show() }
+                        tick++
+                    }
                 }, modifier = Modifier.weight(2f).heightIn(min = 52.dp)) { Text("Delete") }
             }) {
             Text("This removes it from disk. It can't be undone from here.", style = MaterialTheme.typography.bodyMedium)

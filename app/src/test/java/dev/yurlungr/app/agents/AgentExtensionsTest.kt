@@ -92,4 +92,38 @@ class AgentExtensionsTest {
         assertNull(AgentExtensions.layout(Agent.Goose))
         assertNotNull(AgentExtensions.layout(Agent.Claude))
     }
+
+    @Test fun `plugin arguments can't start with a dash`() {
+        assertNull(AgentExtensions.pluginCommand("claude plugin install %s", "--help"))
+        assertNull(AgentExtensions.pluginCommand("claude plugin install %s", "-x"))
+        assertEquals("claude plugin install 'a-b@m'", AgentExtensions.pluginCommand("claude plugin install %s", "a-b@m"))
+    }
+
+    @Test fun `deleting a skill removes links inside it without following them`() {
+        val tmp = Files.createTempDirectory("ext").toFile()
+        try {
+            val root = File(tmp, "skills").apply { mkdirs() }
+            val precious = File(tmp, "home").apply { mkdirs() }
+            val keep = File(precious, "keep.txt").apply { writeText("x") }
+            val skill = File(root, "evil").apply { mkdirs() }
+            File(skill, "SKILL.md").writeText("---\nname: evil\n---\n")
+            val linked = runCatching { Files.createSymbolicLink(File(skill, "data").toPath(), precious.toPath()) }.isSuccess
+            org.junit.Assume.assumeTrue("symlinks unavailable here", linked)
+            assertTrue(AgentExtensions.delete(skill, listOf(root)).isSuccess)
+            assertFalse(skill.exists())
+            assertTrue("the link's target survives", keep.isFile)
+        } finally { tmp.deleteRecursively() }
+    }
+
+    @Test fun `delete refuses anything outside the roots, and the root itself`() {
+        val tmp = Files.createTempDirectory("ext").toFile()
+        try {
+            val root = File(tmp, "skills").apply { mkdirs() }
+            val outside = File(tmp, "other").apply { mkdirs() }
+            assertTrue(AgentExtensions.delete(outside, listOf(root)).isFailure)
+            assertTrue(AgentExtensions.delete(root, listOf(root)).isFailure)
+            assertTrue(AgentExtensions.delete(File(root, "../other"), listOf(root)).isFailure)
+            assertTrue(outside.isDirectory && root.isDirectory)
+        } finally { tmp.deleteRecursively() }
+    }
 }

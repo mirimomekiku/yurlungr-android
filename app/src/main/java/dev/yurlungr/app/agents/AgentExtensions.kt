@@ -205,15 +205,33 @@ object AgentExtensions {
         file.also { it.writeText(body) }
     }
 
-    /** Deletes a skill folder or command file, only when it sits inside one of [roots] (never a root itself). */
+    /**
+     * Deletes a skill folder or command file, only when it sits inside one of [roots] (never a root itself).
+     * Links are removed, never followed: a cloned skill holding `data -> ~` must not take the home folder with it.
+     */
     fun delete(target: File, roots: List<File>): Result<Unit> = runCatching {
-        val canonical = target.canonicalFile
-        val inside = roots.any { r -> r.exists() && canonical.path.startsWith(r.canonicalPath + File.separator) }
+        // Where the entry itself is (its folder resolved, its own name kept), so a linked skill folder is judged by its link.
+        val parent = target.absoluteFile.parentFile?.canonicalFile ?: error("Refusing to delete outside the skills folders.")
+        val entry = File(parent, target.name)
+        val inside = roots.any { r -> r.exists() && entry.path.startsWith(r.canonicalPath + File.separator) }
         check(inside) { "Refusing to delete outside the skills folders." }
-        check(canonical.deleteRecursively()) { "Couldn't delete ${target.name}." }
+        check(deleteNoFollow(entry)) { "Couldn't delete ${target.name}." }
     }
 
-    private val SAFE_ARG = Regex("^[A-Za-z0-9@._:/#~+=-]{1,200}\$")
+    /** True when [f] is a symbolic link. java.nio where it exists (API 26+); below that, a link's canonical path isn't where it sits. */
+    internal fun isLink(f: File): Boolean = runCatching { java.nio.file.Files.isSymbolicLink(f.toPath()) }.getOrElse {
+        val parent = f.absoluteFile.parentFile?.canonicalFile ?: return false
+        runCatching { f.canonicalFile != File(parent, f.name) }.getOrDefault(true)
+    }
+
+    /** Like deleteRecursively, but a link is unlinked rather than descended into. */
+    internal fun deleteNoFollow(f: File): Boolean {
+        if (!isLink(f) && f.isDirectory) f.listFiles()?.forEach { deleteNoFollow(it) }
+        return f.delete() || !f.exists() && !isLink(f)
+    }
+
+    // No leading '-': the CLI would read it as an option rather than a plugin name.
+    private val SAFE_ARG = Regex("^[A-Za-z0-9@._:/#~+=][A-Za-z0-9@._:/#~+=-]{0,199}\$")
 
     /** [template] with its `%s` replaced by the quoted [arg]; null if [arg] has anything beyond plain name/URL/path characters. */
     fun pluginCommand(template: String, arg: String?): String? {
