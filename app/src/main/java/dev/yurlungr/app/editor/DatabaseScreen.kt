@@ -177,7 +177,8 @@ fun DatabaseScreen(file: File, onBack: () -> Unit) {
                     val d = db ?: return@Button
                     scope.launch {
                         result = withContext(Dispatchers.IO) { runCatching { Sqlite.run(d, sql, writable) }.getOrElse { SqlResult(emptyList(), emptyList(), it.message) } }
-                        if (writable) { tables = withContext(Dispatchers.IO) { Sqlite.tables(d) } }
+                        // The database may have been reopened (Allow changes toggled) while this ran.
+                        if (writable) { tables = withContext(Dispatchers.IO) { runCatching { Sqlite.tables(d) }.getOrDefault(tables) } }
                     }
                 }) { Text("Run") }
                 result?.let { Grid(it, Modifier.weight(1f)) }

@@ -132,12 +132,18 @@ fun NewFileSheet(root: File, onDismiss: () -> Unit, onCreated: (File) -> Unit) {
     var name by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     val target = File(root, name.trim())
-    val inside = name.isNotBlank() && target.canonicalPath.startsWith(root.canonicalPath + File.separator)
+    // Resolved off the main thread (canonical paths and exists() touch the disk on every keystroke).
+    val check by androidx.compose.runtime.produceState(false to false, name) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { (name.isNotBlank() && target.canonicalPath.startsWith(root.canonicalPath + File.separator)) to target.exists() }.getOrDefault(false to false)
+        }
+    }
+    val (inside, exists) = check
     AppSheet(
         "New file", onDismiss = onDismiss, icon = Ph.FileText, tile = AppColors.tiles.sky, subtitle = "In ${root.name}. Use / for folders, like src/utils/date.ts.",
         actions = {
             OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Cancel") }
-            Button(enabled = inside && !target.exists(), modifier = Modifier.weight(1f).heightIn(min = 52.dp), onClick = {
+            Button(enabled = inside && !exists, modifier = Modifier.weight(1f).heightIn(min = 52.dp), onClick = {
                 runCatching {
                     target.parentFile?.mkdirs()
                     target.writeText(Snippets.template(target.name))

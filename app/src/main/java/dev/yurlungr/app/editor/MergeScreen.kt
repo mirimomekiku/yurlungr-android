@@ -135,8 +135,13 @@ fun MergeScreen(file: File, onBack: () -> Unit, onOpenEditor: () -> Unit) {
     var confirmBack by remember { mutableStateOf(false) }
     fun tryBack() { if (unsaved) confirmBack = true else onBack() }
     BackHandler(onBack = ::tryBack)
+    // What was on disk when the conflicts were read: saving over a newer version would lose it.
+    var stamp by remember { mutableStateOf<DiskStamp?>(null) }
+    var loadError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(file) {
-        val text = withContext(Dispatchers.IO) { file.readText() }
+        val read = withContext(Dispatchers.IO) { runCatching { DiskStamp.of(file) to file.readText() } }
+        val (loadedStamp, text) = read.getOrElse { loadError = "Couldn't read ${file.name}: ${it.message}"; return@LaunchedEffect }
+        stamp = loadedStamp
         crlf = text.contains("\r\n")
         val p = Merge.parse(text.replace("\r\n", "\n"))
         parts = p
@@ -158,8 +163,10 @@ fun MergeScreen(file: File, onBack: () -> Unit, onOpenEditor: () -> Unit) {
         val p = parts ?: return@launch
         val ok = withContext(Dispatchers.IO) {
             runCatching {
+                check(DiskStamp.of(file) == stamp) { "${file.name} changed since it was opened. Reopen it to resolve the latest version." }
                 val rendered = Merge.render(p, resolutions)
                 dev.yurlungr.app.editor.FileSave.writeAtomically(file, if (crlf) rendered.replace("\n", "\r\n") else rendered)
+                stamp = DiskStamp.of(file)
                 if (markResolved) {
                     val paths = RuntimePaths(context)
                     val root = EditorTools.rootOf(file)
@@ -177,6 +184,7 @@ fun MergeScreen(file: File, onBack: () -> Unit, onOpenEditor: () -> Unit) {
         Text("${file.name} · $done of ${conflicts.size} resolved", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 20.dp))
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            loadError?.let { e -> item { Text(e, color = colors.error) } }
             if (parts != null && conflicts.isEmpty()) item { Text("No conflict markers in this file.", color = colors.onSurfaceVariant) }
             itemsIndexed(conflicts) { i, c ->
                 Column(

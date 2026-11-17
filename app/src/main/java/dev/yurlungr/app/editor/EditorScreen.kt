@@ -322,7 +322,10 @@ private fun Editor(
         value = new
     }
 
-    fun save(then: () -> Unit = {}, overwrite: Boolean = false) = scope.launch {
+    // One save at a time: a second tap (or Ctrl+S) during a slow write would compare against the
+    // stamp from before the first write and report the user's own save as a conflict.
+    var saving by remember { mutableStateOf(false) }
+    suspend fun saveNow(then: () -> Unit, overwrite: Boolean) {
         val text = value.text
         val expected = diskStamp
         val useCrlf = crlf
@@ -348,6 +351,12 @@ private fun Editor(
             is SaveOutcome.Failed ->
                 Toast.makeText(context, "Couldn't save ${file.name}: ${outcome.message}", Toast.LENGTH_LONG).show()
         }
+    }
+
+    fun save(then: () -> Unit = {}, overwrite: Boolean = false) {
+        if (saving) return
+        saving = true
+        scope.launch { try { saveNow(then, overwrite) } finally { saving = false } }
     }
 
     /** Replaces the buffer with what's on disk now (the user's unsaved edits are dropped). */
