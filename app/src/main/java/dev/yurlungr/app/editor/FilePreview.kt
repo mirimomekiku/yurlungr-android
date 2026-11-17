@@ -165,13 +165,15 @@ object FilePreview {
     }
 }
 
-/** A file viewer screen for pictures, pages, tables and JSON, with Copy path, Share and (for text) Edit. */
+/** A file viewer screen for pictures, pages, tables and JSON, with Copy path, Save a copy, Share and (for text) Edit. */
 @Composable
 fun FilePreviewScreen(file: File, onBack: () -> Unit, onEdit: (() -> Unit)? = null) {
     val context = LocalContext.current
+    val saveFile = FileExport.rememberSaveFile()
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).systemBarsPadding()) {
         ScreenHeader(file.name, onBack) {
             IconButton(onClick = { FilePreview.copyPath(context, file) }) { PhIcon(Ph.Copy, "Copy path", size = 20.dp) }
+            IconButton(onClick = { saveFile(file) }) { PhIcon(Ph.DownloadSimple, "Save a copy", size = 20.dp) }
             TextButton(onClick = { FilePreview.share(context, file) }) { Text("Share") }
             if (onEdit != null) TextButton(onClick = onEdit) { Text("Edit") }
         }

@@ -165,6 +165,7 @@ fun MarkdownScreen(file: File, refreshTick: Int, onBack: () -> Unit, onEdit: () 
         if (target != null) scope.launch { listState.animateScrollToItem(target) }
         else Toast.makeText(context, "No section ${anchor.removePrefix("#")} in this file", Toast.LENGTH_SHORT).show()
     }
+    val saveCopy = FileExport.rememberSaveFile()
     val host = rememberMdHost(allowLocalFiles = true, baseDirectory = file.parentFile, onAnchor = onAnchor, query = if (searching) query else "")
 
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).systemBarsPadding()) {
@@ -173,6 +174,7 @@ fun MarkdownScreen(file: File, refreshTick: Int, onBack: () -> Unit, onEdit: () 
             if (doc?.headings?.isNotEmpty() == true) {
                 IconButton(onClick = { showOutline = true }) { PhIcon(Ph.ListChecks, "Outline", size = 20.dp) }
             }
+            IconButton(onClick = { saveCopy(file) }) { PhIcon(Ph.DownloadSimple, "Save a copy", size = 20.dp) }
             TextButton(onClick = onEdit) { Text("Edit") }
             androidx.compose.foundation.layout.Box {
                 IconButton(onClick = { menu = true }) { PhIcon(Ph.DotsThreeVertical, "More", size = 20.dp) }

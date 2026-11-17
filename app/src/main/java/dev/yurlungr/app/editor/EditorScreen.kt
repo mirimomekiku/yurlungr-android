@@ -325,6 +325,7 @@ private fun Editor(
     // One save at a time: a second tap (or Ctrl+S) during a slow write would compare against the
     // stamp from before the first write and report the user's own save as a conflict.
     var saving by remember { mutableStateOf(false) }
+    val saveCopy = FileExport.rememberSaveFile()
     suspend fun saveNow(then: () -> Unit, overwrite: Boolean) {
         val text = value.text
         val expected = diskStamp
@@ -520,6 +521,13 @@ private fun Editor(
                         text = { Text(if (Formatter.supports(lang)) "Format with Prettier" else "Prettier doesn't format ${lang.name}") },
                         enabled = Formatter.supports(lang) && !readOnly && !formatting,
                         onClick = { menu = false; format() },
+                    )
+                    DropdownMenuItem(
+                        leadingIcon = { PhIcon(Ph.DownloadSimple, null, size = 18.dp) },
+                        // The copy comes from disk: unsaved edits aren't in it.
+                        text = { Text(if (dirty) "Save a copy (last saved version)…" else "Save a copy…") },
+                        enabled = file.isFile,
+                        onClick = { menu = false; saveCopy(file) },
                     )
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text((if (wrap) "✓ " else "") + "Word wrap") }, onClick = { menu = false; wrap = !wrap })

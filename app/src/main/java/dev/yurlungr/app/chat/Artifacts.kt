@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -35,6 +36,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import dev.yurlungr.app.editor.FileExport
 import dev.yurlungr.app.editor.FilePreview
 import dev.yurlungr.app.editor.FilePreviewBody
 import dev.yurlungr.app.editor.PreviewKind
@@ -119,7 +121,9 @@ fun ArtifactsSheet(chat: ChatModel, onDismiss: () -> Unit) {
     }
     val artifacts = remember(fromDiffs, fromSnapshots) { Artifacts.merge(fromSnapshots, fromDiffs) }
     var preview by remember { mutableStateOf<Artifact?>(null) }
-    preview?.let { ArtifactPreview(it, onEdit = { f -> open?.invoke(f) }, onClose = { preview = null }) }
+    val saveFile = FileExport.rememberSaveFile()
+    val saveAll = FileExport.rememberSaveAll()
+    preview?.let { ArtifactPreview(it, onEdit = { f -> open?.invoke(f) }, onSave = saveFile, onClose = { preview = null }) }
     AppSheet(
         "Artifacts", onDismiss = onDismiss, icon = Ph.File, tile = AppColors.tiles.lime,
         subtitle = if (artifacts.isEmpty()) "Nothing created yet" else "${artifacts.size} file${if (artifacts.size == 1) "" else "s"} from this chat",
@@ -163,16 +167,28 @@ fun ArtifactsSheet(chat: ChatModel, onDismiss: () -> Unit) {
                         if (exists && a.preview != PreviewKind.None && a.preview != PreviewKind.Image) {
                             IconButton(onClick = { open?.invoke(a.file); onDismiss() }) { PhIcon(Ph.PencilSimple, "Open in editor", size = 18.dp) }
                         }
+                        if (exists) IconButton(onClick = { saveFile(a.file) }) { PhIcon(Ph.DownloadSimple, "Save a copy", size = 18.dp) }
                     }
                 }
+            }
+        }
+        // Remote chats' files are on the other phone; only what's on disk here can be saved.
+        val onDisk = if (chat.isRemote) emptyList() else artifacts.map { it.file }
+        if (onDisk.isNotEmpty()) {
+            FilledTonalButton(
+                onClick = { saveAll(onDisk.filter { it.isFile }) },
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp).heightIn(min = 48.dp),
+            ) {
+                PhIcon(Ph.DownloadSimple, null, size = 18.dp)
+                Text("  Save all to a folder…")
             }
         }
     }
 }
 
-/** Full-screen preview with Copy path and Share (and Edit for text-based files). */
+/** Full-screen preview with Copy path, Save a copy and Share (and Edit for text-based files). */
 @Composable
-private fun ArtifactPreview(a: Artifact, onEdit: (File) -> Unit, onClose: () -> Unit) {
+private fun ArtifactPreview(a: Artifact, onEdit: (File) -> Unit, onSave: (File) -> Unit, onClose: () -> Unit) {
     val context = LocalContext.current
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -181,6 +197,7 @@ private fun ArtifactPreview(a: Artifact, onEdit: (File) -> Unit, onClose: () -> 
                     IconButton(onClick = onClose) { PhIcon(Ph.X, "Close", size = 22.dp) }
                     Text(a.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     IconButton(onClick = { FilePreview.copyPath(context, a.file) }) { PhIcon(Ph.Copy, "Copy path", size = 20.dp) }
+                    IconButton(onClick = { onSave(a.file) }) { PhIcon(Ph.DownloadSimple, "Save a copy", size = 20.dp) }
                     TextButton(onClick = { FilePreview.share(context, a.file) }) { Text("Share") }
                     if (a.preview != PreviewKind.Image) TextButton(onClick = { onClose(); onEdit(a.file) }) { Text("Edit") }
                 }
