@@ -123,6 +123,9 @@ const server = http.createServer((req, res) => {
 server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
 // Forward framework HMR WebSocket handshakes and byte stream through the owned listener.
 server.on('upgrade', (req, socket, head) => {
+  // Node drops the server's error listener on upgraded sockets: without this, a browser that hangs up
+  // mid-handshake raises an uncaught ECONNRESET and takes the whole run down.
+  socket.on('error', () => socket.destroy());
   if (phase !== 'Running' || !backendPort) { socket.destroy(); return; }
   const request = http.request({host:'127.0.0.1',port:backendPort,path:req.url,headers:{...req.headers,'x-forwarded-host':req.headers.host,'x-forwarded-proto':'http','x-forwarded-port':String(config.port)}});
   request.on('upgrade', (response, upstream, upstreamHead) => {

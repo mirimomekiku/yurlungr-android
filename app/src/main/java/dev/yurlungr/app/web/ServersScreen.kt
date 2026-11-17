@@ -127,7 +127,8 @@ fun ServersScreen(onBack: () -> Unit, onPreview: (url: String, title: String) ->
     val runs = WebRunSessions.all()
     LaunchedEffect(reload) {
         while (true) {
-            ports = LocalServers.probe(runs.filter { it.state.active }.map { it.config.port })
+            // Read each round, so a run started while this screen is open gets probed too.
+            ports = LocalServers.probe(WebRunSessions.all().filter { it.state.active }.map { it.config.port })
             if (paths.isBootstrapInstalled) {
                 val r = CommandRunner.run(paths, listOf(File(paths.bin, "ps").path, "-eo", "pid=,ppid=,etimes=,rss=,args="), forParsing = true, timeoutMs = 10_000)
                 val me = android.os.Process.myPid()

@@ -114,7 +114,8 @@ internal object WebRunSessions {
                             if (config.openBrowser && ChatSessions.appVisible) RuntimeBridge.open(app,run.url)
                         }
                     }
-                    if (!terminal.isRunning) { finish(app,run); break }
+                    // The runner writes its final status (setup hints included) just before exiting: read it once more.
+                    if (!terminal.isRunning) { update(run); finish(app,run); break }
                     if (System.currentTimeMillis()-startTime > 20*60_000 && run.state in setOf(WebRunState.Starting, WebRunState.Installing, WebRunState.Compiling)) {
                         run.message = "Setup took too long. Check Logs and retry."
                         run.closeAfterStop = false
