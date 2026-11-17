@@ -161,13 +161,18 @@ run_logged() {
 # ignores the polite signal. Ctrl-C and closing the tab reach the setup's own group, not this one,
 # so the group is recorded for the traps to end (stop_steps).
 with_timeout() { # SECS command...
-  local secs=$1 pid rc
+  local secs=$1 pid rc g rest=
   shift
   timeout -k 10 "$secs" "$@" &
   pid=$!
   printf '%s\n' "$pid" >> "${STEP_GROUPS:-/dev/null}" 2>/dev/null
   wait "$pid"
   rc=$?
+  # Done: unlisted, so stop_steps can't signal a later process group that reuses the pid.
+  if [ -n "${STEP_GROUPS:-}" ] && [ "$STEP_GROUPS" != /dev/null ] && [ -r "$STEP_GROUPS" ]; then
+    while IFS= read -r g; do [ "$g" = "$pid" ] || rest+="$g"$'\n'; done < "$STEP_GROUPS"
+    printf '%s' "$rest" > "$STEP_GROUPS" 2>/dev/null
+  fi
   return "$rc"
 }
 

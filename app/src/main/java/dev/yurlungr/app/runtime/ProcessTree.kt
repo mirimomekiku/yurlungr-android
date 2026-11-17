@@ -16,10 +16,15 @@ object ProcessTree {
     private const val TAG = "ProcessTree"
 
     /** The parent pid from a `/proc/<pid>/stat` line, or null. The name in parentheses may contain spaces or ')'. */
-    fun parsePpid(stat: String): Int? {
-        val afterName = stat.substring(stat.lastIndexOf(')') + 1).trim().split(' ')
-        // Fields after the name: state, ppid, …
-        return afterName.getOrNull(1)?.toIntOrNull()
+    fun parsePpid(stat: String): Int? = fieldsAfterName(stat).getOrNull(1)?.toIntOrNull()
+
+    /** The start time (field 22, clock ticks since boot) from a `/proc/<pid>/stat` line, or null. */
+    fun parseStartTime(stat: String): Long? = fieldsAfterName(stat).getOrNull(22 - 3)?.toLongOrNull()
+
+    /** Fields 3 on (state, ppid, …): those after the last ')', since the name may contain spaces or ')'. */
+    private fun fieldsAfterName(stat: String): List<String> {
+        val close = stat.lastIndexOf(')').takeIf { it >= 0 } ?: return emptyList()
+        return stat.substring(close + 1).trim().split(' ')
     }
 
     /** All descendants of [root] in a pid → ppid map, children before grandchildren. */
@@ -46,6 +51,9 @@ object ProcessTree {
         pid to ppid
     }.toMap()
 
+    /** When [pid] started, or null if it's gone (or unreadable). */
+    private fun startTime(pid: Int): Long? = runCatching { parseStartTime(File("/proc/$pid/stat").readText()) }.getOrNull()
+
     private fun signal(pid: Int, sig: Int) {
         if (pid <= 1 || pid == Os.getpid()) return // never ourselves, init or (via 0) our own group
         runCatching { Os.kill(pid, sig) }
@@ -59,15 +67,20 @@ object ProcessTree {
     fun terminate(root: Int, graceMs: Long = 1_500, alsoGroup: Boolean = false) {
         if (root <= 1) return
         val tree = listOf(root) + descendantsOf(root, snapshot())
+        // Recorded now so the delayed SIGKILL can't hit an unrelated process that reused a pid.
+        val started = tree.associateWith(::startTime)
         for (pid in tree) signal(pid, OsConstants.SIGHUP)
         for (pid in tree) signal(pid, OsConstants.SIGTERM)
         if (alsoGroup) runCatching { Os.kill(-root, OsConstants.SIGTERM) }
         thread(isDaemon = true, name = "process-tree-kill") {
             Thread.sleep(graceMs)
-            // Children started during the grace period count too.
-            val again = (tree + descendantsOf(root, snapshot())).distinct()
+            val same = { pid: Int -> startTime(pid).let { it != null && it == started[pid] } }
+            val rootSame = same(root)
+            // Children started during the grace period count too, while root is still the same process.
+            val again = (tree.filter(same) + if (rootSame) descendantsOf(root, snapshot()) else emptyList()).distinct()
             for (pid in again) signal(pid, OsConstants.SIGKILL)
-            if (alsoGroup) runCatching { Os.kill(-root, OsConstants.SIGKILL) }
+            // Not if root's pid now belongs to another process, which may lead a group of its own.
+            if (alsoGroup && (rootSame || startTime(root) == null)) runCatching { Os.kill(-root, OsConstants.SIGKILL) }
             Log.d(TAG, "Stopped process tree of $root (${again.size} processes)")
         }
     }

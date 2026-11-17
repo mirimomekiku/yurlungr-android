@@ -20,6 +20,16 @@ class HardeningTest {
         assertNull(ProcessTree.parsePpid("garbage"))
     }
 
+    @Test fun `start time is field 22, counted after the last parenthesis`() {
+        // Fields 3..21, then starttime (22) and vsize.
+        val rest = "S 1 1234 1234 0 -1 4194560 100 0 0 0 5 3 0 0 20 0 1 0 987654 12345678"
+        assertEquals(987654L, ProcessTree.parseStartTime("1234 (bash) $rest"))
+        assertEquals(987654L, ProcessTree.parseStartTime("88 (a b) (c)) $rest"))
+        assertEquals(1, ProcessTree.parsePpid("88 (a b) (c)) $rest"))
+        assertNull(ProcessTree.parseStartTime("1234 (bash) S 1 1234"))
+        assertNull(ProcessTree.parseStartTime("garbage"))
+    }
+
     @Test fun `descendants include grandchildren but never the root or unrelated processes`() {
         // 10 → 11 → 12, 10 → 13; 20 is unrelated; 1 is init.
         val parents = mapOf(10 to 1, 11 to 10, 12 to 11, 13 to 10, 20 to 1)
