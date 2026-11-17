@@ -152,7 +152,7 @@ object AgentExtensions {
     internal fun scanCommands(root: File, format: CommandFormat, scope: ExtScope, where: String): List<CommandFile> {
         if (!root.isDirectory) return emptyList()
         return root.walkTopDown().maxDepth(3).filter { it.isFile && it.extension.lowercase() in format.extensions && !it.name.startsWith(".") }
-            .sortedBy { it.path }.map { f -> CommandFile(f.relativeTo(root).path.removeSuffix("." + f.extension).replace('/', ':'), f, scope, where) }.toList()
+            .sortedBy { it.path }.map { f -> CommandFile(f.relativeTo(root).invariantSeparatorsPath.removeSuffix("." + f.extension).replace('/', ':'), f, scope, where) }.toList()
     }
 
     private val NAME = Regex("^[a-z0-9][a-z0-9_-]{0,62}$")
@@ -232,6 +232,6 @@ object AgentExtensions {
         val repo = u.trimEnd('/').removeSuffix(".git").substringAfterLast('/').substringAfterLast(':').replace(Regex("[^A-Za-z0-9._-]"), "-").trim('.', '-')
         if (repo.isEmpty()) return null
         val dest = File(root, repo)
-        return "mkdir -p ${Git.shellQuote(root.path)} && git clone --depth 1 ${Git.shellQuote(u)} ${Git.shellQuote(dest.path)} && echo && echo 'Cloned to ${dest.path.replace("'", "")}' "
+        return "mkdir -p ${Git.shellQuote(root.invariantSeparatorsPath)} && git clone --depth 1 ${Git.shellQuote(u)} ${Git.shellQuote(dest.invariantSeparatorsPath)} && echo && echo 'Cloned to ${dest.invariantSeparatorsPath.replace("'", "")}' "
     }
 }
