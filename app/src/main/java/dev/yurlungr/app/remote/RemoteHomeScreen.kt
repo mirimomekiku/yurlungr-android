@@ -50,6 +50,7 @@ fun RemoteHomeScreen(host: RemoteHost, onBack: () -> Unit, onOpenChat: (String) 
     BackHandler(onBack = onBack)
     val conn = remember(host.id) { RemoteConnections.get(host) }
     var newChatFor by remember { mutableStateOf<Agent?>(null) }
+    var pairingAgain by remember { mutableStateOf(false) }
 
     LazyColumn(
         Modifier
@@ -86,7 +87,10 @@ fun RemoteHomeScreen(host: RemoteHost, onBack: () -> Unit, onOpenChat: (String) 
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer), modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(s.message, style = MaterialTheme.typography.bodyMedium)
-                        Button(onClick = { conn.connect() }) { Text("Try again") }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { conn.connect() }) { Text("Try again") }
+                            if (s.refused) TextButton(onClick = { pairingAgain = true }) { Text("Pair again") }
+                        }
                     }
                 }
             }
@@ -161,6 +165,30 @@ fun RemoteHomeScreen(host: RemoteHost, onBack: () -> Unit, onOpenChat: (String) 
                 }) { Text("Start") }
             },
             dismissButton = { TextButton(onClick = { newChatFor = null }) { Text("Cancel") } },
+        )
+    }
+
+    if (pairingAgain) {
+        var code by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { pairingAgain = false },
+            title = { Text("Pair again with ${conn.deviceName}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "This phone forgets its key for this host and pairs with the code. On the host: Devices → Pair a device.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedTextField(code, { code = it }, label = { Text("Pairing code") }, singleLine = true, keyboardOptions = Keyboards.Code)
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    pairingAgain = false
+                    conn.pairAgain(code)
+                }, enabled = code.isNotBlank()) { Text("Pair") }
+            },
+            dismissButton = { TextButton(onClick = { pairingAgain = false }) { Text("Cancel") } },
         )
     }
 }

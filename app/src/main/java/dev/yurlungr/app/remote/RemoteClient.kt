@@ -96,6 +96,13 @@ object RemoteHosts {
 
     fun get(id: String) = hosts.firstOrNull { it.id == id }
 
+    /** Pairs again from scratch: forgets this phone's secret on [hostId] and saves a new pairing code. */
+    fun repair(hostId: String, code: String) {
+        val i = hosts.indexOfFirst { it.id == hostId }.takeIf { it >= 0 } ?: return
+        hosts[i] = hosts[i].copy(code = code.trim(), deviceId = null, secret = null)
+        save()
+    }
+
     /** Saves (or clears) the id and secret the host gave this phone. */
     fun setTrust(hostId: String, deviceId: String?, secret: String?) {
         val i = hosts.indexOfFirst { it.id == hostId }.takeIf { it >= 0 } ?: return
@@ -124,7 +131,8 @@ class RemoteConnection(val host: RemoteHost) {
     sealed interface Status {
         data object Connecting : Status
         data object Connected : Status
-        data class Failed(val message: String, val retrying: Boolean) : Status
+        /** [refused]: the host turned this phone away; the user may want to [pairAgain]. */
+        data class Failed(val message: String, val retrying: Boolean, val refused: Boolean = false) : Status
     }
 
     var status by mutableStateOf<Status>(Status.Connecting)
@@ -146,10 +154,13 @@ class RemoteConnection(val host: RemoteHost) {
     /** This phone's id and secret on the host, once it has them; the code until then. */
     @Volatile private var deviceId: String? = host.deviceId
     @Volatile private var secret: String? = host.secret
+    @Volatile private var code: String = host.code
     /** What this handshake proves: the secret when there is one, else the pairing code. */
-    private val key: String get() = secret ?: host.code
+    private val key: String get() = secret ?: code
     private var wanted = false
     private var retryDelayMs = 2_000L
+    /** The host turned this phone away since it last connected. */
+    private var refused = false
 
     fun connect() {
         wanted = true
@@ -219,7 +230,9 @@ class RemoteConnection(val host: RemoteHost) {
             }
 
             override fun onClose(code: Int, reason: String?, remote: Boolean) {
-                main.post { onDisconnected(this, code, reason) }
+                // Read on this thread, before onDisconnected clears it: did the host prove itself on this connection?
+                val proven = this@RemoteConnection.socket === this && this@RemoteConnection.channel != null
+                main.post { onDisconnected(this, code, reason, proven) }
             }
 
             override fun onError(ex: Exception) {
@@ -239,7 +252,24 @@ class RemoteConnection(val host: RemoteHost) {
         channel = null
     }
 
-    private fun onDisconnected(which: WebSocketClient, code: Int, reason: String?) {
+    /** Forgets this phone's secret on the host and pairs again with [newCode]: the user's call, never automatic. */
+    fun pairAgain(newCode: String) {
+        disconnect()
+        RemoteHosts.repair(host.id, newCode)
+        code = newCode.trim()
+        deviceId = null
+        secret = null
+        retryDelayMs = 2_000L
+        refused = false
+        connect()
+    }
+
+    /**
+     * [proven]: the host proved it holds the code or this phone's secret on this connection. Until
+     * then anyone answering at the host's address can send these close codes, so they only count
+     * as a failed attempt: nothing is forgotten and reconnecting goes on.
+     */
+    private fun onDisconnected(which: WebSocketClient, code: Int, reason: String?, proven: Boolean) {
         if (socket !== which) return
         socket = null
         channel = null
@@ -252,8 +282,9 @@ class RemoteConnection(val host: RemoteHost) {
             return
         }
         if (code == CLOSE_OLD_VERSION) {
-            wanted = false
-            status = Status.Failed(reason?.takeIf { it.isNotBlank() } ?: "Update Yurlungr on this phone to connect.", retrying = false)
+            // The host sends this before its proof, so it's never authoritative: keep retrying.
+            status = Status.Failed("The host asks for a newer Yurlungr on this phone. Update it to connect.", retrying = wanted)
+            if (wanted) scheduleRetry()
             return
         }
         if (code == CLOSE_NO_CHALLENGE) {
@@ -261,27 +292,30 @@ class RemoteConnection(val host: RemoteHost) {
             if (wanted) scheduleRetry()
             return
         }
-        if (code == CLOSE_BAD_CODE) {
-            if (secret != null) {
-                // The host forgot this phone (removed it, or was reinstalled): pair again with the code.
-                secret = null
-                deviceId = null
-                RemoteHosts.setTrust(host.id, null, null)
-                status = Status.Failed("The host no longer knows this phone. Pairing again with the code…", retrying = wanted)
-                if (wanted) scheduleRetry()
-                return
-            }
+        if (code == CLOSE_BAD_CODE) refused = true
+        if (code == CLOSE_BAD_CODE && proven) {
+            // Removed on the host while connected. The secret stays until the user pairs again.
             wanted = false
-            status = Status.Failed("The host rejected the pairing code. Check the code shown on the host.", retrying = false)
+            status = Status.Failed("The host removed this phone. Pair again with the code shown on the host.", retrying = false, refused = true)
             return
         }
-        if (code == CLOSE_KICKED) {
+        if (code == CLOSE_BAD_CODE) {
+            // A host that forgot this phone can't prove itself to it, so this may be the host or an
+            // impersonator: keep retrying and leave forgetting the secret to the user.
+            val message = if (secret != null) "The host refused this phone. If you removed it there, pair again."
+            else "The host rejected the pairing code. Check the code shown on the host, then pair again."
+            status = Status.Failed(message, retrying = wanted, refused = true)
+            if (wanted) scheduleRetry()
+            return
+        }
+        if (code == CLOSE_KICKED && proven) {
             wanted = false
             status = Status.Failed("The host disconnected this phone.", retrying = false)
             return
         }
         val detail = reason?.takeIf { it.isNotBlank() } ?: "Can't reach ${host.address}. Is Tailscale on and sharing enabled on the host?"
-        status = Status.Failed(detail, retrying = wanted)
+        // A refusal stays shown (with Pair again) while retries fail for other reasons, e.g. the host's backoff.
+        status = Status.Failed(detail, retrying = wanted, refused = refused)
         if (wanted) scheduleRetry()
     }
 
@@ -335,6 +369,7 @@ class RemoteConnection(val host: RemoteHost) {
             "welcome" -> {
                 status = Status.Connected
                 retryDelayMs = 2_000L
+                refused = false
                 msg.str("device")?.let { deviceName = it }
                 agents = (msg["agents"] as? JsonArray).orEmpty().mapNotNull { el ->
                     val o = el as? JsonObject ?: return@mapNotNull null
