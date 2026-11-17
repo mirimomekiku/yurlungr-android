@@ -18,6 +18,8 @@ BUILD_TOOLS="$YURLUNGR_SDK_BUILD_TOOLS"
 # Pinned to cmdline-tools 19.0: newer releases turn `sdkmanager` into a shim for a native
 # x86-64 `android` binary that can't run on ARM. 19.0's sdkmanager is pure Java.
 CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip"
+# Its SHA-256 (its SHA-1 and size match Google's repository2-3.xml): checked before it's unpacked and run.
+CMDLINE_TOOLS_SHA256="7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee"
 # Wrapper version for new projects. Termux's own `gradle` is 9.x, which AGP 8 can't run on.
 WRAPPER_GRADLE="8.14"
 # Sessions started before the SDK existed don't have these yet.
@@ -41,7 +43,8 @@ else
   tmp="$PREFIX/tmp/cmdline-tools.zip"
   step "  downloading the command-line tools (~150 MB)…"
   # No progress meter (it redraws with \r, which shows nothing here); give up on a stalled download.
-  if run_logged curl -fsSL --retry 3 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -o "$tmp" "$CMDLINE_TOOLS_URL" \
+  if run_logged curl -fsSL --proto =https --proto-redir =https --retry 3 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -o "$tmp" "$CMDLINE_TOOLS_URL" \
+    && { [ "$(sha256sum "$tmp" | cut -d' ' -f1)" = "$CMDLINE_TOOLS_SHA256" ] || { printf 'cmdline-tools checksum mismatch\n' >> "$LOG"; false; }; } \
     && rm -rf "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest" \
     && run_logged unzip -q -o "$tmp" -d "$SDK/cmdline-tools" \
     && mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"; then

@@ -35,7 +35,8 @@ setup_init "$HOME/agent-install-$AGENT.log"
 LIB="$PREFIX/libexec/yurlungr"
 DEST="$LIB/$AGENT"
 GLIBC_LD="$PREFIX/glibc/lib/ld-linux-aarch64.so.1"
-DL_OPTS=(-fsSL --retry 3 --connect-timeout 20 --speed-limit 1024 --speed-time 60)
+# HTTPS only, redirects included: a redirect to http:// would let the network swap the download.
+DL_OPTS=(-fsSL --proto =https --proto-redir =https --retry 3 --connect-timeout 20 --speed-limit 1024 --speed-time 60)
 REGISTRY="https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
 
 # A command on PATH that runs [target]; glibc programs leave the Bionic preload out.
@@ -113,26 +114,65 @@ WORK=$(mktemp -d "$PREFIX/tmp/agent-install.XXXXXX") || { bad "temporary folder"
 # setup-common's EXIT trap reports the outcome, so clean up explicitly rather than replacing it.
 fail() { bad "$1"; rm -rf "$WORK"; setup_finish ""; }
 
-# The linux-aarch64 archive the ACP Registry lists for agent [id].
+need_node() { command -v node >/dev/null || { echo "Node.js is needed to $1: install the developer tools" >&2; return 1; }; }
+
+# The functions below print "URL CHECKSUM": the checksum ("sha512-<base64>", "sha256:<hex>" or
+# "sha1:<hex>") is left out where the source publishes none.
+
+# The linux-aarch64 archive the ACP Registry lists for agent [id], with its sha256 if listed.
 registry_url() {
-  command -v node >/dev/null || { echo "Node.js is needed to read the agent registry: install the developer tools" >&2; return 1; }
+  need_node "read the agent registry" || return 1
   curl "${DL_OPTS[@]}" "$REGISTRY" | node -e '
     let s = ""; process.stdin.on("data", c => s += c).on("end", () => {
       const j = JSON.parse(s); const list = Array.isArray(j) ? j : (j.agents || []);
       const a = list.find(x => x.id === process.argv[1]);
       const b = a && a.distribution && a.distribution.binary && a.distribution.binary["linux-aarch64"];
-      if (!b) process.exit(1); process.stdout.write(b.archive);
+      if (!b) process.exit(1); process.stdout.write(b.archive + (b.sha256 ? " sha256:" + b.sha256 : ""));
     });' "$1"
 }
-# The tarball of the latest npm package [name].
+# The tarball of the latest npm package [name], with the integrity npm lists for it.
 npm_url() {
-  curl "${DL_OPTS[@]}" "https://registry.npmjs.org/$(printf '%s' "$1" | sed 's#/#%2F#')/latest" | grep -o '"tarball":"[^"]*"' | head -n1 | cut -d'"' -f4
+  need_node "read npm package details" || return 1
+  curl "${DL_OPTS[@]}" "https://registry.npmjs.org/$(printf '%s' "$1" | sed 's#/#%2F#')/latest" | node -e '
+    let s = ""; process.stdin.on("data", c => s += c).on("end", () => {
+      const d = JSON.parse(s).dist || {};
+      const sri = (d.integrity || "").split(/\s+/).find(x => x.startsWith("sha512-"));
+      const sum = sri || (d.shasum ? "sha1:" + d.shasum : "");
+      if (!d.tarball || !sum) process.exit(1); process.stdout.write(d.tarball + " " + sum);
+    });'
 }
-# Downloads [url] and unpacks it into [dir].
-fetch() { # URL DIR
+# Asset [name] of GitHub repository [owner/repo]'s latest release, with the sha256 GitHub lists
+# for it. Without Node or the API (it's rate-limited), the plain latest-release link, unchecked.
+github_url() { # OWNER/REPO ASSET
+  command -v node >/dev/null && curl "${DL_OPTS[@]}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$1/releases/latest" | node -e '
+    let s = ""; process.stdin.on("data", c => s += c).on("end", () => {
+      const a = (JSON.parse(s).assets || []).find(x => x.name === process.argv[1]);
+      if (!a || !a.browser_download_url) process.exit(1);
+      process.stdout.write(a.browser_download_url + (/^sha256:[0-9a-f]{64}$/.test(a.digest || "") ? " " + a.digest : ""));
+    });' "$2" 2>/dev/null || printf 'https://github.com/%s/releases/latest/download/%s' "$1" "$2"
+}
+# Checks [file] against [checksum] (formats above).
+verify_sum() { # FILE CHECKSUM
+  node -e '
+    const [file, sum] = process.argv.slice(1);
+    const m = /^(sha512)-([A-Za-z0-9+\/]+=*)$/.exec(sum) || /^(sha256|sha1):([0-9a-fA-F]+)$/.exec(sum);
+    if (!m) { console.error("Unknown checksum format: " + sum); process.exit(2); }
+    const b64 = m[1] === "sha512";
+    const got = require("crypto").createHash(m[1]).update(require("fs").readFileSync(file)).digest(b64 ? "base64" : "hex");
+    if (got !== (b64 ? m[2] : m[2].toLowerCase())) { console.error("Checksum mismatch: expected " + sum + ", got " + got); process.exit(1); }
+    console.log("checksum ok (" + m[1] + ")");
+  ' "$1" "$2"
+}
+# Downloads [url], checks it against [checksum] if there is one, and unpacks it into [dir].
+fetch() { # URL DIR [CHECKSUM]
   mkdir -p "$2" || return 1
   local file="$WORK/$(basename "${1%%\?*}")"
   run_logged curl "${DL_OPTS[@]}" -o "$file" "$1" || return 1
+  if [ -n "${3:-}" ]; then
+    run_logged verify_sum "$file" "$3" || return 1
+  else
+    printf 'No published checksum for %s: relying on HTTPS alone.\n' "$1" >> "$LOG"
+  fi
   case "$file" in
     *.zip) run_logged unzip -q -o "$file" -d "$2" ;;
     *) run_logged tar -xzf "$file" -C "$2" ;;
@@ -143,8 +183,8 @@ step "Download"
 NEW="$WORK/new"
 case "$AGENT" in
   copilot) URLS=("$(npm_url @github/copilot-linux-arm64)") ;;
-  goose) URLS=("https://github.com/aaif-goose/goose/releases/latest/download/goose-aarch64-unknown-linux-gnu.tar.gz") ;;
-  opencode) URLS=("https://github.com/sst/opencode/releases/latest/download/opencode-linux-arm64.tar.gz") ;;
+  goose) URLS=("$(github_url aaif-goose/goose goose-aarch64-unknown-linux-gnu.tar.gz)") ;;
+  opencode) URLS=("$(github_url sst/opencode opencode-linux-arm64.tar.gz)") ;;
   cline) URLS=("$(npm_url @cline/cli-linux-arm64)") ;;
   kilo) URLS=("$(registry_url kilo)") ;;
   cursor) URLS=("$(registry_url cursor)") ;;
@@ -153,11 +193,12 @@ case "$AGENT" in
   amp) URLS=("$(registry_url amp-acp)" "$(npm_url @ampcode/cli-linux-arm64)") ;;
 esac
 i=0
-for url in "${URLS[@]}"; do
+for entry in "${URLS[@]}"; do
+  read -r url sum <<< "$entry"
   [ -n "$url" ] || fail "download address (registry or npm unreachable?)"
   # Amp: the adapter and the CLI go in their own folders.
   dir="$NEW"; [ "$AGENT" = amp ] && { [ $i -eq 0 ] && dir="$NEW/acp" || dir="$NEW/cli"; }
-  if fetch "$url" "$dir"; then ok "downloaded $(basename "${url%%\?*}")"; else fail "download or unpack ($url)"; fi
+  if fetch "$url" "$dir" "$sum"; then ok "downloaded $(basename "${url%%\?*}")"; else fail "download or unpack ($url)"; fi
   i=$((i + 1))
 done
 
