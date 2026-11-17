@@ -244,8 +244,9 @@ object RemoteServer : ChatListener {
         var trustedId: String? = null
         var since = 0L
         val subscriptions = mutableSetOf<String>()
-        /** Named a trusted device when connecting: counted in the trusted pairing slots. */
-        var claimsTrusted = false
+        /** The trusted device it named when connecting, if that got it a trusted pairing slot. */
+        var claimedId: String? = null
+        val claimsTrusted: Boolean get() = claimedId != null
     }
 
     private val WebSocket.client: Client? get() = getAttachment<Client>()
@@ -342,6 +343,7 @@ object RemoteServer : ChatListener {
         // the socket thread must already be able to open them (else it drops them as unpaired).
         client.channel = RemotePairing.channel(pairingCode, client.hostNonce, clientNonce, isHost = true)
         backoff.succeeded(conn.peerAddress)
+        if (known != null) backoff.succeeded(claimKey(known.id))
         // Prove we know the code too, in the clear, before anything sealed follows.
         runCatching {
             conn.send(buildJsonObject {
@@ -378,8 +380,13 @@ object RemoteServer : ChatListener {
     /** A failed pairing attempt: the address waits longer before its next one. */
     private fun failPairing(conn: WebSocket, code: Int, reason: String) {
         backoff.failed(conn.peerAddress)
+        // The claimed device id waits too: until then it pairs in the ordinary slots.
+        conn.client?.claimedId?.let { backoff.failed(claimKey(it)) }
         reject(conn, code, reason)
     }
+
+    /** Backoff key for a claimed device id (addresses can't contain '#'). */
+    private fun claimKey(id: String) = "device#$id"
 
     private fun reject(conn: WebSocket, code: Int, reason: String) {
         Log.w(TAG, "Rejected ${conn.remoteSocketAddress}: $reason")
@@ -460,7 +467,9 @@ object RemoteServer : ChatListener {
 
         override fun onOpen(conn: WebSocket, handshake: ClientHandshake) {
             val remote = conn.peerAddress
-            if (!RemoteProtocol.isAllowedPeer(remote, if (allowLan) localSubnets() else emptyList())) {
+            val local = runCatching { conn.localSocketAddress?.address?.hostAddress }.getOrNull()
+            val viaTailscale = local != null && local in tailscaleAddresses(appContext)
+            if (!RemoteProtocol.isAllowedPeer(remote, if (allowLan) localSubnets() else emptyList(), viaTailscale)) {
                 Log.w(TAG, "Refused connection from $remote (not Tailscale or this phone's local network)")
                 conn.close(CLOSE_POLICY, "Not allowed from this network")
                 return
@@ -472,8 +481,10 @@ object RemoteServer : ChatListener {
             }
             // A connection naming a trusted device pairs in its own slots (it must still prove the secret).
             val claimed = runCatching { handshake.getFieldValue(RemoteProtocol.DEVICE_HEADER) }.getOrNull().orEmpty()
-            val claimsTrusted = claimed.isNotEmpty() && trusted.any { it.id == claimed }
             val pending = connections.filter { it !== conn && it.getAttachment<Client>()?.authed != true }
+            val claimsTrusted = RemoteProtocol.getsTrustedSlot(
+                claimed, trusted.map { it.id }, pending.map { it.getAttachment<Client>()?.claimedId }, backoff.isBlocked(claimKey(claimed)),
+            )
             // One not yet set up (no attachment) counts as unknown.
             val samePool = pending.count { (it.getAttachment<Client>()?.claimsTrusted ?: false) == claimsTrusted }
             if (samePool >= (if (claimsTrusted) MAX_TRUSTED_PENDING else MAX_UNPAIRED) || pending.any { it.peerAddress == remote }) {
@@ -481,7 +492,7 @@ object RemoteServer : ChatListener {
                 conn.close(CLOSE_POLICY, "Busy: try again in a moment")
                 return
             }
-            val client = Client().also { it.claimsTrusted = claimsTrusted }
+            val client = Client().also { if (claimsTrusted) it.claimedId = claimed }
             conn.setAttachment(client)
             runCatching {
                 conn.send(buildJsonObject {
@@ -553,14 +564,15 @@ object RemoteServer : ChatListener {
     private class Guarded(adapter: org.java_websocket.WebSocketAdapter, drafts: List<org.java_websocket.drafts.Draft>) :
         org.java_websocket.WebSocketImpl(adapter, drafts) {
         private val guard = UnpairedFrameGuard(MAX_UNPAIRED_FRAME)
+        private val handshake = HandshakeEnd()
 
         override fun decode(socketBuffer: ByteBuffer) {
             val unpaired = getAttachment<Client>()?.authed != true
             val frames: ByteBuffer? = when {
                 !unpaired -> null
                 readyState == org.java_websocket.enums.ReadyState.OPEN -> socketBuffer.duplicate()
-                // Still the HTTP handshake: frames sent in the same packet start after its blank line.
-                else -> socketBuffer.duplicate().also { b -> afterHeaders(b)?.let { b.position(it) } ?: b.position(b.limit()) }
+                // Still the HTTP handshake (possibly over several reads): frames start after its blank line.
+                else -> handshake.after(socketBuffer)
             }
             if (frames != null && !guard.accept(frames)) {
                 Log.w(TAG, "Dropping $remoteSocketAddress: oversized frame before pairing")
@@ -569,14 +581,6 @@ object RemoteServer : ChatListener {
                 return
             }
             super.decode(socketBuffer)
-        }
-
-        /** Where the bytes after an HTTP header block (ending in a blank line) begin, or null. */
-        private fun afterHeaders(b: ByteBuffer): Int? {
-            for (i in b.position() until b.limit() - 3) {
-                if (b.get(i) == '\r'.code.toByte() && b.get(i + 1) == '\n'.code.toByte() && b.get(i + 2) == '\r'.code.toByte() && b.get(i + 3) == '\n'.code.toByte()) return i + 4
-            }
-            return null
         }
     }
 

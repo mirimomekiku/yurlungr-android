@@ -37,6 +37,43 @@ class RemoteHardeningTest {
         assertFalse(g.accept(ByteBuffer.wrap(big.copyOfRange(3, big.size))))
     }
 
+    /** Feeds [reads] the way Guarded.decode does during the handshake; false once a frame is refused. */
+    private fun handshakeThenFrames(vararg reads: ByteArray): Boolean {
+        val end = HandshakeEnd()
+        val g = UnpairedFrameGuard(64 * 1024)
+        return reads.all { r ->
+            val buf = ByteBuffer.wrap(r)
+            val frames = end.after(buf)
+            assertEquals("the read itself isn't moved", 0, buf.position())
+            frames == null || g.accept(frames)
+        }
+    }
+
+    private val request = "GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n\r\n".toByteArray()
+
+    @Test fun `frames after the handshake are checked even when its blank line is split across reads`() {
+        val big = frame(64L * 1024 * 1024)
+        // In the same read as the handshake.
+        assertFalse(handshakeThenFrames(request + big))
+        // The blank line split at every point, the frame header right after it.
+        for (cut in request.size - 4..request.size) {
+            assertFalse("cut at $cut", handshakeThenFrames(request.copyOfRange(0, cut), request.copyOfRange(cut, request.size) + big))
+        }
+        // Byte by byte.
+        assertFalse(handshakeThenFrames(*(request + big).map { byteArrayOf(it) }.toTypedArray()))
+        // Small frames still pass, and a handshake that hasn't ended checks nothing yet.
+        assertTrue(handshakeThenFrames(request.copyOfRange(0, 20), request.copyOfRange(20, request.size - 1), byteArrayOf('\n'.code.toByte()) + frame(10) + ByteArray(10)))
+        assertTrue(handshakeThenFrames("GET / HTTP/1.1\r\nHost: x\r\n\r".toByteArray()))
+    }
+
+    @Test fun `the handshake end matches overlapping carriage returns`() {
+        val end = HandshakeEnd()
+        assertEquals(null, end.after(ByteBuffer.wrap("a\r\n\r\r".toByteArray())))
+        val rest = end.after(ByteBuffer.wrap("\n\r\nXY".toByteArray()))!!
+        assertEquals(3, rest.position())
+        assertTrue(end.done)
+    }
+
     @Test fun `trusted devices round trip and bad input is ignored`() {
         val list = listOf(TrustedDevice("a1", "Pixel", "ab".repeat(32), 1L, 2L))
         assertEquals(list, RemoteTrust.decode(RemoteTrust.encode(list)))

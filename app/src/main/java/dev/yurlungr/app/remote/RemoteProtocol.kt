@@ -81,16 +81,28 @@ object RemoteProtocol {
     private val PRIVATE = listOf(Subnet(ipv4("10.0.0.0")!!, 8), Subnet(ipv4("172.16.0.0")!!, 12), Subnet(ipv4("192.168.0.0")!!, 16))
 
     /**
-     * Tailscale's 100.64.0.0/10 always; otherwise only a private address on one of [localSubnets]
-     * (this phone's own Wi-Fi / hotspot / Ethernet subnets, see [lanSubnets]; empty unless local
-     * Wi-Fi is allowed). Not a whole private range: a carrier or VPN that hands out 10.x
-     * addresses must not reach the server.
+     * Tailscale's 100.64.0.0/10 when the connection arrived on this phone's Tailscale address
+     * ([viaTailscale]): carriers use the same range for carrier-grade NAT, and with local Wi-Fi
+     * allowed the server listens on every interface, cellular included. Otherwise only a private
+     * address on one of [localSubnets] (this phone's own Wi-Fi / hotspot / Ethernet subnets, see
+     * [lanSubnets]; empty unless local Wi-Fi is allowed). Not a whole private range: a carrier or
+     * VPN that hands out 10.x addresses must not reach the server.
      */
-    fun isAllowedPeer(address: String?, localSubnets: List<Subnet>): Boolean {
+    fun isAllowedPeer(address: String?, localSubnets: List<Subnet>, viaTailscale: Boolean): Boolean {
         val ip = ipv4(address) ?: return false
-        if (ip in TAILSCALE) return true
+        if (ip in TAILSCALE) return viaTailscale
         return PRIVATE.any { ip in it } && localSubnets.any { ip in it }
     }
+
+    /**
+     * Whether a connection naming device [claimed] (handshake header [DEVICE_HEADER]) gets one of
+     * the slots kept for trusted devices: it must be a [trusted] id, not in backoff after failed
+     * or timed-out attempts ([blocked]), and not already pending on another connection ([pending]),
+     * so replaying a known id from several addresses can't fill those slots. Otherwise it pairs
+     * in the ordinary slots.
+     */
+    fun getsTrustedSlot(claimed: String?, trusted: Collection<String>, pending: Collection<String?>, blocked: Boolean): Boolean =
+        !claimed.isNullOrEmpty() && claimed in trusted && claimed !in pending && !blocked
 
     /** An interface name that looks cellular, VPN or virtual: never a local Wi-Fi subnet. */
     private val NOT_LAN = Regex("^(rmnet|ccmni|ccemni|pdp|wwan|ppp|tun|tap|ipsec|wg|clat|v4-|dummy|lo|ifb|sit|ip6|gre|r_rmnet|seth|epdg|qmi|usb_rmnet).*", RegexOption.IGNORE_CASE)

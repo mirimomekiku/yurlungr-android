@@ -53,3 +53,36 @@ class UnpairedFrameGuard(private val maxPayload: Long) {
         else -> len7.toLong()
     }
 }
+
+/**
+ * Finds the end of the HTTP handshake (its blank line) in a connection's reads, so every byte
+ * after it can go through [UnpairedFrameGuard]. The blank line may be split across reads.
+ */
+class HandshakeEnd {
+    /** Bytes of "\r\n\r\n" matched so far, carried across reads. */
+    private var matched = 0
+    var done = false
+        private set
+
+    /** The bytes of [bytes] after the handshake (a duplicate; [bytes] isn't moved), or null if it hasn't ended yet. */
+    fun after(bytes: ByteBuffer): ByteBuffer? {
+        if (done) return bytes.duplicate()
+        for (i in bytes.position() until bytes.limit()) {
+            val b = bytes.get(i)
+            matched = when {
+                b == MARKER[matched] -> matched + 1
+                b == MARKER[0] -> 1
+                else -> 0
+            }
+            if (matched == MARKER.size) {
+                done = true
+                return bytes.duplicate().also { it.position(i + 1) }
+            }
+        }
+        return null
+    }
+
+    private companion object {
+        val MARKER = "\r\n\r\n".toByteArray()
+    }
+}

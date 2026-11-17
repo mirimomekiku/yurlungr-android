@@ -84,22 +84,44 @@ class RemotePairingTest {
 
     @Test fun `peers are limited to Tailscale and, if allowed, this phone's own local subnets`() {
         val none = emptyList<RemoteProtocol.Subnet>()
-        assertTrue(RemoteProtocol.isAllowedPeer("100.101.1.2", none))
-        assertFalse(RemoteProtocol.isAllowedPeer("192.168.1.5", none))
-        assertFalse(RemoteProtocol.isAllowedPeer("10.0.0.3", none))
+        assertTrue(RemoteProtocol.isAllowedPeer("100.101.1.2", none, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("192.168.1.5", none, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("10.0.0.3", none, true))
 
         val wifi = RemoteProtocol.lanSubnets(listOf("wlan0" to listOf("192.168.1.20" to 24)))
-        assertTrue(RemoteProtocol.isAllowedPeer("192.168.1.5", wifi))
-        assertTrue(RemoteProtocol.isAllowedPeer("100.101.1.2", wifi))
-        assertFalse(RemoteProtocol.isAllowedPeer("192.168.2.5", wifi))
+        assertTrue(RemoteProtocol.isAllowedPeer("192.168.1.5", wifi, true))
+        assertTrue(RemoteProtocol.isAllowedPeer("100.101.1.2", wifi, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("192.168.2.5", wifi, true))
         // Other private ranges aren't trusted just for being private.
-        assertFalse(RemoteProtocol.isAllowedPeer("10.0.0.3", wifi))
-        assertFalse(RemoteProtocol.isAllowedPeer("172.20.0.3", wifi))
-        assertFalse(RemoteProtocol.isAllowedPeer("8.8.8.8", wifi))
-        assertFalse(RemoteProtocol.isAllowedPeer("100.128.0.1", wifi))
-        assertFalse(RemoteProtocol.isAllowedPeer("fe80::1", wifi))
-        assertFalse(RemoteProtocol.isAllowedPeer(null, wifi))
-        assertFalse(RemoteProtocol.isAllowedPeer("192.168.1.256", wifi))
+        assertFalse(RemoteProtocol.isAllowedPeer("10.0.0.3", wifi, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("172.20.0.3", wifi, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("8.8.8.8", wifi, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("100.128.0.1", wifi, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("fe80::1", wifi, true))
+        assertFalse(RemoteProtocol.isAllowedPeer(null, wifi, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("192.168.1.256", wifi, true))
+    }
+
+    @Test fun `the Tailscale range counts only on this phone's Tailscale address`() {
+        val wifi = RemoteProtocol.lanSubnets(listOf("wlan0" to listOf("192.168.1.20" to 24)))
+        // Carrier-grade NAT on cellular uses 100.64.0.0/10 too, and with local Wi-Fi on the server listens there.
+        assertFalse(RemoteProtocol.isAllowedPeer("100.101.1.2", wifi, false))
+        assertFalse(RemoteProtocol.isAllowedPeer("100.64.0.1", emptyList(), false))
+        assertTrue(RemoteProtocol.isAllowedPeer("100.64.0.1", emptyList(), true))
+        assertTrue(RemoteProtocol.isAllowedPeer("192.168.1.5", wifi, false))
+        // A LAN peer is judged by its subnet, whichever local address it reached.
+        assertFalse(RemoteProtocol.isAllowedPeer("10.0.0.3", wifi, true))
+    }
+
+    @Test fun `a claimed device id gets a trusted slot once, and not while backing off`() {
+        val trusted = listOf("dev-a", "dev-b")
+        assertTrue(RemoteProtocol.getsTrustedSlot("dev-a", trusted, listOf(null, "dev-b"), blocked = false))
+        // Replaying the same id from another address: the second pends in the ordinary slots.
+        assertFalse(RemoteProtocol.getsTrustedSlot("dev-a", trusted, listOf("dev-a"), blocked = false))
+        assertFalse(RemoteProtocol.getsTrustedSlot("dev-a", trusted, emptyList(), blocked = true))
+        assertFalse(RemoteProtocol.getsTrustedSlot("dev-x", trusted, emptyList(), blocked = false))
+        assertFalse(RemoteProtocol.getsTrustedSlot("", trusted, emptyList(), blocked = false))
+        assertFalse(RemoteProtocol.getsTrustedSlot(null, trusted, emptyList(), blocked = false))
     }
 
     @Test fun `local subnets leave out cellular, VPN and public interfaces`() {
@@ -114,15 +136,15 @@ class RemotePairingTest {
             // A /8 on Wi-Fi is narrowed to the phone's /16.
             "swlan0" to listOf("172.16.5.1" to 8),
         ))
-        assertTrue(RemoteProtocol.isAllowedPeer("10.1.2.99", subnets))
-        assertFalse(RemoteProtocol.isAllowedPeer("10.1.3.99", subnets))
-        assertFalse(RemoteProtocol.isAllowedPeer("10.200.0.8", subnets))
-        assertFalse(RemoteProtocol.isAllowedPeer("10.64.1.2", subnets))
-        assertFalse(RemoteProtocol.isAllowedPeer("10.8.0.3", subnets))
-        assertTrue(RemoteProtocol.isAllowedPeer("192.168.43.50", subnets))
-        assertFalse(RemoteProtocol.isAllowedPeer("203.0.113.6", subnets))
-        assertTrue(RemoteProtocol.isAllowedPeer("172.16.200.1", subnets))
-        assertFalse(RemoteProtocol.isAllowedPeer("172.17.0.1", subnets))
+        assertTrue(RemoteProtocol.isAllowedPeer("10.1.2.99", subnets, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("10.1.3.99", subnets, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("10.200.0.8", subnets, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("10.64.1.2", subnets, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("10.8.0.3", subnets, true))
+        assertTrue(RemoteProtocol.isAllowedPeer("192.168.43.50", subnets, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("203.0.113.6", subnets, true))
+        assertTrue(RemoteProtocol.isAllowedPeer("172.16.200.1", subnets, true))
+        assertFalse(RemoteProtocol.isAllowedPeer("172.17.0.1", subnets, true))
     }
 
     @Test fun `remote config toggles that turn approvals off are recognised`() {
