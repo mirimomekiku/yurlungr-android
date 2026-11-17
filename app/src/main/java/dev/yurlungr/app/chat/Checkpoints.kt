@@ -7,6 +7,10 @@ import dev.yurlungr.app.runtime.CommandResult
 import dev.yurlungr.app.runtime.CommandRunner
 import dev.yurlungr.app.runtime.RuntimePaths
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -20,6 +24,7 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 
 /** One prompt and what it changed: snapshots of the project before and after. */
 data class ChatTurn(
@@ -54,15 +59,37 @@ object Checkpoints {
         return File(root(context), "repo-$hash.git")
     }
 
-    fun turns(context: Context, chatId: String): List<ChatTurn> = runCatching {
-        (Json.parseToJsonElement(turnsFile(context, chatId).readText()) as JsonArray).map { e ->
-            val o = e as JsonObject
-            fun s(k: String) = o[k]?.jsonPrimitive?.contentOrNull
-            fun l(k: String) = o[k]?.jsonPrimitive?.longOrNull
-            ChatTurn(o["index"]!!.jsonPrimitive.intOrNull ?: 0, s("prompt").orEmpty(), l("startedAt") ?: 0, l("endedAt"),
-                s("before"), s("after"), o["filesChanged"]?.jsonPrimitive?.intOrNull, s("restore") == "true")
+    fun turns(context: Context, chatId: String): List<ChatTurn> =
+        runCatching { parseTurns(turnsFile(context, chatId).readText()) }.getOrNull().orEmpty()
+
+    /**
+     * The turns to add to or update. A file that exists but can't be read as a whole is moved
+     * aside to `.bad` first, so the next save doesn't replace the history with one turn.
+     */
+    internal fun turnsForUpdate(f: File): List<ChatTurn> {
+        if (!f.exists()) return emptyList()
+        runCatching { parseTurns(f.readText()) }.getOrNull()?.let { return it }
+        val bad = File(f.path + ".bad")
+        bad.delete()
+        if (!f.renameTo(bad)) runCatching { f.copyTo(bad, overwrite = true) }
+        return emptyList()
+    }
+
+    private fun turnsForUpdate(context: Context, chatId: String) = turnsForUpdate(turnsFile(context, chatId))
+
+    /** A turns file's entries (malformed ones skipped), or null if it isn't a JSON array at all. */
+    internal fun parseTurns(text: String): List<ChatTurn>? {
+        val array = runCatching { Json.parseToJsonElement(text) }.getOrNull() as? JsonArray ?: return null
+        return array.mapNotNull { e ->
+            val o = e as? JsonObject ?: return@mapNotNull null
+            fun p(k: String) = o[k] as? JsonPrimitive
+            fun s(k: String) = p(k)?.contentOrNull
+            fun l(k: String) = p(k)?.longOrNull
+            val index = p("index")?.intOrNull ?: return@mapNotNull null
+            ChatTurn(index, s("prompt").orEmpty(), l("startedAt") ?: 0, l("endedAt"),
+                s("before"), s("after"), p("filesChanged")?.intOrNull, s("restore") == "true")
         }
-    }.getOrDefault(emptyList())
+    }
 
     private fun encode(turns: List<ChatTurn>): String = JsonArray(turns.map { t ->
         buildJsonObject {
@@ -82,15 +109,29 @@ object Checkpoints {
     }
 
     /** Restores run here, not in a sheet's scope: closing the sheet mustn't stop one halfway. */
-    val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Main.immediate)
+    val scope by lazy { kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Main.immediate) }
 
-    /** A restore is running (one at a time). */
+    /** A restore is running (one at a time). For the UI; [restoreBusy] is what decides. */
     var restoring by androidx.compose.runtime.mutableStateOf(false)
         private set
+    private val restoreBusy = MutableStateFlow(false)
+
+    /** Returns once no restore is running: a prompt mustn't reach the agent while files are being put back. */
+    suspend fun awaitRestore() {
+        restoreBusy.first { !it }
+    }
+
+    /**
+     * One lock per shadow repository: another chat's snapshot (write-tree, commit-tree, then
+     * update-ref) mustn't interleave with a restore, or with a delete's ref removal and gc.
+     */
+    private val repoLocks = ConcurrentHashMap<String, Mutex>()
+    private fun lockFor(repo: File): Mutex = repoLocks.computeIfAbsent(repo.path) { Mutex() }
 
     /**
      * Forgets a chat's checkpoints: its turns, its index, and its snapshots in every project's
-     * shadow repository (then unreferenced objects are pruned), so storage doesn't only grow.
+     * shadow repository (then gc drops unreferenced objects once past git's grace period), so
+     * storage doesn't only grow.
      */
     suspend fun delete(context: Context, chatId: String) = withContext(Dispatchers.IO) {
         turnsFile(context, chatId).delete()
@@ -101,8 +142,11 @@ object Checkpoints {
             val refs = CommandRunner.run(paths, listOf(git.path, "--git-dir=${repo.path}", "for-each-ref", "--format=%(refname)", "refs/chats/$chatId/"),
                 forParsing = true, timeoutMs = 30_000).output.lines().filter { it.startsWith("refs/chats/") }
             if (refs.isEmpty()) continue
-            for (ref in refs) CommandRunner.run(paths, listOf(git.path, "--git-dir=${repo.path}", "update-ref", "-d", ref), timeoutMs = 30_000)
-            CommandRunner.run(paths, listOf(git.path, "--git-dir=${repo.path}", "gc", "--prune=now", "--quiet"), timeoutMs = 300_000)
+            lockFor(repo).withLock {
+                for (ref in refs) CommandRunner.run(paths, listOf(git.path, "--git-dir=${repo.path}", "update-ref", "-d", ref), timeoutMs = 30_000)
+                // Not --prune=now: objects another chat has written but not yet referenced must survive.
+                CommandRunner.run(paths, listOf(git.path, "--git-dir=${repo.path}", "gc", "--quiet"), timeoutMs = 300_000)
+            }
         }
     }
 
@@ -111,7 +155,7 @@ object Checkpoints {
      * "running" and offer "Restore to before", the undo most wanted after a crash.
      */
     fun closeInterrupted(context: Context, chatId: String) {
-        val turns = turns(context, chatId)
+        val turns = turnsForUpdate(context, chatId)
         if (turns.none { it.endedAt == null }) return
         save(context, chatId, turns.map { if (it.endedAt == null) it.copy(endedAt = it.startedAt) else it })
     }
@@ -134,7 +178,11 @@ object Checkpoints {
     }
 
     /** A commit of the project's files right now (into the shadow repository), or null. */
-    suspend fun snapshot(context: Context, chatId: String, cwd: File, label: String): String? = withContext(Dispatchers.IO) {
+    suspend fun snapshot(context: Context, chatId: String, cwd: File, label: String): String? =
+        lockFor(gitDir(context, cwd)).withLock { snapshotLocked(context, chatId, cwd, label) }
+
+    /** [snapshot], for a caller already holding the repository's lock. */
+    private suspend fun snapshotLocked(context: Context, chatId: String, cwd: File, label: String): String? = withContext(Dispatchers.IO) {
         val paths = RuntimePaths(context)
         if (!enabledFor(paths, cwd) || !File(paths.bin, "git").canExecute()) return@withContext null
         val dir = gitDir(context, cwd)
@@ -156,7 +204,7 @@ object Checkpoints {
     /** Starts a turn: its snapshot before the agent works. */
     suspend fun begin(context: Context, chatId: String, cwd: File, prompt: String): ChatTurn {
         val before = snapshot(context, chatId, cwd, "before: ${prompt.take(60)}")
-        val turns = turns(context, chatId)
+        val turns = withContext(Dispatchers.IO) { turnsForUpdate(context, chatId) }
         val turn = ChatTurn(turns.size + 1, prompt.take(200), System.currentTimeMillis(), before = before)
         save(context, chatId, turns + turn)
         return turn
@@ -167,7 +215,7 @@ object Checkpoints {
         val after = snapshot(context, chatId, cwd, "after: ${turn.prompt.take(60)}")
         val changed = if (turn.before != null && after != null) changedFiles(context, chatId, cwd, turn.before, after).size else null
         val done = turn.copy(endedAt = System.currentTimeMillis(), after = after, filesChanged = changed)
-        save(context, chatId, turns(context, chatId).map { if (it.index == turn.index && it.startedAt == turn.startedAt) done else it })
+        save(context, chatId, turnsForUpdate(context, chatId).map { if (it.index == turn.index && it.startedAt == turn.startedAt) done else it })
     }
 
     suspend fun changedFiles(context: Context, chatId: String, cwd: File, from: String, to: String): List<String> =
@@ -199,32 +247,38 @@ object Checkpoints {
      * Puts the project's files back as they were at [target]: changed and deleted files are
      * restored, files added since are removed. A snapshot is taken first, so this can be undone.
      */
-    suspend fun restore(context: Context, chatId: String, cwd: File, target: String, label: String = "Restored"): Result<String> = withContext(Dispatchers.IO) {
-        if (restoring) return@withContext Result.failure(IllegalStateException("Another restore is running"))
-        withContext(Dispatchers.Main) { restoring = true }
+    suspend fun restore(context: Context, chatId: String, cwd: File, target: String, label: String = "Restored"): Result<String> {
+        // Claimed before any work (and before leaving the caller's thread): two restores can't both start.
+        if (!restoreBusy.compareAndSet(false, true)) return Result.failure(IllegalStateException("Another restore is running"))
         try {
-            val now = snapshot(context, chatId, cwd, "before restoring ${target.take(7)}")
-                ?: return@withContext Result.failure(IllegalStateException("Couldn't take a safety snapshot first"))
-            val status = parseNameStatusZ(git(context, chatId, cwd, "diff", "-z", "--name-status", "--no-renames", target, now).output)
-            val added = status.filter { it.first == 'A' }.map { it.second }
-            val restoreList = status.filter { it.first != 'A' }.map { it.second }
-            for (path in added) File(cwd, path).takeIf { it.canonicalPath.startsWith(cwd.canonicalPath + File.separator) }?.delete()
-            if (restoreList.isNotEmpty()) {
-                // Paths through a file, NUL-separated: no argument-length limit, any characters.
-                val list = File(root(context), "$chatId.restore").apply { writeText(restoreList.joinToString("\u0000")) }
-                val r = try {
-                    git(context, chatId, cwd, "checkout", target, "--pathspec-from-file=${list.path}", "--pathspec-file-nul")
-                } finally { list.delete() }
-                if (!r.ok) return@withContext Result.failure(IllegalStateException(r.errorOutput.ifBlank { r.output }.lines().firstOrNull { it.isNotBlank() } ?: "git checkout failed"))
-            }
-            // Recorded like a turn whose "before" is the state just replaced: restoring that undoes this.
-            val turns = turns(context, chatId)
-            val at = System.currentTimeMillis()
-            save(context, chatId, turns + ChatTurn(turns.size + 1, label, at, at, before = now, after = target, filesChanged = status.size, restore = true))
-            Result.success(now)
+            withContext(Dispatchers.Main) { restoring = true }
+            return lockFor(gitDir(context, cwd)).withLock { withContext(Dispatchers.IO) { restoreLocked(context, chatId, cwd, target, label) } }
         } finally {
             withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) { restoring = false }
+            restoreBusy.value = false
         }
+    }
+
+    private suspend fun restoreLocked(context: Context, chatId: String, cwd: File, target: String, label: String): Result<String> {
+        val now = snapshotLocked(context, chatId, cwd, "before restoring ${target.take(7)}")
+            ?: return Result.failure(IllegalStateException("Couldn't take a safety snapshot first"))
+        val status = parseNameStatusZ(git(context, chatId, cwd, "diff", "-z", "--name-status", "--no-renames", target, now).output)
+        val added = status.filter { it.first == 'A' }.map { it.second }
+        val restoreList = status.filter { it.first != 'A' }.map { it.second }
+        for (path in added) File(cwd, path).takeIf { it.canonicalPath.startsWith(cwd.canonicalPath + File.separator) }?.delete()
+        if (restoreList.isNotEmpty()) {
+            // Paths through a file, NUL-separated: no argument-length limit, any characters.
+            val list = File(root(context), "$chatId.restore").apply { writeText(restoreList.joinToString("\u0000")) }
+            val r = try {
+                git(context, chatId, cwd, "checkout", target, "--pathspec-from-file=${list.path}", "--pathspec-file-nul")
+            } finally { list.delete() }
+            if (!r.ok) return Result.failure(IllegalStateException(r.errorOutput.ifBlank { r.output }.lines().firstOrNull { it.isNotBlank() } ?: "git checkout failed"))
+        }
+        // Recorded like a turn whose "before" is the state just replaced: restoring that undoes this.
+        val turns = turnsForUpdate(context, chatId)
+        val at = System.currentTimeMillis()
+        save(context, chatId, turns + ChatTurn(turns.size + 1, label, at, at, before = now, after = target, filesChanged = status.size, restore = true))
+        return Result.success(now)
     }
 
     /** Turns, time and the agent's last reported usage, for one chat. */

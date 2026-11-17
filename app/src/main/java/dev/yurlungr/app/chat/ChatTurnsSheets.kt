@@ -103,8 +103,13 @@ fun CheckpointsSheet(chat: ChatSession, onDismiss: () -> Unit) {
                 Button(
                     onClick = {
                         restoring = null
-                        // In the app's scope: closing this sheet mustn't stop a restore halfway.
                         val app = context.applicationContext
+                        // Checked again now: the agent may have started a turn while this sheet was open.
+                        if (chat.state == ChatState.Running) {
+                            Toast.makeText(app, "${chat.agent.displayName} is working. Stop it first, then restore.", Toast.LENGTH_LONG).show()
+                            return@Button
+                        }
+                        // In the app's scope: closing this sheet mustn't stop a restore halfway.
                         Checkpoints.scope.launch {
                             val r = Checkpoints.restore(app, chat.id, chat.cwd, t.before!!, label = if (t.restore) "Undid restore ${t.index}" else "Restored to before turn ${t.index}")
                             Toast.makeText(app, r.fold({ "Files restored. To undo, use “Undo this restore” in Checkpoints." }, { "Couldn't restore: ${it.message}" }), Toast.LENGTH_LONG).show()
