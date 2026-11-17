@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Lets the package installer read APKs built inside the runtime (granted per install). Only the
-     staging folder RuntimeBridge copies them into is shared, never the rest of files/. -->
+<!-- Only staging folders are shared, never the rest of files/: APKs RuntimeBridge copies in for the
+     package installer, and copies of files the user chose to Share (granted per share). -->
 <paths>
     <files-path name="apk" path="apk-out/" />
+    <files-path name="share" path="share-out/" />
 </paths>

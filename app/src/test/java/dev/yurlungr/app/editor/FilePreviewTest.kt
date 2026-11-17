@@ -36,4 +36,18 @@ class FilePreviewTest {
         assertTrue(pretty.contains("\"a\": ["))
         assertNull(FilePreview.prettyJson("{not json"))
     }
+
+    @Test fun `sharing stages a copy with a safe name and clears old copies`() {
+        val tmp = java.nio.file.Files.createTempDirectory("share").toFile()
+        try {
+            val src = java.io.File(tmp, "re port\$(x).csv").apply { writeText("a,b") }
+            val out = java.io.File(tmp, "share-out")
+            val old = java.io.File(out, "1").apply { mkdirs(); java.io.File(this, "old.txt").writeText("x"); setLastModified(0) }
+            val copy = FilePreview.stage(src, out, 10L * 60 * 60_000)
+            assertEquals("a,b", copy.readText())
+            assertEquals("re port__x_.csv", copy.name)
+            assertTrue(copy.canonicalPath.startsWith(out.canonicalPath))
+            assertTrue("stale copy removed", !old.exists())
+        } finally { tmp.deleteRecursively() }
+    }
 }

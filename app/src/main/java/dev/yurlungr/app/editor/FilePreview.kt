@@ -29,7 +29,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -57,11 +56,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
-import dev.yurlungr.app.runtime.RuntimePaths
 import dev.yurlungr.app.ui.Ph
 import dev.yurlungr.app.ui.PhIcon
 import dev.yurlungr.app.ui.ScreenHeader
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -120,22 +119,44 @@ object FilePreview {
 
     internal fun limits() = MAX_ROWS to MAX_COLUMNS
 
-    /** Hands [file] to another app. Only files inside the app's own storage can be shared (through FileProvider). */
+    /** Folder under files/ that FileProvider shares (res/xml/file_paths.xml): copies of shared files only. */
+    const val SHARE_OUT = "share-out"
+    private const val MAX_SHARE_BYTES = 200L * 1024 * 1024
+    private const val SHARED_TTL_MS = 60 * 60_000L
+
+    /**
+     * Hands a copy of [file] to another app. Only [SHARE_OUT] is exposed through FileProvider, so the
+     * rest of the app's storage (settings, agent credentials) never gets a URI.
+     */
     fun share(context: Context, file: File) {
-        val root = RuntimePaths(context).filesDir.canonicalPath + File.separator
-        val canonical = runCatching { file.canonicalPath }.getOrNull()
-        if (canonical == null || !canonical.startsWith(root)) {
-            Toast.makeText(context, "This file can't be shared from here", Toast.LENGTH_LONG).show()
-            return
-        }
-        // FileProvider resolves against Context.getFilesDir() (/data/user/0/...), not /data/data/.
-        val shareable = File(context.filesDir, canonical.removePrefix(root))
+        val app = context.applicationContext
         val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension.lowercase()) ?: "application/octet-stream"
-        runCatching {
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", shareable)
-            val send = Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            context.startActivity(Intent.createChooser(send, "Share ${file.name}").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        }.onFailure { Toast.makeText(context, "Couldn't share: ${it.message}", Toast.LENGTH_LONG).show() }
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) {
+            val staged = withContext(Dispatchers.IO) {
+                runCatching {
+                    check(file.isFile) { "${file.name} is no longer on disk" }
+                    check(file.length() <= MAX_SHARE_BYTES) { "${file.name} is too large to share from here" }
+                    stage(file, File(app.filesDir, SHARE_OUT), System.currentTimeMillis())
+                }
+            }
+            staged.mapCatching { copy ->
+                val uri = FileProvider.getUriForFile(app, "${app.packageName}.files", copy)
+                val send = Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                context.startActivity(Intent.createChooser(send, "Share ${file.name}").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }.onFailure { Toast.makeText(app, "Couldn't share: ${it.message}", Toast.LENGTH_LONG).show() }
+        }
+    }
+
+    /** Copies [source] into its own folder under [outDir] (keeping its name for the receiving app), dropping stale copies first. */
+    internal fun stage(source: File, outDir: File, now: Long): File {
+        outDir.mkdirs()
+        outDir.listFiles()?.filter { now - it.lastModified() > SHARED_TTL_MS }?.forEach { it.deleteRecursively() }
+        val dir = File(outDir, now.toString()).apply { mkdirs() }
+        val name = source.name.replace(Regex("[^A-Za-z0-9._ -]"), "_").trim('.', ' ').take(120).ifEmpty { "file" }
+        val dest = File(dir, name)
+        source.inputStream().use { input -> dest.outputStream().use { input.copyTo(it, 64 * 1024) } }
+        return dest
     }
 
     fun copyPath(context: Context, file: File) {
@@ -294,18 +315,18 @@ private fun TableView(file: File) {
 
 @Composable
 private fun JsonView(file: File) {
-    val text by produceState<String?>(null, file) {
-        value = withContext(Dispatchers.IO) { FilePreview.readCapped(file)?.let { FilePreview.prettyJson(it) ?: it } }
+    // Split into lines for a lazy list: a few MB of formatted JSON as one Text would freeze the screen while it lays out.
+    val lines by produceState<List<String>?>(null, file) {
+        value = withContext(Dispatchers.IO) { FilePreview.readCapped(file)?.let { (FilePreview.prettyJson(it) ?: it).lines() } }
     }
-    val body = text
+    val body = lines
     if (body == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Too large to preview. Open it in the editor.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         return
     }
     SelectionContainer {
-        Text(
-            body, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
-            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState()).padding(12.dp),
-        )
+        LazyColumn(Modifier.fillMaxSize().horizontalScroll(rememberScrollState()), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)) {
+            items(body.size) { i -> Text(body[i], fontFamily = FontFamily.Monospace, fontSize = 12.sp, softWrap = false) }
+        }
     }
 }
