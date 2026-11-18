@@ -27,7 +27,9 @@ import java.io.File
  * Restart, Stop and the run options.
  */
 @Composable
-internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)? = null, onPreview: ((String, String) -> Unit)? = null) {
+internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)? = null, onPreview: ((String, String) -> Unit)? = null,
+    /** Opens the API tester aimed at this server's port. */
+    onApiTester: ((Int) -> Unit)? = null) {
     val context = LocalContext.current
     val run = WebRunSessions.get(root) ?: return
     var confirmation by remember(run.id) { mutableStateOf<String?>(null) }
@@ -81,6 +83,11 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
                         text = { Text(if (TunnelSessions.get(run.config.port)?.active == true) "Public link (on)" else "Share public link") },
                         leadingIcon = { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Globe, null, size = 18.dp) },
                         onClick = { menu = false; sharing = true })
+                    if (run.state == WebRunState.Running) onApiTester?.let { open ->
+                        DropdownMenuItem(text = { Text("Test API") },
+                            leadingIcon = { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.Lightning, null, size = 18.dp) },
+                            onClick = { menu = false; open(run.config.port) })
+                    }
                     DropdownMenuItem(text = { Text("Restart") }, enabled = run.state != WebRunState.Stopping,
                         leadingIcon = { dev.yurlungr.app.ui.PhIcon(dev.yurlungr.app.ui.Ph.ArrowClockwise, null, size = 18.dp) },
                         onClick = { menu = false; confirmation = "Restart" })
@@ -116,6 +123,10 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
                     android.widget.Toast.makeText(context, "Address copied", android.widget.Toast.LENGTH_SHORT).show()
                 } else Modifier),
         )
+        if (run.notice.isNotBlank() && run.state.active) {
+            Text(run.notice, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                modifier = Modifier.padding(start = 66.dp, end = 14.dp, top = 2.dp))
+        }
         if (busy) {
             LinearProgressIndicator(
                 Modifier.fillMaxWidth().padding(start = 66.dp, end = 14.dp, top = 8.dp).height(3.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(2.dp)),
@@ -217,6 +228,8 @@ internal fun WebRunSheet(
     var advanced by remember(selectedPath) { mutableStateOf(false) }
     var install by remember(selectedPath) { mutableStateOf(!project.dependenciesPresent) }
     var openBrowser by remember(selectedPath) { mutableStateOf(stored?.get("openBrowser")?.jsonPrimitive?.booleanOrNull ?: true) }
+    // Null until the switch is touched: then it follows the launch command (see RestartRule).
+    var restartOnChange by remember(selectedPath) { mutableStateOf(stored?.get("restartOnChange")?.jsonPrimitive?.booleanOrNull) }
     var tools by remember { mutableStateOf<Set<String>?>(null) }
     var error by remember(selectedPath) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -293,9 +306,23 @@ internal fun WebRunSheet(
             OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5) }, label = { Text("Local port") }, singleLine = true,
                 supportingText = { Text("http://127.0.0.1:$port · this device only") }, modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
+            if (!active) PortConflictNotice(port.toIntOrNull() ?: 0, root) { port = it.toString() }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("Open browser when ready", modifier = Modifier.weight(1f))
                 Switch(checked = openBrowser, onCheckedChange = { openBrowser = it })
+            }
+            if (project.kind != WebKind.Static) {
+                val restartChecked = restartOnChange ?: RestartRule.defaultFor(project, mode, script, custom)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Restart when files change")
+                        Text(
+                            if (restartChecked) "For servers that don't reload by themselves." else "Off: this server reloads changes by itself.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Switch(checked = restartChecked, onCheckedChange = { restartOnChange = it })
+                }
             }
             if (tools != null && "node" !in tools.orEmpty()) {
                 Text("Node.js is required.", color = MaterialTheme.colorScheme.error)
@@ -318,7 +345,8 @@ internal fun WebRunSheet(
                     (!needsManager || (manager != null && manager!!.executable in tools.orEmpty())),
                 onClick = {
                     scope.launch {
-                        val config = WebRunConfig(project, manager ?: WebPackageManager.Npm,script,port.toIntOrNull() ?: 0,install,custom,openBrowser,mode,profile,healthPath,timeout.toIntOrNull() ?: 0)
+                        val config = WebRunConfig(project, manager ?: WebPackageManager.Npm,script,port.toIntOrNull() ?: 0,install,custom,openBrowser,mode,profile,healthPath,timeout.toIntOrNull() ?: 0,
+                            restartOnChange = restartOnChange)
                         val validation = withContext(Dispatchers.IO) { runCatching { config.validate() } }
                         if (validation.isFailure) error = validation.exceptionOrNull()?.message
                         else { WebRunSessions.start(context,root,config); onDismiss(); onStarted() }

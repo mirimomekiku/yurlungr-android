@@ -11,8 +11,12 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 const runDir = path.dirname(configPath);
 const statusPath = path.join(runDir, 'status.json');
 const controlPath = path.join(runDir, 'stop');
+// The app writes this when the project's files changed and the server doesn't reload itself.
+const restartPath = path.join(runDir, 'restart');
 config.compatibilityCache ||= path.join(runDir,'compatibility');
 let phase = 'Starting', child = null, ending = false, backendPort = null;
+// recipe: how the dev command was launched, reused on restart. previous: a dev command being restarted.
+let recipe = null, previous = null, generation = 0;
 const sockets = new Set();
 let diagnosticText = '', lastHttpStatus = null;
 const preload = path.join(__dirname,'web-node-preload.cjs');
@@ -27,7 +31,7 @@ function status(state, message = '', code = '', recovery = '') {
   console.log(`[Yurlungr] ${state}${message ? ': ' + message : ''}`);
 }
 function killGroup(signal) {
-  if (child?.pid) { try { process.kill(-child.pid, signal); } catch (_) {} }
+  for (const task of [child, previous]) if (task?.pid) { try { process.kill(-task.pid, signal); } catch (_) {} }
 }
 async function finish(state, message = '', code = '', recovery = '') {
   if (ending) return;
@@ -35,7 +39,7 @@ async function finish(state, message = '', code = '', recovery = '') {
   killGroup('SIGTERM');
   for (const socket of sockets) socket.destroy();
   server.close();
-  await new Promise(resolve => setTimeout(resolve, child ? 1200 : 0));
+  await new Promise(resolve => setTimeout(resolve, child || previous ? 1200 : 0));
   killGroup('SIGKILL');
   status(state, message, code, recovery);
   process.exit(state === 'Stopped' ? 0 : 1);
@@ -156,7 +160,50 @@ function backendReady(timeout) {
   });
 }
 
-setInterval(() => { if (fs.existsSync(controlPath) || process.ppid === 1) finish('Stopped'); },200).unref();
+// Starts the dev command and waits for it to answer. A newer generation (a restart) takes over the wait.
+async function serveBackend(gen, restarted) {
+  diagnosticText='';
+  status('Starting',restarted?'Restarting after changes…':'Waiting for the development server…');
+  const task=child=launch(recipe.executable,recipe.args,config.cwd,recipe.env);
+  task.once('error',error=>{ if(child===task)failure(error.message,error); });
+  task.once('exit',(code,signal)=> { if(!ending&&child===task)failure(`Development command exited (${signal || code}). Check Logs and the selected launch mode.`); });
+  const deadline=Date.now()+Math.max(30000,Math.min(900000,(config.startupTimeoutSeconds || 180)*1000));
+  while (!ending && gen===generation && Date.now()<deadline) {
+    if (await backendReady(Math.max(1000,Math.min(30000,deadline-Date.now())))) {
+      if (!ending && gen===generation) {
+        status('Running',`http://127.0.0.1:${config.port}`);
+        if (restarted) console.log('[Yurlungr] Restarted after changes');
+      }
+      return;
+    }
+    await new Promise(resolve=>setTimeout(resolve,400));
+  }
+  if(!ending&&gen===generation)failure(`The initial route did not become ready${lastHttpStatus?' (HTTP '+lastHttpStatus+')':''}. Check Logs, readiness path, or increase the startup timeout.`);
+}
+// Stops the dev command's whole process group, then starts it again with the same recipe and backend port.
+async function restartBackend() {
+  if (ending || previous || !recipe || !child) return;
+  const gen=++generation, old=child;
+  previous=old; child=null;
+  console.log('\n[Yurlungr] Files changed: restarting the server…');
+  await new Promise(resolve => {
+    if (old.exitCode !== null || old.signalCode !== null) { resolve(); return; }
+    const timer=setTimeout(resolve,4000);
+    old.once('exit',() => { clearTimeout(timer); resolve(); });
+    try { process.kill(-old.pid,'SIGTERM'); } catch (_) { clearTimeout(timer); resolve(); }
+  });
+  // Whatever is left of the group goes too, so the backend port is free again.
+  try { process.kill(-old.pid,'SIGKILL'); } catch (_) {}
+  await new Promise(resolve=>setTimeout(resolve,200));
+  previous=null;
+  if (ending) return;
+  serveBackend(gen,true).catch(error=>failure(error.message,error));
+}
+
+setInterval(() => {
+  if (fs.existsSync(controlPath) || process.ppid === 1) finish('Stopped');
+  else if (fs.existsSync(restartPath)) { try { fs.unlinkSync(restartPath); } catch (_) {} restartBackend(); }
+},200).unref();
 process.on('SIGINT',()=>finish('Stopped')); process.on('SIGTERM',()=>finish('Stopped')); process.on('SIGHUP',()=>finish('Stopped'));
 process.on('uncaughtException',error=>finish('Failed',error.message));
 status('Starting');
@@ -187,18 +234,8 @@ server.listen(config.port,'127.0.0.1',async () => {
     backendPort=await unusedPort();
     // Old saved runs retain their previous script behavior.
     if(!config.mode)config.mode=config.command?.trim()?'Custom':'Script';
-    const recipe=await adapters.buildLaunch(config,backendPort,capture);
+    recipe=await adapters.buildLaunch(config,backendPort,capture);
     if(ending)return;
-    diagnosticText='';
-    status('Starting','Waiting for the development server…');
-    child=launch(recipe.executable,recipe.args,config.cwd,recipe.env);
-    child.once('error',error=>failure(error.message,error));
-    child.once('exit',(code,signal)=> { if(!ending)failure(`Development command exited (${signal || code}). Check Logs and the selected launch mode.`); });
-    const deadline=Date.now()+Math.max(30000,Math.min(900000,(config.startupTimeoutSeconds || 180)*1000));
-    while (!ending && Date.now()<deadline) {
-      if (await backendReady(Math.max(1000,Math.min(30000,deadline-Date.now())))) { if (!ending) status('Running',`http://127.0.0.1:${config.port}`); return; }
-      await new Promise(resolve=>setTimeout(resolve,400));
-    }
-    if(!ending)failure(`The initial route did not become ready${lastHttpStatus?' (HTTP '+lastHttpStatus+')':''}. Check Logs, readiness path, or increase the startup timeout.`);
+    await serveBackend(generation,false);
   } catch(error) { failure(error.message,error); }
 });

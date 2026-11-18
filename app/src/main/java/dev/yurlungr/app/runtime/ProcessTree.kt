@@ -85,6 +85,21 @@ object ProcessTree {
         }
     }
 
+    /**
+     * Stops [pid] alone (SIGTERM, then SIGKILL after [graceMs] if it's still there), but only while
+     * it is the process that started at [startTime]: a pid reused since then is never signalled.
+     * False when it already changed or is gone.
+     */
+    fun stopExact(pid: Int, startTime: Long, graceMs: Long = 2_000): Boolean {
+        if (pid <= 1 || pid == Os.getpid() || startTime(pid) != startTime) return false
+        signal(pid, OsConstants.SIGTERM)
+        thread(isDaemon = true, name = "process-stop") {
+            Thread.sleep(graceMs)
+            if (startTime(pid) == startTime) signal(pid, OsConstants.SIGKILL)
+        }
+        return true
+    }
+
     /** The pid of a [Process] started by ProcessBuilder (Android's UNIXProcess keeps it in a private field). */
     fun pidOf(process: Process): Int = runCatching {
         val field = process.javaClass.getDeclaredField("pid")

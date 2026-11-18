@@ -73,6 +73,8 @@ sealed interface Route {
     /** Web apps, listening ports and processes. */
     data object Servers : Route
     data class Preview(val url: String, val title: String) : Route
+    /** HTTP requests to a project's local server; [port] when opened from a running server. */
+    data class ApiTester(val path: String, val port: Int? = null) : Route
     data class ProjectAgents(val path: String) : Route
     data object Tour : Route
     data class Merge(val path: String) : Route
@@ -434,6 +436,7 @@ class MainActivity : ComponentActivity() {
                 onResolveConflict = { nav.push(Route.Merge(it.path)) },
                 onDatabases = { nav.push(Route.ProjectDatabases(route.path)) },
                 onEnvFile = { nav.push(Route.EnvFile(route.path)) },
+                onApiTester = { port -> nav.push(Route.ApiTester(route.path, port)) },
             )
             is Route.ProjectDatabases -> dev.yurlungr.app.databases.DatabasesScreen(
                 File(route.path),
@@ -448,7 +451,8 @@ class MainActivity : ComponentActivity() {
                 onPreview = { url, title -> nav.push(Route.Preview(url, title)) },
                 onOpenTerminal = { nav.push(Route.Terminal) },
             )
-            is Route.Preview -> dev.yurlungr.app.web.PreviewScreen(route.url, route.title, onBack = back)
+            is Route.Preview -> dev.yurlungr.app.web.PreviewScreen(route.url, route.title, onBack = back, onOpenTerminal = { nav.push(Route.Terminal) })
+            is Route.ApiTester -> dev.yurlungr.app.web.ApiTesterScreen(route.path, route.port, onBack = back)
             is Route.Merge -> dev.yurlungr.app.editor.MergeScreen(File(route.path), onBack = back,
                 onOpenEditor = { nav.replace(Route.FileView(route.path, edit = true)) })
             Route.Tour -> dev.yurlungr.app.ui.TourScreen(

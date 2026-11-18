@@ -28,6 +28,8 @@ internal class WebRun(val root: File, val config: WebRunConfig, val id: String, 
     var closeAfterStop = false
     var restartAfterStop = false
     var finalized by mutableStateOf(false)
+    /** Shown on the server card, such as "Restarted after changes". */
+    var notice by mutableStateOf("")
     val busy get() = !finalized || state.active
     val url get() = "http://127.0.0.1:${config.port}"
 }
@@ -103,6 +105,7 @@ internal object WebRunSessions {
                     TerminalSessions.closeDirect(app, terminal)
                     throw IllegalStateException("Couldn't start the server's terminal: ${e.message ?: e}", e)
                 }
+                if (config.restartsOnChange && config.project.kind != WebKind.Static) WebRunWatcher.watch(scope, run) { restartAfterChanges(run) }
                 var browserOpened = false
                 val startTime = System.currentTimeMillis()
                 while (!run.finalized) {
@@ -157,6 +160,17 @@ internal object WebRunSessions {
             run.terminal?.let { TerminalSessions.closeDirect(context,it) }
             start(context,run.root,run.config.copy(install = false, repairNextCompiler = false))
         } else stop(context,run)
+    }
+
+    /**
+     * Restarts the server process in place after files changed: the runner stops the dev
+     * command's process group and starts it again with the same settings, keeping its port,
+     * terminal and public link.
+     */
+    private fun restartAfterChanges(run: WebRun) {
+        if (run.finalized || run.state != WebRunState.Running) return
+        run.notice = "Restarted after changes · " + java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date())
+        scope.launch(Dispatchers.IO) { runCatching { File(run.directory, "restart").writeText(run.id) } }
     }
 
     fun stopAll(context: Context) {

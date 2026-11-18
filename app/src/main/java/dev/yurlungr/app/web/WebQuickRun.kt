@@ -44,15 +44,21 @@ internal object WebQuickRun {
         if (!ready) return "Install the tools this app needs."
         val script = stored?.get("script")?.jsonPrimitive?.contentOrNull?.takeIf { it in project.scripts } ?: project.scripts.firstOrNull().orEmpty()
         val preferred = stored?.get("port")?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: defaultPort(project.kind)
+        val port = withContext(Dispatchers.IO) { freePort(preferred) }
+        // Another web run (or something we can't see) on the port: move on to the next one as before. A
+        // leftover process of our own runtime is worth asking about: Run options offers Stop or the next port.
+        if (port != preferred && WebRunSessions.all().none { it.state.active && it.config.port == preferred } &&
+            withContext(Dispatchers.IO) { PortOwners.find(preferred) is PortHolder.Process }) return "Port $preferred is in use."
         val config = WebRunConfig(
             project, manager, script,
-            port = withContext(Dispatchers.IO) { freePort(preferred) },
+            port = port,
             install = install,
             customCommand = custom,
             openBrowser = openBrowser ?: stored?.get("openBrowser")?.jsonPrimitive?.booleanOrNull ?: true,
             mode = mode, profile = profile,
             healthPath = stored?.get("healthPath")?.jsonPrimitive?.contentOrNull ?: "/",
             startupTimeoutSeconds = stored?.get("startupTimeoutSeconds")?.jsonPrimitive?.intOrNull ?: 180,
+            restartOnChange = stored?.get("restartOnChange")?.jsonPrimitive?.booleanOrNull,
         )
         withContext(Dispatchers.IO) { runCatching { config.validate() } }.exceptionOrNull()?.let { return it.message ?: "Check the run settings." }
         withContext(Dispatchers.Main) { WebRunSessions.start(context, root, config) }

@@ -73,6 +73,8 @@ fun TunnelSheet(port: Int, label: String, onDismiss: () -> Unit, onOpenTerminal:
             }
             else -> {
                 Text(url, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.titleSmall)
+                // Scan it from another phone or tablet to try the app there.
+                QrCode(url, Modifier.align(androidx.compose.ui.Alignment.CenterHorizontally))
                 Text(
                     "Anyone with this link can reach port $port. It changes next time, and stops when the server stops.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,

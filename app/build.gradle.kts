@@ -153,6 +153,7 @@ dependencies {
     termuxEmulatorArchive(libs.termux.terminal.emulator)
     implementation(files(prepareTermuxEmulator.flatMap { it.archiveFile }))
     implementation(libs.java.websocket)
+    implementation(libs.zxing.core)
 
     testImplementation(libs.junit)
 }

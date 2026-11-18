@@ -1,18 +1,26 @@
 package dev.yurlungr.app.web
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
+import android.view.ViewGroup
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,9 +29,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -38,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -51,25 +63,36 @@ import dev.yurlungr.app.ui.NavTile
 import dev.yurlungr.app.ui.Ph
 import dev.yurlungr.app.ui.PhIcon
 
-private data class ConsoleLine(val level: ConsoleMessage.MessageLevel, val text: String, val source: String)
-
 private fun isLocal(url: String): Boolean = url.toUri().host?.lowercase() in setOf("127.0.0.1", "localhost")
 
+/** The local port a preview URL points at, for its public link; null for other hosts. */
+private fun localPort(url: String): Int? = url.toUri().takeIf { isLocal(url) }?.let { uri ->
+    uri.port.takeIf { it > 0 } ?: if (uri.scheme == "https") 443 else 80
+}
+
 /**
- * A running local web app inside the app: back/forward within it, reload, a phone or desktop
- * layout, the page's console messages and errors, and Open in the browser. Links to other sites
- * open in the browser; only 127.0.0.1 and localhost stay here.
+ * A running local web app inside the app: back/forward within it, reload, a phone, tablet or
+ * desktop layout, the page's console messages and failed requests, Open in the browser and the
+ * public link (with a QR code). Links to other sites open in the browser; only 127.0.0.1 and
+ * localhost stay here.
  */
 @SuppressLint("SetJavaScriptEnabled") // a local dev server the user started
 @Composable
-fun PreviewScreen(url: String, title: String, onBack: () -> Unit) {
+fun PreviewScreen(url: String, title: String, onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
     val context = LocalContext.current
-    val console = remember { mutableStateListOf<ConsoleLine>() }
+    val log = remember { mutableStateListOf<PreviewLogEntry>() }
+    fun add(entry: PreviewLogEntry) {
+        log += entry
+        if (log.size > PreviewLogs.MAX) log.removeAt(0)
+    }
     var current by remember { mutableStateOf(url) }
     var progress by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
-    var desktop by remember { mutableStateOf(false) }
+    var width by remember { mutableStateOf(PreviewWidth.Phone) }
+    var widthMenu by remember { mutableStateOf(false) }
+    var more by remember { mutableStateOf(false) }
     var showConsole by remember { mutableStateOf(false) }
+    var sharing by remember { mutableStateOf(false) }
     val webView = remember {
         // Inspectable from a computer's chrome://inspect in debug builds.
         if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) WebView.setWebContentsDebuggingEnabled(true)
@@ -91,13 +114,21 @@ fun PreviewScreen(url: String, title: String, onBack: () -> Unit) {
                 override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { current = url; error = null }
                 override fun onReceivedError(view: WebView, request: WebResourceRequest, err: WebResourceError) {
                     if (request.isForMainFrame) error = "${err.description} (${request.url})"
+                    add(PreviewLogs.request(request.method, request.url.toString(), null, err.description?.toString().orEmpty()))
+                }
+                override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
+                    add(PreviewLogs.request(request.method, request.url.toString(), response.statusCode, response.reasonPhrase.orEmpty()))
                 }
             }
             webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView, newProgress: Int) { progress = newProgress }
                 override fun onConsoleMessage(message: ConsoleMessage): Boolean {
-                    console += ConsoleLine(message.messageLevel(), message.message(), "${message.sourceId().substringAfterLast('/')}:${message.lineNumber()}")
-                    if (console.size > 500) console.removeAt(0)
+                    val level = when (message.messageLevel()) {
+                        ConsoleMessage.MessageLevel.ERROR -> PreviewLogLevel.Error
+                        ConsoleMessage.MessageLevel.WARNING -> PreviewLogLevel.Warning
+                        else -> PreviewLogLevel.Info
+                    }
+                    add(PreviewLogEntry(level, message.message(), "${message.sourceId().substringAfterLast('/')}:${message.lineNumber()}"))
                     return true
                 }
             }
@@ -106,8 +137,10 @@ fun PreviewScreen(url: String, title: String, onBack: () -> Unit) {
     }
     DisposableEffect(Unit) { onDispose { webView.stopLoading(); webView.destroy() } }
     BackHandler { if (webView.canGoBack()) webView.goBack() else onBack() }
-    val errors = console.count { it.level == ConsoleMessage.MessageLevel.ERROR }
+    val errors = log.count { it.level == PreviewLogLevel.Error }
     val colors = MaterialTheme.colorScheme
+    val port = localPort(current) ?: localPort(url)
+    val tunnel = port?.let { TunnelSessions.get(it) }?.takeIf { it.active }
 
     Column(Modifier.fillMaxSize().background(colors.background).systemBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -117,12 +150,23 @@ fun PreviewScreen(url: String, title: String, onBack: () -> Unit) {
                 Text(current, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             IconButton(onClick = { webView.reload() }) { PhIcon(Ph.ArrowClockwise, "Reload", size = 19.dp) }
-            IconButton(onClick = {
-                desktop = !desktop
-                val ua = android.webkit.WebSettings.getDefaultUserAgent(context)
-                webView.settings.userAgentString = if (desktop) ua.replace(Regex("Android [^;)]*;?"), "X11; Linux x86_64;").replace(" Mobile", "") else null
-                webView.reload()
-            }) { PhIcon(if (desktop) Ph.Laptop else Ph.DeviceMobile, if (desktop) "Desktop layout" else "Phone layout", size = 19.dp) }
+            Box {
+                IconButton(onClick = { widthMenu = true }) { PhIcon(width.icon(), "Layout width: ${width.label}", size = 19.dp) }
+                DropdownMenu(expanded = widthMenu, onDismissRequest = { widthMenu = false }) {
+                    for (option in PreviewWidth.entries) DropdownMenuItem(
+                        text = { Text(option.label + (option.cssWidth?.let { " · $it px" } ?: "")) },
+                        leadingIcon = { PhIcon(option.icon(), null, size = 18.dp, tint = if (option == width) colors.primary else colors.onSurface) },
+                        onClick = {
+                            widthMenu = false
+                            if (option != width) {
+                                width = option
+                                webView.settings.userAgentString = option.userAgent(WebSettings.getDefaultUserAgent(context))
+                                webView.reload()
+                            }
+                        },
+                    )
+                }
+            }
             Box {
                 IconButton(onClick = { showConsole = true }) { PhIcon(Ph.Bug, "Console", size = 19.dp, tint = if (errors > 0) colors.error else colors.onSurface) }
                 if (errors > 0) Text(
@@ -130,11 +174,38 @@ fun PreviewScreen(url: String, title: String, onBack: () -> Unit) {
                     modifier = Modifier.align(Alignment.TopEnd).clip(RoundedCornerShape(8.dp)).background(colors.error).padding(horizontal = 4.dp),
                 )
             }
-            IconButton(onClick = { RuntimeBridge.open(context, current) }) { PhIcon(Ph.Globe, "Open in browser", size = 19.dp) }
+            Box {
+                IconButton(onClick = { more = true }) { PhIcon(Ph.DotsThreeVertical, "More", size = 19.dp) }
+                DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
+                    DropdownMenuItem(text = { Text("Open in browser") }, leadingIcon = { PhIcon(Ph.ArrowUp, null, size = 18.dp) },
+                        onClick = { more = false; RuntimeBridge.open(context, current) })
+                    if (port != null) DropdownMenuItem(
+                        text = { Text(if (tunnel?.state == TunnelState.Live) "Public link & QR code" else "Share public link") },
+                        leadingIcon = { PhIcon(Ph.Globe, null, size = 18.dp, tint = if (tunnel?.state == TunnelState.Live) AppColors.status.success else colors.onSurface) },
+                        onClick = { more = false; sharing = true },
+                    )
+                }
+            }
         }
         if (progress in 1..99) LinearProgressIndicator(progress = { progress / 100f }, modifier = Modifier.fillMaxWidth())
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            AndroidView(factory = { webView }, modifier = Modifier.fillMaxSize())
+        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+            val density = LocalDensity.current.density
+            val frame = PreviewFrame.fit(constraints.maxWidth, constraints.maxHeight, density, width.cssWidth)
+            AndroidView(
+                factory = { ctx -> FrameLayout(ctx).apply { clipChildren = true; addView(webView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)) } },
+                modifier = Modifier.fillMaxSize(),
+                update = {
+                    // FrameLayout gives a child its exact size even when wider than itself; the scale
+                    // (from the top-left corner) brings it back to the screen, touches included.
+                    val params = webView.layoutParams
+                    if (params.width != frame.width || params.height != frame.height) {
+                        params.width = frame.width; params.height = frame.height
+                        webView.layoutParams = params
+                    }
+                    webView.pivotX = 0f; webView.pivotY = 0f
+                    webView.scaleX = frame.scale; webView.scaleY = frame.scale
+                },
+            )
             error?.let { message ->
                 Column(
                     Modifier.fillMaxSize().background(colors.background).padding(24.dp),
@@ -151,24 +222,43 @@ fun PreviewScreen(url: String, title: String, onBack: () -> Unit) {
         }
     }
 
+    if (sharing && port != null) TunnelSheet(port, title, onDismiss = { sharing = false }, onOpenTerminal = onOpenTerminal)
+
     if (showConsole) {
-        AppSheet("Console", onDismiss = { showConsole = false }, subtitle = "${console.size} messages · $errors errors", icon = Ph.Bug) {
-            if (console.isEmpty()) Text("Nothing logged yet.", color = colors.onSurfaceVariant)
-            for (line in console.takeLast(200).asReversed()) {
+        val requests = log.count { it.network }
+        AppSheet(
+            "Console", onDismiss = { showConsole = false }, icon = Ph.Bug,
+            subtitle = "${log.size - requests} messages · $requests failed requests · $errors errors",
+            actions = {
+                OutlinedButton(onClick = { log.clear() }, enabled = log.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("Clear") }
+                Button(onClick = {
+                    context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("Console", PreviewLogs.format(log)))
+                    Toast.makeText(context, "Console copied", Toast.LENGTH_SHORT).show()
+                }, enabled = log.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("Copy") }
+            },
+        ) {
+            if (log.isEmpty()) Text("Nothing logged yet. Messages and failed requests show here.", color = colors.onSurfaceVariant)
+            for (line in log.takeLast(200).asReversed()) {
                 val tint = when (line.level) {
-                    ConsoleMessage.MessageLevel.ERROR -> colors.error
-                    ConsoleMessage.MessageLevel.WARNING -> AppColors.status.warning
-                    else -> colors.onSurface
+                    PreviewLogLevel.Error -> colors.error
+                    PreviewLogLevel.Warning -> AppColors.status.warning
+                    PreviewLogLevel.Info -> colors.onSurface
                 }
                 Column(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-                        .background(if (line.level == ConsoleMessage.MessageLevel.ERROR) colors.errorContainer.copy(alpha = 0.4f) else Color.Transparent)
+                        .background(if (line.level == PreviewLogLevel.Error) colors.errorContainer.copy(alpha = 0.4f) else Color.Transparent)
                         .padding(8.dp),
                 ) {
-                    Text(line.text, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = tint)
-                    Text(line.source, fontSize = 10.sp, color = colors.onSurfaceVariant)
+                    Text(line.text, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = tint, maxLines = 12, overflow = TextOverflow.Ellipsis)
+                    Text(if (line.network) "Request" else line.source, fontSize = 10.sp, color = colors.onSurfaceVariant)
                 }
             }
         }
     }
+}
+
+private fun PreviewWidth.icon() = when (this) {
+    PreviewWidth.Phone -> Ph.DeviceMobile
+    PreviewWidth.Tablet -> Ph.DeviceTablet
+    PreviewWidth.Desktop -> Ph.Laptop
 }

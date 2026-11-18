@@ -142,6 +142,8 @@ fun ProjectScreen(
     onDatabases: () -> Unit = {},
     /** The .env editor. */
     onEnvFile: () -> Unit = {},
+    /** The API tester for this project's server; the port when opened from a running server. */
+    onApiTester: (port: Int?) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -289,7 +291,7 @@ fun ProjectScreen(
                 onRetry = { reload++ },
             )
         }
-        dev.yurlungr.app.web.WebRunCard(dir, onLogs = onOpenTerminal, onOptions = { showWebRun = true }, onPreview = onPreview)
+        dev.yurlungr.app.web.WebRunCard(dir, onLogs = onOpenTerminal, onOptions = { showWebRun = true }, onPreview = onPreview, onApiTester = onApiTester)
         dev.yurlungr.app.databases.ProjectDatabasesStrip(dir, onOpen = onDatabases)
         AnimatedVisibility(headerVisible, enter = reveal, exit = collapse) {
             SectionTabs(tab, changeCount = status?.changes?.size ?: 0) { tab = it }
@@ -386,6 +388,7 @@ fun ProjectScreen(
                 DockTool("Agent settings", Ph.Sparkle, AppColors.tiles.lilac, "Default agent, instruction files and MCP servers for this project", onClick = onAgentSettings),
                 DockTool("Databases", Ph.FloppyDisk, AppColors.tiles.sky, "PostgreSQL, Redis and MariaDB for this project, with connection strings", onClick = onDatabases),
                 DockTool(".env", Ph.LockSimple, AppColors.tiles.peach, "Edit environment variables, values hidden until tapped", onClick = onEnvFile),
+                DockTool("API tester", Ph.Lightning, AppColors.tiles.sky, "Send HTTP requests to this project's local server") { onApiTester(null) },
             ))
     }
 

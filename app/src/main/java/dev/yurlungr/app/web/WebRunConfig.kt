@@ -17,7 +17,11 @@ internal data class WebRunConfig(
     val healthPath: String = "/",
     val startupTimeoutSeconds: Int = 180,
     val repairNextCompiler: Boolean = false,
+    /** Restart the server when project files change; null follows [RestartRule] (on unless it reloads itself). */
+    val restartOnChange: Boolean? = null,
 ) {
+    val restartsOnChange get() = restartOnChange ?: RestartRule.defaultFor(project, mode, script, customCommand)
+
     fun validate() {
         require(port in 1024..65535) { "Choose a port between 1024 and 65535." }
         require(project.directory.isDirectory) { "App folder no longer exists." }
@@ -37,6 +41,7 @@ internal data class WebRunConfig(
         put("mode", mode.name); put("profile", profile.name); put("healthPath", healthPath)
         put("startupTimeoutSeconds", startupTimeoutSeconds); put("repairNextCompiler", repairNextCompiler)
         put("node", node.path); put("bash", bash.path)
+        restartOnChange?.let { put("restartOnChange", it) }
     }
 }
 

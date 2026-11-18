@@ -27,6 +27,8 @@ compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 junit = { group = "junit", name = "junit", version = "4.13.2" }
 java-websocket = { group = "org.java-websocket", name = "Java-WebSocket", version = "1.6.0" }
+# QR codes for public preview links (encoder only; pure Java, no camera code used).
+zxing-core = { group = "com.google.zxing", name = "core", version = "3.5.3" }
 kotlinx-serialization-json ={ group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serialization" }
 termux-terminal-view ={ group = "com.github.termux.termux-app", name = "terminal-view", version.ref = "termux" }
 termux-terminal-emulator = { group = "com.github.termux.termux-app", name = "terminal-emulator", version.ref = "termux" }
