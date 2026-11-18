@@ -175,12 +175,19 @@ fun ArtifactsSheet(chat: ChatModel, onDismiss: () -> Unit) {
         // Remote chats' files are on the other phone; only what's on disk here can be saved.
         val onDisk = if (chat.isRemote) emptyList() else artifacts.map { it.file }
         if (onDisk.isNotEmpty()) {
+            val folder = saveAll.folderName
             FilledTonalButton(
                 onClick = { saveAll(onDisk.filter { it.isFile }) },
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp).heightIn(min = 48.dp),
             ) {
                 PhIcon(Ph.DownloadSimple, null, size = 18.dp)
-                Text("  Save all to a folder…")
+                Text(if (folder != null) "  Save all to $folder" else "  Save all to a folder…", maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            }
+            // The folder is remembered after the first pick; it can be changed or forgotten here.
+            if (folder != null) androidx.compose.foundation.layout.Row(Modifier.fillMaxWidth(), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center) {
+                val context = androidx.compose.ui.platform.LocalContext.current
+                androidx.compose.material3.TextButton(onClick = { saveAll.pickFolder(onDisk.filter { it.isFile }) }) { Text("Use another folder…") }
+                androidx.compose.material3.TextButton(onClick = { FileExport.forgetFolder(context) }) { Text("Forget $folder") }
             }
         }
     }

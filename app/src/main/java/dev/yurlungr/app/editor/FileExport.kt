@@ -120,20 +120,95 @@ object FileExport {
         }
     }
 
-    /** A function that asks for a folder (the system folder picker), then saves copies of all the files into it. */
+    // ---- The remembered folder for "Save all" ---------------------------------------------------
+
+    private const val PREFS = "file_export"
+    private const val KEY_FOLDER = "save_all_folder"
+    private val folderState = mutableStateOf<String?>(null)
+    private var folderLoaded = false
+
+    /** The folder "Save all" uses without asking, if the user picked one and the app may still write to it. */
+    fun savedFolder(context: Context): Uri? {
+        if (!folderLoaded) {
+            folderState.value = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_FOLDER, null)
+            folderLoaded = true
+        }
+        val uri = folderState.value?.let(Uri::parse) ?: return null
+        // Revoked (the folder's app was cleared or uninstalled, or the user removed access): ask again.
+        val granted = context.contentResolver.persistedUriPermissions.any { it.uri == uri && it.isWritePermission }
+        return if (granted) uri else null
+    }
+
+    /** The remembered folder's name as the picker showed it (e.g. "Download"), or null. */
+    fun savedFolderName(context: Context): String? {
+        val tree = savedFolder(context) ?: return null
+        return runCatching {
+            val doc = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+            context.contentResolver.query(doc, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        }.getOrNull() ?: DocumentsContract.getTreeDocumentId(tree).substringAfterLast(':').substringAfterLast('/').ifEmpty { "your folder" }
+    }
+
+    /** Keeps write access to [tree] across restarts and makes it the folder "Save all" uses. */
+    private fun keepFolder(context: Context, tree: Uri) {
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        val kept = runCatching { context.contentResolver.takePersistableUriPermission(tree, flags) }.isSuccess
+        if (!kept) return
+        // Only one folder is held: let go of the previous one.
+        val old = folderState.value?.let(Uri::parse)
+        if (old != null && old != tree) runCatching { context.contentResolver.releasePersistableUriPermission(old, flags) }
+        folderState.value = tree.toString()
+        folderLoaded = true
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_FOLDER, tree.toString()).apply()
+    }
+
+    /** Forgets the remembered folder; the next "Save all" asks again. */
+    fun forgetFolder(context: Context) {
+        folderState.value?.let(Uri::parse)?.let { old ->
+            runCatching {
+                context.contentResolver.releasePersistableUriPermission(old, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }
+        }
+        folderState.value = null
+        folderLoaded = true
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_FOLDER).apply()
+    }
+
+    /** "Save all": into the remembered folder, or (the first time, or with [SaveAll.pickFolder]) a folder the user picks, which is then remembered. */
+    class SaveAll internal constructor(
+        val folderName: String?,
+        private val save: (List<File>, Boolean) -> Unit,
+    ) {
+        /** Saves into the remembered folder, asking for one only if there's none. */
+        operator fun invoke(files: List<File>) = save(files, false)
+        /** Asks for a (new) folder, remembers it, and saves there. */
+        fun pickFolder(files: List<File>) = save(files, true)
+    }
+
     @Composable
-    fun rememberSaveAll(): (List<File>) -> Unit {
+    fun rememberSaveAll(): SaveAll {
         val context = LocalContext.current
         var pending by rememberSaveable { mutableStateOf<List<String>?>(null) }
         val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
             val paths = pending
             pending = null
-            if (tree != null && paths != null) saveAllTo(context, paths.map(::File), tree)
+            if (tree != null && paths != null) {
+                keepFolder(context, tree)
+                saveAllTo(context, paths.map(::File), tree)
+            }
         }
-        return { files ->
-            pending = files.map { it.path }
-            runCatching { launcher.launch(null) }
-                .onFailure { pending = null; Toast.makeText(context, "No app here can pick a folder", Toast.LENGTH_LONG).show() }
+        // Looked up again only when the folder changes (it's a query to the folder's app).
+        val name = androidx.compose.runtime.remember(folderState.value) { savedFolderName(context) }
+        return SaveAll(name) { files, pick ->
+            val folder = if (pick) null else savedFolder(context)
+            if (folder != null) saveAllTo(context, files, folder)
+            else {
+                pending = files.map { it.path }
+                // Start the picker in the remembered folder when changing it.
+                runCatching { launcher.launch(savedFolder(context)) }
+                    .onFailure { pending = null; Toast.makeText(context, "No app here can pick a folder", Toast.LENGTH_LONG).show() }
+            }
         }
     }
 }
