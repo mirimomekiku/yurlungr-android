@@ -144,6 +144,8 @@ fun ProjectScreen(
     onEnvFile: () -> Unit = {},
     /** The API tester for this project's server; the port when opened from a running server. */
     onApiTester: (port: Int?) -> Unit = {},
+    /** The GitHub pull requests screen; a number opens that one. */
+    onPullRequests: (number: Int?) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -186,6 +188,8 @@ fun ProjectScreen(
             }
         }
     }
+    /** The origin remote is on GitHub: pull requests can be shown. */
+    val onGitHub by produceState(false, dir, status?.hasOrigin) { value = status?.hasOrigin == true && git.originSlug(dir) != null }
     /** A git command running in the terminal sheet: its title and arguments. */
     var gitTerminal by remember { mutableStateOf<Pair<String, List<String>>?>(null) }
 
@@ -393,6 +397,8 @@ fun ProjectScreen(
                 DockTool("Databases", Ph.FloppyDisk, AppColors.tiles.sky, "PostgreSQL, Redis and MariaDB for this project, with connection strings", onClick = onDatabases),
                 DockTool(".env", Ph.LockSimple, AppColors.tiles.peach, "Edit environment variables, values hidden until tapped", onClick = onEnvFile),
                 DockTool("API tester", Ph.Lightning, AppColors.tiles.sky, "Send HTTP requests to this project's local server") { onApiTester(null) },
+                DockTool("Pull requests", Ph.GitMerge, AppColors.tiles.lime, "Review, comment on and merge this repository's GitHub pull requests") { onPullRequests(null) }
+                    .takeIf { onGitHub },
             ))
     }
 
@@ -435,6 +441,7 @@ fun ProjectScreen(
                 onOpenChat(chat)
             },
             onOpenBranches = { showGitActions = false; showBranches = true },
+            onPullRequests = if (onGitHub) { number -> showGitActions = false; onPullRequests(number) } else null,
         )
     }
 

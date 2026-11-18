@@ -77,6 +77,8 @@ fun GitActionsSheet(
     /** Starts a chat in this project with [agent] and sends [prompt] as soon as it's ready. */
     onAgentTask: (agent: Agent, prompt: String) -> Unit,
     onOpenBranches: () -> Unit,
+    /** Opens the pull requests screen (a number: that one); null when the remote isn't on GitHub. */
+    onPullRequests: ((Int?) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -196,7 +198,7 @@ fun GitActionsSheet(
                     Ph.GitMerge, "Open pull request #${current.number}",
                     "${current.title} · ${current.state.lowercase()}${if (current.isDraft) " (draft)" else ""}",
                     enabled = running == null, tile = AppColors.tiles.lime,
-                ) { openUrl(current.url) }
+                ) { if (onPullRequests != null) onPullRequests(current.number) else openUrl(current.url) }
                 else -> ActionRow(
                     Ph.GitMerge, "Create pull request",
                     when {
@@ -217,6 +219,11 @@ fun GitActionsSheet(
                         )
                     }
                 }
+            }
+        }
+        if (onPullRequests != null) {
+            ActionRow(Ph.GitMerge, "Pull requests", "Review, comment on, check out and merge open pull requests", enabled = running == null, tile = AppColors.tiles.lime) {
+                onPullRequests(null)
             }
         }
         ActionRow(Ph.GitBranch, "Branches & stashes", "Switch or create branches, restore saved changes", enabled = running == null) {

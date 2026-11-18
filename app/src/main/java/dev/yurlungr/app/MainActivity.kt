@@ -92,6 +92,8 @@ sealed interface Route {
     data class ProjectDatabases(val path: String) : Route
     /** A project's .env editor. */
     data class EnvFile(val path: String) : Route
+    /** A project's GitHub pull requests; [number] opens one directly. */
+    data class PullRequests(val path: String, val number: Int? = null) : Route
     /** Regenerable folders and shared caches to delete. */
     data object FreeSpace : Route
 }
@@ -446,7 +448,9 @@ class MainActivity : ComponentActivity() {
                 onDatabases = { nav.push(Route.ProjectDatabases(route.path)) },
                 onEnvFile = { nav.push(Route.EnvFile(route.path)) },
                 onApiTester = { port -> nav.push(Route.ApiTester(route.path, port)) },
+                onPullRequests = { number -> nav.push(Route.PullRequests(route.path, number)) },
             )
+            is Route.PullRequests -> dev.yurlungr.app.projects.PullRequestsScreen(File(route.path), route.number, onBack = back)
             is Route.ProjectDatabases -> dev.yurlungr.app.databases.DatabasesScreen(
                 File(route.path),
                 onBack = back,
