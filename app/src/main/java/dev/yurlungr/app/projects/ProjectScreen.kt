@@ -203,7 +203,7 @@ fun ProjectScreen(
             tasks = withContext(Dispatchers.IO) { runCatching { ProjectTasks.detect(dir, found) }.getOrDefault(emptyList()) }
         }
         launch { capabilities = withContext(Dispatchers.IO) {
-            runCatching { dev.yurlungr.app.web.ProjectDetector.detect(dir) }.getOrElse {
+            runCatching { dev.yurlungr.app.web.CustomServers.withSaved(context, dir, dev.yurlungr.app.web.ProjectDetector.detect(dir)) }.getOrElse {
                 dev.yurlungr.app.web.ProjectCapabilities(File(dir,"gradlew").isFile,emptyList())
             }
         } }

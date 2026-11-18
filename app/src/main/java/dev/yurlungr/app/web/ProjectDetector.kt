@@ -27,7 +27,9 @@ internal data class WebProject(
         hasAdapter -> WebLaunchMode.Framework
         else -> WebLaunchMode.Custom
     }
-    val dependenciesPresent get() = File(installDirectory, "node_modules").isDirectory || File(installDirectory, ".pnp.cjs").isFile
+    // Without a package.json (a Python or Go server run by a custom command) there's nothing for npm to install.
+    val dependenciesPresent get() = File(installDirectory, "node_modules").isDirectory || File(installDirectory, ".pnp.cjs").isFile ||
+        !File(installDirectory, "package.json").isFile
 }
 internal data class ProjectCapabilities(val android: Boolean, val web: List<WebProject>)
 

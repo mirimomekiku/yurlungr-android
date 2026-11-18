@@ -410,6 +410,7 @@ class MainActivity : ComponentActivity() {
                 onBack = back,
                 onOpenProject = { nav.reset(Route.Project(it.path)) },
                 runInTerminal = { command, name -> runInTerminal(context, nav, command, name) },
+                onPreview = { url, title -> nav.push(Route.Preview(url, title)) },
             )
             is Route.Project -> ProjectScreen(
                 dir = File(route.path),

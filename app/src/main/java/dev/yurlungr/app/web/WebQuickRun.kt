@@ -17,8 +17,11 @@ import java.net.ServerSocket
  * installed if they're missing, a free port, and the browser opened once the server answers.
  */
 internal object WebQuickRun {
-    /** Started: null. Otherwise why the options sheet has to ask first (no Node.js, no command…). */
-    suspend fun start(context: Context, root: File, projects: List<WebProject>): String? {
+    /**
+     * Started: null. Otherwise why the options sheet has to ask first (no Node.js, no command…).
+     * [openBrowser] overrides the saved choice (when the caller opens the in-app preview itself).
+     */
+    suspend fun start(context: Context, root: File, projects: List<WebProject>, openBrowser: Boolean? = null): String? {
         val paths = RuntimePaths(context)
         val saved = WebRunPreferences.read(context, root)
         val savedCwd = saved?.get("cwd")?.jsonPrimitive?.contentOrNull
@@ -46,7 +49,7 @@ internal object WebQuickRun {
             port = withContext(Dispatchers.IO) { freePort(preferred) },
             install = install,
             customCommand = custom,
-            openBrowser = stored?.get("openBrowser")?.jsonPrimitive?.booleanOrNull ?: true,
+            openBrowser = openBrowser ?: stored?.get("openBrowser")?.jsonPrimitive?.booleanOrNull ?: true,
             mode = mode, profile = profile,
             healthPath = stored?.get("healthPath")?.jsonPrimitive?.contentOrNull ?: "/",
             startupTimeoutSeconds = stored?.get("startupTimeoutSeconds")?.jsonPrimitive?.intOrNull ?: 180,

@@ -116,6 +116,8 @@ fun ProjectsScreen(
     onBack: () -> Unit,
     onOpenProject: (File) -> Unit,
     runInTerminal: (command: String, name: String) -> Unit,
+    /** Opens a running web app in the in-app preview (after "install and run"). */
+    onPreview: (url: String, title: String) -> Unit = { _, _ -> },
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -350,12 +352,11 @@ fun ProjectsScreen(
         CloneSheet(
             root = paths.projects,
             onDismiss = { cloning = false },
-            onClone = { url, name ->
+            onClone = { url, name, thenRun ->
                 cloning = false
-                runInTerminal(
-                    "mkdir -p ~/projects && cd ~/projects && git clone -- ${shellQuote(url)} ${shellQuote(name)}",
-                    "Clone $name",
-                )
+                val command = "mkdir -p ~/projects && cd ~/projects && git clone -- ${shellQuote(url)} ${shellQuote(name)}"
+                if (thenRun) ProjectLaunch.cloneThenRun(context, File(paths.projects, name), command, LaunchCallbacks(onOpenProject, runInTerminal, onPreview))
+                else runInTerminal(command, "Clone $name")
             },
         )
     }
@@ -366,24 +367,20 @@ fun ProjectsScreen(
             error = createError,
             onEdited = { createError = null },
             onDismiss = { if (!createBusy) creating = false },
-            onCreate = create@{ name, initGit ->
+            onInstallPack = { pack -> pack.script?.let { runInTerminal(dev.yurlungr.app.runtime.setupScriptCommand(it), pack.title) } },
+            onCreate = create@{ name, initGit, template ->
                 if (createBusy) return@create
                 createBusy = true
                 createError = null
                 scope.launch {
                     try {
                         val dir = File(paths.projects, name)
-                        withContext(Dispatchers.IO) {
-                            check(paths.projects.isDirectory || paths.projects.mkdirs()) { "Couldn't open the projects folder." }
-                            check(!dir.exists()) { "A project with this name already exists." }
-                            check(dir.mkdir()) { "Couldn't create the folder. Check free storage and try again." }
-                        }
-                        if (initGit) {
-                            val result = git.init(dir)
-                            check(result.ok) { "Folder created, but Git initialization failed. ${result.output.trim().takeLast(240)}" }
-                        }
+                        // Checked again here: the sheet's check may be stale (a pack removed meanwhile).
+                        withContext(Dispatchers.IO) { Templates.missingMessage(Templates.missing(template, paths.prefix)) }?.let { error(it) }
+                        val setup = ProjectLaunch.create(context, git, dir, template, initGit)
                         creating = false
-                        onOpenProject(dir)
+                        if (template.isEmpty) onOpenProject(dir)
+                        else ProjectLaunch.setupThenRun(context, dir, setup, LaunchCallbacks(onOpenProject, runInTerminal, onPreview))
                     } catch (e: Exception) {
                         if (e is CancellationException) throw e
                         createError = e.message ?: "Couldn't create this project. Try again."
@@ -641,15 +638,17 @@ private fun ProjectSheetHeader(title: String, subtitle: String, clone: Boolean, 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CloneSheet(root: File, onDismiss: () -> Unit, onClone: (url: String, name: String) -> Unit) {
+private fun CloneSheet(root: File, onDismiss: () -> Unit, onClone: (url: String, name: String, thenRun: Boolean) -> Unit) {
+    val context = LocalContext.current
     var url by rememberSaveable { mutableStateOf("") }
     var name by rememberSaveable { mutableStateOf("") }
+    var thenRun by remember { mutableStateOf(ProjectLaunch.runAfterClone(context)) }
     val derived = url.trim().substringBefore('?').substringBefore('#').trimEnd('/').substringAfterLast('/').substringAfterLast(':').removeSuffix(".git")
     val finalName = name.trim().ifEmpty { derived }
     val error = folderError(finalName, root)
     val validUrl = url.isNotBlank() && !url.trim().startsWith('-') && url.trim().none { it.isWhitespace() || it.isISOControl() }
     val canClone = validUrl && finalName.isNotEmpty() && error == null
-    fun submit() { if (canClone) onClone(url.trim(), finalName) }
+    fun submit() { if (canClone) onClone(url.trim(), finalName, thenRun) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -674,6 +673,10 @@ private fun CloneSheet(root: File, onDismiss: () -> Unit, onClone: (url: String,
                 keyboardActions = KeyboardActions(onDone = { submit() }),
                 shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth(),
             )
+            CheckRow("Install and run after cloning", "Open it, install what it needs, and start it if it's a web app", thenRun) {
+                thenRun = it
+                ProjectLaunch.setRunAfterClone(context, it)
+            }
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Cancel") }
                 Button(onClick = ::submit, enabled = canClone, modifier = Modifier.weight(2f).heightIn(min = 52.dp)) {
@@ -688,14 +691,31 @@ private fun CloneSheet(root: File, onDismiss: () -> Unit, onClone: (url: String,
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NewProjectSheet(root: File, busy: Boolean, error: String?, onEdited: () -> Unit, onDismiss: () -> Unit, onCreate: (name: String, initGit: Boolean) -> Unit) {
+private fun NewProjectSheet(
+    root: File,
+    busy: Boolean,
+    error: String?,
+    onEdited: () -> Unit,
+    onDismiss: () -> Unit,
+    onInstallPack: (dev.yurlungr.app.runtime.ToolSetup) -> Unit,
+    onCreate: (name: String, initGit: Boolean, template: ProjectTemplate) -> Unit,
+) {
     var name by rememberSaveable { mutableStateOf("") }
     var initGit by rememberSaveable { mutableStateOf(true) }
+    var templateId by rememberSaveable { mutableStateOf("empty") }
+    val template = Templates.byId(templateId)
+    val context = LocalContext.current
+    val prefix = remember { RuntimePaths(context).prefix }
+    // Checked off the main thread; null while checking.
+    val missing by androidx.compose.runtime.produceState<List<Requirement>?>(null, template) {
+        value = null
+        value = withContext(Dispatchers.IO) { Templates.missing(template, prefix) }
+    }
     val trimmed = name.trim()
     val nameError = folderError(trimmed, root)
-    val canCreate = !busy && trimmed.isNotEmpty() && nameError == null
+    val canCreate = !busy && trimmed.isNotEmpty() && nameError == null && missing?.isEmpty() == true
     val latestBusy by rememberUpdatedState(busy)
-    fun submit() { if (canCreate) onCreate(trimmed, initGit) }
+    fun submit() { if (canCreate) onCreate(trimmed, initGit, template) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = { !latestBusy }),
@@ -703,7 +723,7 @@ private fun NewProjectSheet(root: File, busy: Boolean, error: String?, onEdited:
     ) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(start = 20.dp, end = 20.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            ProjectSheetHeader("New project", "Start with an empty folder for your next idea.", clone = false, onDismiss = onDismiss, enabled = !busy)
+            ProjectSheetHeader("New project", "Start from a template, or with an empty folder.", clone = false, onDismiss = onDismiss, enabled = !busy)
             OutlinedTextField(
                 name, { name = it; onEdited() }, label = { Text("Project name") },
                 placeholder = { Text("my-project") },
@@ -722,13 +742,14 @@ private fun NewProjectSheet(root: File, busy: Boolean, error: String?, onEdited:
                 }
                 Checkbox(initGit, { initGit = it; onEdited() }, enabled = !busy)
             }
+            TemplatePicker(template, missing, enabled = !busy, onSelect = { templateId = it.id; onEdited() }, onInstallPack = onInstallPack)
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(onClick = onDismiss, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Cancel") }
                 Button(onClick = ::submit, enabled = canCreate, modifier = Modifier.weight(2f).heightIn(min = 52.dp)) {
                     if (busy) WaveDots(dotSize = 4.dp) else PhIcon(Ph.Plus, null, size = 18.dp)
                     Spacer(Modifier.width(8.dp))
-                    Text(if (busy) "Creating…" else "Create project")
+                    Text(if (busy) "Creating…" else if (template.isEmpty) "Create project" else "Create and set up")
                 }
             }
         }
