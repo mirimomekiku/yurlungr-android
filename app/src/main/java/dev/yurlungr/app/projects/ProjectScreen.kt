@@ -108,7 +108,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-private enum class ProjectTab(val label: String) { Files("Files"), Changes("Changes"), History("History"), Checks("Checks"), Chats("Chats") }
+private enum class ProjectTab(val label: String) { Overview("Overview"), Files("Files"), Changes("Changes"), History("History"), Checks("Checks"), Chats("Chats") }
 
 /**
  * A project's workspace: name (tap to switch projects) and branch on top, Files / Changes /
@@ -118,7 +118,7 @@ private enum class ProjectTab(val label: String) { Files("Files"), Changes("Chan
 @Composable
 fun ProjectScreen(
     dir: File,
-    /** "files" / "changes" / "history" / "chats"; Files when null. */
+    /** "overview" / "files" / "changes" / "history" / "chats"; Overview when null. */
     initialTab: String? = null,
     refreshTick: Int,
     onBack: () -> Unit,
@@ -146,6 +146,8 @@ fun ProjectScreen(
     onApiTester: (port: Int?) -> Unit = {},
     /** The GitHub pull requests screen; a number opens that one. */
     onPullRequests: (number: Int?) -> Unit = {},
+    /** Free space (regenerable folders), from the Overview's disk card. */
+    onFreeSpace: () -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -154,7 +156,7 @@ fun ProjectScreen(
     val scope = rememberCoroutineScope()
     LaunchedEffect(dir) { LastProject.set(context, dir) }
 
-    var tab by rememberSaveable { mutableStateOf(ProjectTab.entries.firstOrNull { it.name.equals(initialTab, ignoreCase = true) } ?: ProjectTab.Files) }
+    var tab by rememberSaveable { mutableStateOf(ProjectTab.entries.firstOrNull { it.name.equals(initialTab, ignoreCase = true) } ?: ProjectTab.Overview) }
     var status by remember { mutableStateOf<GitStatus?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<Pair<String, Boolean>?>(null) } // text, isError
@@ -176,6 +178,7 @@ fun ProjectScreen(
     var tasks by remember(dir.path) { mutableStateOf(emptyList<ProjectTask>()) }
     var showTasks by remember { mutableStateOf(false) }
     var showDeploy by remember { mutableStateOf(false) }
+    var showDependencyUpdates by remember { mutableStateOf(false) }
     var setupBannerDismissed by remember(dir.path) { mutableStateOf(SetupBannerPrefs.dismissed(context, dir)) }
     var headerVisible by remember { mutableStateOf(true) }
     LaunchedEffect(tab) { headerVisible = true }
@@ -304,6 +307,13 @@ fun ProjectScreen(
         }
         Box(Modifier.weight(1f).nestedScroll(headerScroll)) {
             when (tab) {
+                ProjectTab.Overview -> OverviewTab(
+                    dir, git, status, stacks, refreshKey = refreshTick * 1000 + reload,
+                    hasWeb = capabilities?.web?.isNotEmpty() == true, setupNeeded = needs.isNotEmpty(), runInTerminal = runInTerminal,
+                    onChanges = { tab = ProjectTab.Changes }, onChecks = { tab = ProjectTab.Checks }, onChats = { tab = ProjectTab.Chats },
+                    onOpenChat = onOpenChat, onNewChat = onNewChat, onPreview = onPreview, onDatabases = onDatabases,
+                    onSetup = { showSetup = true }, onDependencies = { showDependencyUpdates = true }, onFreeSpace = onFreeSpace,
+                )
                 ProjectTab.Changes -> ChangesTab(
                     dir = dir,
                     git = git,
@@ -393,6 +403,8 @@ fun ProjectScreen(
                 DockTool("Scripts", Ph.Play, AppColors.tiles.lime, "Run package.json scripts, make, just, Gradle, Cargo…") { showTasks = true }.takeIf { tasks.isNotEmpty() },
                 DockTool("Build & deploy", Ph.CloudArrowUp, AppColors.tiles.sky, "Build the site, preview it, save it as a zip or publish it") { showDeploy = true }
                     .takeIf { capabilities?.web?.isNotEmpty() == true },
+                DockTool("Updates", Ph.ArrowsClockwise, AppColors.tiles.peach, "Outdated dependencies: update some or all safe ones, then run the checks") { showDependencyUpdates = true }
+                    .takeIf { DependencyUpdates.toolsFor(stacks.orEmpty()).isNotEmpty() },
                 DockTool("Agent settings", Ph.Sparkle, AppColors.tiles.lilac, "Default agent, instruction files and MCP servers for this project", onClick = onAgentSettings),
                 DockTool("Databases", Ph.FloppyDisk, AppColors.tiles.sky, "PostgreSQL, Redis and MariaDB for this project, with connection strings", onClick = onDatabases),
                 DockTool(".env", Ph.LockSimple, AppColors.tiles.peach, "Edit environment variables, values hidden until tapped", onClick = onEnvFile),
@@ -412,6 +424,10 @@ fun ProjectScreen(
     if (showDeploy) capabilities?.web?.takeIf { it.isNotEmpty() }?.let { webProjects ->
         dev.yurlungr.app.web.BuildDeploySheet(dir, webProjects, onDismiss = { showDeploy = false },
             runInTerminal = runInTerminal, onPreview = onPreview, onOpenTerminal = onOpenTerminal)
+    }
+
+    if (showDependencyUpdates) {
+        DependencyUpdatesSheet(dir, stacks.orEmpty(), onDismiss = { showDependencyUpdates = false }, runInTerminal = runInTerminal)
     }
 
     if (showSetup) {
@@ -548,6 +564,9 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
     val track = if (dark) colors.surfaceContainer else colors.surfaceContainerHighest
     val thumb = if (dark) colors.primary else colors.surfaceContainer
     val onThumb = if (dark) colors.onPrimary else colors.onSurface
+    androidx.compose.foundation.layout.BoxWithConstraints {
+    // Five labels in a phone's width: the smaller label style keeps "Changes" and its count whole.
+    val narrow = maxWidth < 420.dp
     Row(
         Modifier
             .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 10.dp)
@@ -563,7 +582,8 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
             val badge = t == ProjectTab.Changes && changeCount > 0
             Row(
                 Modifier
-                    .weight(if (badge) 1.45f else 1f)
+                    // Overview is an icon, so six segments still fit a phone.
+                    .weight(if (badge) 1.45f else if (t == ProjectTab.Overview) 0.6f else 1f)
                     .semantics(mergeDescendants = true) {
                         role = androidx.compose.ui.semantics.Role.Tab
                         this.selected = on
@@ -576,9 +596,10 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
+                if (t == ProjectTab.Overview) PhIcon(Ph.Info, t.label, size = 18.dp, tint = if (on) onThumb else colors.onSurfaceVariant)
+                else Text(
                     t.label,
-                    style = MaterialTheme.typography.labelLarge,
+                    style = if (narrow) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge,
                     color = if (on) onThumb else colors.onSurfaceVariant,
                     maxLines = 1,
                     softWrap = false,
@@ -598,6 +619,7 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
                 }
             }
         }
+    }
     }
 }
 

@@ -449,6 +449,7 @@ class MainActivity : ComponentActivity() {
                 onEnvFile = { nav.push(Route.EnvFile(route.path)) },
                 onApiTester = { port -> nav.push(Route.ApiTester(route.path, port)) },
                 onPullRequests = { number -> nav.push(Route.PullRequests(route.path, number)) },
+                onFreeSpace = { nav.push(Route.FreeSpace) },
             )
             is Route.PullRequests -> dev.yurlungr.app.projects.PullRequestsScreen(File(route.path), route.number, onBack = back)
             is Route.ProjectDatabases -> dev.yurlungr.app.databases.DatabasesScreen(

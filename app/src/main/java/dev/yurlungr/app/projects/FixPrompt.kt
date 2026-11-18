@@ -13,6 +13,8 @@ data class FailureReport(
     val log: String,
     /** The app's own one-line summary (a web run's status), if any. */
     val message: String? = null,
+    /** More context for the agent, as is (what a dependency update changed). */
+    val details: String? = null,
 )
 
 /** The important part of a long log: the error lines with some context, and the end. */
@@ -99,6 +101,7 @@ object FixPrompt {
         report.command?.takeIf { it.isNotBlank() }?.let { append("What ran: `").append(it.replace("`", "'").take(500)).append("`\n") }
         if (report.stacks.isNotEmpty()) append("Stack: ").append(report.stacks.joinToString(", ")).append('\n')
         report.message?.takeIf { it.isNotBlank() }?.let { append("Status: ").append(it.take(300)).append('\n') }
+        report.details?.takeIf { it.isNotBlank() }?.let { append('\n').append(it.take(3000).trimEnd()).append('\n') }
         if (fixes.isNotEmpty()) {
             append("\nKnown phone issues this matches:\n")
             for (f in fixes) {

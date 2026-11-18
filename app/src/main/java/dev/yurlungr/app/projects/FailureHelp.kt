@@ -147,6 +147,16 @@ internal object InstalledVersions {
     }
 }
 
+/** Runtime versions [dir] asks for that this phone doesn't have (also shown on the Overview). */
+internal suspend fun versionWarnings(paths: RuntimePaths, dir: File, stacks: List<DetectedStack>): List<VersionWarning> = withContext(Dispatchers.IO) {
+    runCatching {
+        val dirs = (listOf(dir) + stacks.map { it.dir }).distinctBy { it.path }
+        val wanted = dirs.flatMap { RuntimeRequirements.read(it) }.distinctBy { it.runtime to it.range }
+        if (wanted.isEmpty()) return@runCatching emptyList()
+        RuntimeRequirements.mismatches(wanted, InstalledVersions.get(paths, wanted.map { it.runtime }.toSet()))
+    }.getOrDefault(emptyList())
+}
+
 private object HealthPrefs {
     private const val PREFS = "project_health"
     fun hidden(context: Context, key: String) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(key, false)
@@ -189,14 +199,7 @@ fun ProjectHealthCards(dir: File, stacks: List<DetectedStack>?, refreshKey: Int)
 
     val warnings by produceState(emptyList<VersionWarning>(), dir, refreshKey, stacks) {
         if (stacks == null) return@produceState
-        value = withContext(Dispatchers.IO) {
-            runCatching {
-                val dirs = (listOf(dir) + stacks.map { it.dir }).distinctBy { it.path }
-                val wanted = dirs.flatMap { RuntimeRequirements.read(it) }.distinctBy { it.runtime to it.range }
-                if (wanted.isEmpty()) return@runCatching emptyList()
-                RuntimeRequirements.mismatches(wanted, InstalledVersions.get(paths, wanted.map { it.runtime }.toSet()))
-            }.getOrDefault(emptyList())
-        }
+        value = versionWarnings(paths, dir, stacks)
     }
     val key = "versions:${dir.path}:" + warnings.joinToString("|") { "${it.requirement.runtime}${it.requirement.range}@${it.installed}" }
     if (warnings.isNotEmpty() && key !in hiddenNow && !remember(key) { HealthPrefs.hidden(context, key) }) {
