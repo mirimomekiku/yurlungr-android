@@ -15,7 +15,14 @@ object RuntimeEnv {
         "ANDROID_RUNTIME_ROOT", "ANDROID_TZDATA_ROOT",
     )
 
-    fun map(paths: RuntimePaths, cwd: File = paths.home): Map<String, String> = buildMap {
+    fun map(paths: RuntimePaths, cwd: File = paths.home): Map<String, String> {
+        val env = base(paths, cwd)
+        // In a Python project with a .venv, everything runs as if it were activated.
+        val venv = runCatching { ProjectVenv.find(cwd, paths.projects, paths.bin) }.getOrNull() ?: return env
+        return ProjectVenv.activate(env, venv)
+    }
+
+    private fun base(paths: RuntimePaths, cwd: File): Map<String, String> = buildMap {
         put("TERM", "xterm-256color")
         put("COLORTERM", "truecolor")
         put("LANG", "en_US.UTF-8")

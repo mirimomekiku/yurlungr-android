@@ -159,6 +159,7 @@ internal fun WebRunCard(root: File, onLogs: () -> Unit, onOptions: (() -> Unit)?
                 Spacer(Modifier.width(6.dp)); Text("Logs")
             }
         }
+        WebRunFailureHelp(run)
     }
     confirmation?.let { action ->
         WebRunConfirmation(action, run.config.project.directory.name, onDismiss = { confirmation = null }) {

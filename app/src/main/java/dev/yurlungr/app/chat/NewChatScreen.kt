@@ -94,7 +94,7 @@ private val SUGGESTIONS = listOf(
 )
 
 /** Remembers the last agent and project folder used for a new chat. */
-private object NewChatPrefs {
+internal object NewChatPrefs {
     private const val PREFS = "new_chat"
     fun agent(context: Context): Agent? =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("agent", null)

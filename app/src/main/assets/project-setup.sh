@@ -16,6 +16,8 @@ PKGS=$2
 shift 2
 source "${PREFIX:?Install the Linux environment first}/libexec/yurlungr/setup-common.sh" || exit $?
 setup_init "$HOME/project-setup.log"
+# Which project the log is about: the app shows a failed setup on that project's screen.
+printf 'project\t%s\n' "$DIR" >> "$LOG"
 cd "$DIR" || { bad "project folder $DIR"; setup_finish ""; }
 require_space 300
 

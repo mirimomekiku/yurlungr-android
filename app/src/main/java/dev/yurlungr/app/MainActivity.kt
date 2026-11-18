@@ -245,6 +245,10 @@ class MainActivity : ComponentActivity() {
                         dev.yurlungr.app.ui.LocalOpenExtensions provides { agent, project -> nav.push(Route.Extensions(agent, project)) },
                         LocalTopLevel provides nav.isTopLevel,
                         dev.yurlungr.app.ui.LocalOpenPalette provides { showPalette = true },
+                        dev.yurlungr.app.ui.LocalOpenChat provides { cwd, prompt ->
+                            scope.launch { dev.yurlungr.app.chat.PromptedChat.start(context, cwd, prompt)?.let { nav.reset(Route.Chat(it.id)) } }
+                        },
+                        dev.yurlungr.app.ui.LocalRunInTerminal provides { command, name -> runInTerminal(context, nav, command, name) },
                     ) {
                         AnimatedContent(
                             targetState = nav.current,

@@ -362,6 +362,12 @@ internal fun ChecksTab(
             }
         }
 
+        // Phone-specific failures (and runs that failed with nothing parsed): fixes and Ask the agent.
+        item {
+            ChecksFailureHelp(root, stacks, refreshKey, checks.joinToString("; ") { it.command }, testRuns.joinToString("; ") { it.command },
+                problemsParsed = !problems.isNullOrEmpty(), testsParsed = !tests.isNullOrEmpty())
+        }
+
         // Problems
         val list = problems
         item {

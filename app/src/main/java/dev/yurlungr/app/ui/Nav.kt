@@ -27,3 +27,12 @@ fun NavButton(onBack: () -> Unit) {
 
 /** Opens Skills & commands for an agent (by name) and a project folder; both null for the general view. */
 val LocalOpenExtensions = compositionLocalOf<((String?, String?) -> Unit)?> { null }
+
+/**
+ * Starts a new chat in a folder with a first message (e.g. "fix this failure"), with the user's
+ * preferred agent, and shows it. Null outside the app shell.
+ */
+val LocalOpenChat = compositionLocalOf<((cwd: java.io.File, prompt: String) -> Unit)?> { null }
+
+/** Runs a command in a new terminal tab and shows it, like the project's own commands. */
+val LocalRunInTerminal = compositionLocalOf<((command: String, name: String) -> Unit)?> { null }

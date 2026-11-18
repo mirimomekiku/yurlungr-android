@@ -87,7 +87,9 @@ class StackDetectorTest {
         assertEquals(setOf("python" to "backend", "go" to "backend", "node" to "frontend"), ids)
         val python = StackDetector.detect(tmp.root).first { it.id == "python" }
         // Made once, and able to import Termux's prebuilt numpy, pandas… instead of compiling them.
-        assertEquals("[ -d .venv ] || python -m venv --system-site-packages .venv", python.steps.first())
+        assertEquals(StackDetector.VENV, python.steps.first())
+        assertTrue(python.steps.first().contains("python -m venv --system-site-packages .venv"))
+        assertTrue(python.steps.first().contains("uv venv --seed --system-site-packages"))
         assertEquals(".venv/bin/pip install -r requirements.txt", python.steps.last())
     }
 
@@ -116,7 +118,7 @@ class StackDetectorTest {
         StackDetector.detect(tmp.root).single().let {
             assertEquals("Python (uv)", it.name)
             assertEquals(listOf("python", "uv"), it.packages)
-            assertEquals(listOf("[ -d .venv ] || uv venv --system-site-packages .venv", "uv sync"), it.steps)
+            assertEquals(listOf(StackDetector.UV_VENV, "uv sync"), it.steps)
         }
         File(tmp.root, "uv.lock").delete()
         write("pyproject.toml", "[tool.poetry]\nname = 'x'\n")

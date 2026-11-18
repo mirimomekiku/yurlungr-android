@@ -285,6 +285,7 @@ fun ProjectScreen(
                 onDismiss = { setupBannerDismissed = true; SetupBannerPrefs.dismiss(context, dir) },
             )
         }
+        ProjectHealthCards(dir, stacks, refreshKey = refreshTick * 1000 + reload)
         status?.error?.let { e ->
             GitErrorCard(
                 e,

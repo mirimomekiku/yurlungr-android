@@ -238,10 +238,23 @@ object StackDetector {
     }
 
     /**
+     * Keeps the venv the app just made out of git: adds `.venv/` to the folder's .gitignore unless
+     * it's already ignored (by git's rules, or a line in the file). Never fails the setup.
+     */
+    internal const val IGNORE_VENV = "{ git check-ignore -q .venv 2>/dev/null || grep -qsxE '/?\\.venv/?' .gitignore || " +
+        "{ { [ ! -s .gitignore ] || [ -z \"\$(tail -c1 .gitignore)\" ] || echo >> .gitignore; } && echo '.venv/' >> .gitignore; } || true; }"
+
+    /**
      * The project's venv, made once. With system site-packages, so the prebuilt numpy, pandas…
      * from the Python data & science pack are used instead of compiled; pip still installs into it.
      */
-    internal const val VENV = "[ -d .venv ] || python -m venv --system-site-packages .venv"
+    internal const val VENV = "[ -d .venv ] || { { if command -v uv >/dev/null; then " +
+        // --seed: pip goes in too (the steps run .venv/bin/pip); Termux's python, never a download.
+        "uv venv --seed --system-site-packages --python \"\$(command -v python)\" .venv; " +
+        "else python -m venv --system-site-packages .venv; fi; } && $IGNORE_VENV; }"
+
+    /** A uv project's venv: uv sync installs into it. */
+    internal const val UV_VENV = "[ -d .venv ] || { uv venv --system-site-packages --python \"\$(command -v python)\" .venv && $IGNORE_VENV; }"
 
     private fun python(root: File, dir: File): DetectedStack? {
         val requirements = File(dir, "requirements.txt")
@@ -260,7 +273,7 @@ object StackDetector {
         }
         // Always a project .venv: never installs into Termux's own Python.
         val steps = when (tool) {
-            "uv" -> listOf("[ -d .venv ] || uv venv --system-site-packages .venv", "uv sync")
+            "uv" -> listOf(UV_VENV, "uv sync")
             "poetry" -> listOf(VENV, ".venv/bin/pip install --upgrade pip poetry",
                 "POETRY_VIRTUALENVS_IN_PROJECT=true .venv/bin/poetry install --no-root")
             else -> listOf(VENV, ".venv/bin/pip install --upgrade pip", install)
