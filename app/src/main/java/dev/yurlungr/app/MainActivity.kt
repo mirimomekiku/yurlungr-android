@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -96,6 +95,8 @@ sealed interface Route {
     data class PullRequests(val path: String, val number: Int? = null) : Route
     /** Regenerable folders and shared caches to delete. */
     data object FreeSpace : Route
+    /** Find code across projects; [project] limits it to one folder name. */
+    data class FindCode(val project: String? = null, val query: String = "") : Route
 }
 
 /**
@@ -131,6 +132,10 @@ class Navigator(start: Route) {
         return null
     }
 
+    /** What to show beside the current screen on a wide window: the project, or the chat, it was opened from. */
+    fun paneBelow(): Route? = (if (current is Route.FileView) projectBelow() else null)
+        ?: (stack.getOrNull(stack.lastIndex - 1) as? Route.Chat)?.takeIf { current is Route.FileView || current is Route.Preview }
+
     fun pop() {
         direction = NavDirection.Pop
         if (stack.size > 1) stack.removeAt(stack.lastIndex) else stack[0] = Route.NewChat
@@ -159,10 +164,12 @@ class MainActivity : ComponentActivity() {
     private var showPalette by mutableStateOf(false)
     /** Something shared from another app, waiting for the share sheet. */
     private var pendingShare by mutableStateOf<dev.yurlungr.app.ui.SharedContent?>(null)
+    private val shortcutKeys = dev.yurlungr.app.ui.ShortcutKeys()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        shortcutKeys.attach(window)
         pendingChatId = intent?.getStringExtra(EXTRA_CHAT_ID)
         pendingScreen = debugScreen(intent) ?: terminalFrom(intent) ?: openFrom(intent)
         pendingShare = dev.yurlungr.app.ui.SharedContent.from(intent, packageName)
@@ -220,12 +227,32 @@ class MainActivity : ComponentActivity() {
                     pendingChatId = null
                 }
 
-                ModalNavigationDrawer(
+                dev.yurlungr.app.ui.ShortcutHost(shortcutKeys) { s ->
+                    // The terminal and web previews keep every key (Esc, Ctrl+K...) for themselves.
+                    if (nav.current == Route.Terminal || nav.current is Route.Preview) return@ShortcutHost false
+                    when (s) {
+                        dev.yurlungr.app.ui.Shortcut.NewChat -> go(Route.NewChat)
+                        dev.yurlungr.app.ui.Shortcut.Search, dev.yurlungr.app.ui.Shortcut.GoToFile -> showPalette = true
+                        dev.yurlungr.app.ui.Shortcut.FindCode -> if (nav.current !is Route.FindCode) nav.push(Route.FindCode())
+                        dev.yurlungr.app.ui.Shortcut.Settings -> go(Route.Settings)
+                        dev.yurlungr.app.ui.Shortcut.NextChat, dev.yurlungr.app.ui.Shortcut.PreviousChat -> {
+                            val recent = ChatSessions.chats.sortedByDescending { it.updatedAt }.map { it.id }
+                            dev.yurlungr.app.ui.Shortcuts.cycle(recent, (nav.current as? Route.Chat)?.id, s == dev.yurlungr.app.ui.Shortcut.NextChat)
+                                ?.let { nav.reset(Route.Chat(it)) }
+                        }
+                        dev.yurlungr.app.ui.Shortcut.Back -> onBackPressedDispatcher.onBackPressed()
+                        dev.yurlungr.app.ui.Shortcut.Help -> Unit
+                    }
+                    true
+                }
+
+                dev.yurlungr.app.ui.AdaptiveShell(
                     drawerState = drawer,
                     // The terminal needs horizontal drags for itself (selection, scrolling).
                     gesturesEnabled = drawer.isOpen || nav.current != Route.Terminal,
-                    drawerContent = {
+                    drawer = { pinned ->
                         AppDrawer(
+                            pinned = pinned,
                             current = nav.current,
                             onNewChat = { go(Route.NewChat) },
                             onOpenChat = { go(Route.Chat(it.id)) },
@@ -237,13 +264,14 @@ class MainActivity : ComponentActivity() {
                             onSearch = { scope.launch { drawer.close() }; showPalette = true },
                         )
                     },
-                ) {
+                ) { openDrawer ->
                     // Top-level places without their own back handling return to the new-chat screen.
                     BackHandler(enabled = nav.canGoBack) { nav.pop() }
                     Box(Modifier.fillMaxSize()) {
                     CompositionLocalProvider(
                         dev.yurlungr.app.ui.LocalOpenFile provides { nav.push(Route.FileView(it.path)) },
-                        LocalOpenDrawer provides { scope.launch { drawer.open() } },
+                        LocalOpenDrawer provides openDrawer,
+                        dev.yurlungr.app.projects.LocalFindCode provides { project -> nav.push(Route.FindCode(project)) },
                         dev.yurlungr.app.ui.LocalOpenExtensions provides { agent, project -> nav.push(Route.Extensions(agent, project)) },
                         LocalTopLevel provides nav.isTopLevel,
                         dev.yurlungr.app.ui.LocalOpenPalette provides { showPalette = true },
@@ -257,17 +285,16 @@ class MainActivity : ComponentActivity() {
                             transitionSpec = { screenTransition(nav.direction) },
                             label = "screen",
                         ) { route ->
-                            // Tablets and unfolded foldables: the project beside the file it opened.
-                            val window = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width
-                            val wide = with(androidx.compose.ui.platform.LocalDensity.current) { window.toDp() } >= 840.dp
-                            val project = if (wide && route is Route.FileView) nav.projectBelow() else null
-                            if (project != null) {
-                                androidx.compose.foundation.layout.Row(Modifier.fillMaxSize()) {
-                                    Box(Modifier.weight(0.42f)) { Screen(project, nav, context) }
+                            // Tablets and unfolded foldables: the project or chat beside the file (or preview) it opened.
+                            // The screen itself stays in the same place either way, so a fold or rotation keeps its state.
+                            val beside = if (dev.yurlungr.app.ui.LocalTwoPane.current && route == nav.current) nav.paneBelow() else null
+                            androidx.compose.foundation.layout.Row(Modifier.fillMaxSize()) {
+                                if (beside != null) {
+                                    Box(Modifier.weight(0.42f)) { Screen(beside, nav, context) }
                                     androidx.compose.material3.VerticalDivider(color = androidx.compose.material3.MaterialTheme.colorScheme.outlineVariant)
-                                    Box(Modifier.weight(0.58f)) { Screen(route, nav, context) }
                                 }
-                            } else Screen(route, nav, context)
+                                Box(Modifier.weight(if (beside != null) 0.58f else 1f)) { Screen(route, nav, context) }
+                            }
                         }
                     }
                     dev.yurlungr.app.chat.UrgentBanner(
@@ -309,12 +336,14 @@ class MainActivity : ComponentActivity() {
                                 place("Settings", dev.yurlungr.app.ui.Ph.GearSix, Route.Settings),
                                 place("System checks", dev.yurlungr.app.ui.Ph.ListChecks, Route.Setup),
                                 place("Development environment", dev.yurlungr.app.ui.Ph.Wrench, Route.DevEnvironment),
+                                place("Find code in projects", dev.yurlungr.app.ui.Ph.MagnifyingGlass, Route.FindCode()),
                             ),
                             onOpenProject = { nav.reset(Route.Project(it.path)) },
                             onOpenFile = { nav.push(Route.FileView(it.path)) },
                             onOpenChat = { nav.reset(Route.Chat(it)) },
                             runInTerminal = { command, name -> runInTerminal(context, nav, command, name) },
                             onDismiss = { showPalette = false },
+                            findCode = { nav.push(Route.FindCode(query = it)) },
                         )
                     }
                     // Registered last, so it wins: back closes the sidebar first.
@@ -397,6 +426,8 @@ class MainActivity : ComponentActivity() {
                 onFreeSpace = { nav.push(Route.FreeSpace) },
             )
             Route.FreeSpace -> dev.yurlungr.app.projects.FreeSpaceScreen(onBack = back)
+            is Route.FindCode -> dev.yurlungr.app.projects.CodeSearchScreen(route.project, route.query, onBack = back,
+                onOpenFile = { f, line -> nav.push(Route.FileView(f.path, edit = true, line = line)) })
             Route.DevEnvironment -> dev.yurlungr.app.setup.DevEnvironmentScreen(
                 refreshTick = resumeTick,
                 onBack = back,

@@ -121,6 +121,7 @@ fun ProjectSearchSheet(root: File, onDismiss: () -> Unit, onOpenFile: (File, Int
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Chip("Regular expression", selected = regex, onClick = { regex = !regex })
+            LocalFindCode.current?.let { find -> Chip("All projects", onClick = { onDismiss(); find(null) }) }
             if (running) WaveDots(dotSize = 4.dp)
         }
         error?.let { Text(it, color = colors.error, style = MaterialTheme.typography.bodySmall) }

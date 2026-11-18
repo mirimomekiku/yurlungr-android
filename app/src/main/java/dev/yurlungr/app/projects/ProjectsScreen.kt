@@ -238,6 +238,9 @@ fun ProjectsScreen(
             .systemBarsPadding(),
     ) {
         ScreenHeader("Projects", onBack) {
+            LocalFindCode.current?.let { find ->
+                IconButton(onClick = { find(null) }) { PhIcon(Ph.MagnifyingGlass, "Find code in all projects", size = 22.dp) }
+            }
             Box {
                 IconButton(onClick = { addMenu = true }) { PhIcon(Ph.Plus, "New or clone", size = 22.dp) }
                 DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {

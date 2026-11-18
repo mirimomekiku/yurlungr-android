@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,6 +23,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.PermanentDrawerSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -51,8 +53,10 @@ fun AppDrawer(
     onDeleteChat: (ChatSession) -> Unit,
     onNavigate: (Route) -> Unit,
     onSearch: () -> Unit = {},
+    /** Wide windows: shown beside the screen all the time instead of over it. */
+    pinned: Boolean = false,
 ) {
-    ModalDrawerSheet(Modifier.width(310.dp)) {
+    val body: @Composable ColumnScope.() -> Unit = {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 12.dp)) {
             Text(
                 "Yurlungr",
@@ -153,6 +157,8 @@ fun AppDrawer(
             }
         }
     }
+    if (pinned) PermanentDrawerSheet(Modifier.width(WindowLayout.SIDEBAR_DP.dp), content = body)
+    else ModalDrawerSheet(Modifier.width(310.dp), content = body)
 }
 
 @Composable

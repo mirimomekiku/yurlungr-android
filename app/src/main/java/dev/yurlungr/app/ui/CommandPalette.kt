@@ -92,6 +92,8 @@ fun CommandPalette(
     onOpenChat: (String) -> Unit,
     runInTerminal: (String, String) -> Unit,
     onDismiss: () -> Unit,
+    /** Opens Find code across projects with the typed text. */
+    findCode: ((String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val paths = remember { RuntimePaths(context) }
@@ -137,7 +139,11 @@ fun CommandPalette(
         val said = dev.yurlungr.app.chat.ChatSearch.search(ChatSessions.chats.toList(), query).map { h ->
             PaletteItem("In chats", h.chat.title, (if (h.fromUser) "You: " else h.chat.agent.displayName + ": ") + h.snippet, Ph.ChatCircle) { onOpenChat(h.chat.id) }
         }
-        (ranked.map { it.first }.take(60) + said).take(90)
+        // Text inside the projects' files: one entry that opens Find code.
+        val code = findCode?.takeIf { query.trim().length >= 2 }?.let { find ->
+            listOf(PaletteItem("Code", "Find “${query.trim()}” in all projects", null, Ph.MagnifyingGlass) { find(query.trim()) })
+        }.orEmpty()
+        (ranked.map { it.first }.take(60) + said + code).take(91)
     }
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }

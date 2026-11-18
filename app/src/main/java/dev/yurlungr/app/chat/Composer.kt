@@ -65,6 +65,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
@@ -433,7 +437,16 @@ fun ComposerField(
                     unfocusedIndicatorColor = Color.Transparent,
                     disabledIndicatorColor = Color.Transparent,
                 ),
-                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
+                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester).onPreviewKeyEvent { e ->
+                    // Hardware keyboards: Ctrl+Enter sends (plain Enter stays a new line), like the send button.
+                    val enter = e.key == androidx.compose.ui.input.key.Key.Enter || e.key == androidx.compose.ui.input.key.Key.NumPadEnter
+                    if (!enter || !e.isCtrlPressed) return@onPreviewKeyEvent false
+                    val hasContent = value.text.isNotBlank() || attachments.isNotEmpty()
+                    if (e.type == androidx.compose.ui.input.key.KeyEventType.KeyDown && enabled && hasContent && (!running || queueing)) {
+                        onSend(value.text, attachments.toList())
+                    }
+                    true
+                },
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box {
