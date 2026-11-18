@@ -102,6 +102,7 @@ fun ChatScreen(
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = chat.items.size)
     // A saved chat restarts its agent (and restores its context) when opened.
     LaunchedEffect(chat.id) { chat.resume() }
+    val voice = dev.yurlungr.app.voice.rememberVoiceChat(chat)
 
     // Follow the conversation while the user is at the bottom.
     val atBottom by remember {
@@ -130,6 +131,7 @@ fun ChatScreen(
             onBack = onBack,
             onNewChat = onNewChat,
             onFreshChat = freshChat,
+            voice = voice,
             onStop = chat::endSession,
             onDelete = {
                 chat.delete()
@@ -147,12 +149,13 @@ fun ChatScreen(
             items(chat.items, key = { it.key }) { item ->
                 // New messages fade/slide in; existing ones glide when the list reflows.
                 Box(Modifier.animateItem(fadeInSpec = tween(Motion.MEDIUM), placementSpec = tween(Motion.MEDIUM, easing = Motion.Emphasized))) {
-                    ChatItemView(chat, item)
+                    ChatItemView(chat, item, voice)
                 }
             }
             item(key = "footer") { ChatFooter(chat, onLogin, onInstallAgents, onSystemChecks) }
         }
 
+        dev.yurlungr.app.voice.VoiceBar(voice)
         Composer(chat, onFreshChat = freshChat)
     }
 }
@@ -162,7 +165,7 @@ fun ChatScreen(
  * (title, folder, state, context use) and the session actions.
  */
 @Composable
-private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Unit)?, onFreshChat: (() -> Unit)?, onStop: () -> Unit, onDelete: () -> Unit) {
+private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Unit)?, onFreshChat: (() -> Unit)?, voice: dev.yurlungr.app.voice.VoiceChat, onStop: () -> Unit, onDelete: () -> Unit) {
     var sheet by remember { mutableStateOf<String?>(null) }
     val export = rememberExportChat(chat)
     var exportMenu by remember { mutableStateOf(false) }
@@ -271,6 +274,7 @@ private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Un
                     text = { Text("Usage") },
                     onClick = { menu = false; sheet = "usage" },
                 )
+                dev.yurlungr.app.voice.VoiceMenuItems(voice) { menu = false }
                 DropdownMenuItem(
                     leadingIcon = { PhIcon(Ph.Stop, null, size = 18.dp) },
                     text = { Text("End session") },
@@ -342,10 +346,13 @@ private fun stateLabel(state: ChatState) = when (state) {
 }
 
 @Composable
-private fun ChatItemView(chat: ChatModel, item: ChatItem) {
+private fun ChatItemView(chat: ChatModel, item: ChatItem, voice: dev.yurlungr.app.voice.VoiceChat) {
     when (item) {
         is ChatItem.User -> UserBubble(item)
-        is ChatItem.AgentText -> SelectionContainer { MarkdownText(item.text, allowLocalFiles = !chat.isRemote) }
+        is ChatItem.AgentText -> Column {
+            SelectionContainer { MarkdownText(item.text, allowLocalFiles = !chat.isRemote) }
+            dev.yurlungr.app.voice.ReadAloudButton(voice, item)
+        }
         is ChatItem.Thought -> ThoughtView(item)
         is ChatItem.ToolCall -> ToolCallCard(item)
         is ChatItem.Plan -> PlanCard(item)

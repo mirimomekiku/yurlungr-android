@@ -89,6 +89,8 @@ fun SettingsScreen(
     var showPhantomHelp by remember { mutableStateOf(false) }
     var showLicenses by remember { mutableStateOf(false) }
     var showThemes by remember { mutableStateOf(false) }
+    var showVoice by remember { mutableStateOf(false) }
+    if (showVoice) dev.yurlungr.app.voice.VoiceSettingsSheet { showVoice = false }
     LaunchedEffect(context) { EditorPrefs.load(context) }
     var gh by remember { mutableStateOf<GhStatus?>(null) }
     LaunchedEffect(refreshTick) { if (paths.isBootstrapInstalled) gh = Git(paths).ghStatus() }
@@ -288,6 +290,12 @@ fun SettingsScreen(
                         icon = Ph.Lightning, tile = tiles.peach,
                         onClick = { dev.yurlungr.app.ui.Feedback.setPowerWarnings(context, !dev.yurlungr.app.ui.Feedback.powerWarnings) },
                         trailing = { Switch(dev.yurlungr.app.ui.Feedback.powerWarnings, { dev.yurlungr.app.ui.Feedback.setPowerWarnings(context, it) }) },
+                    )
+                    GroupRow(
+                        "Read aloud",
+                        subtitle = "Voice, speed and pitch for replies read to you and hands-free chats",
+                        icon = dev.yurlungr.app.voice.SpeakerHigh, tile = tiles.sky,
+                        onClick = { showVoice = true },
                     )
                     GroupRow("Tour", subtitle = "A quick look at what's where", icon = Ph.BookOpen, tile = tiles.lilac, onClick = onTour)
                 }
