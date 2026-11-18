@@ -333,6 +333,7 @@ class MainActivity : ComponentActivity() {
                         onNewChat = { nav.reset(Route.NewChat) },
                         onInstallAgents = { openAgentSetup(context, nav) },
                         onSystemChecks = { nav.push(Route.Setup) },
+                        onOpenChat = { nav.reset(Route.Chat(it)) },
                     )
                 }
             }

@@ -93,6 +93,18 @@ object ChatSessions {
 
     fun get(id: String?): ChatSession? = chats.firstOrNull { it.id == id }
 
+    /**
+     * A new chat with the same agent and folder whose first message is a digest of [from], for
+     * when its context is full. The old chat stays as it was.
+     */
+    fun continueFresh(context: Context, from: ChatSession): ChatSession {
+        val digest = ChatExport.digest(from.items.toList(), from.cwdLabel)
+        val chat = create(context, from.agent, from.cwd, from.skipPermissions)
+        chat.rename("Continued: " + from.title.removePrefix("Continued: "))
+        chat.queue(digest, emptyList())
+        return chat
+    }
+
     /** Ends the agent process but keeps the chat. */
     fun stop(chat: ChatSession) = chat.stop()
 

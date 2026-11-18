@@ -91,8 +91,14 @@ fun ChatScreen(
     /** Reruns the agents setup (offered when the agent couldn't start because something's missing). */
     onInstallAgents: (() -> Unit)? = null,
     onSystemChecks: (() -> Unit)? = null,
+    /** Opens another chat by id (the fresh chat a full context continues in). */
+    onOpenChat: ((String) -> Unit)? = null,
 ) {
     BackHandler(onBack = onBack)
+    val context = LocalContext.current
+    val freshChat: (() -> Unit)? = if (chat is ChatSession && onOpenChat != null) {
+        { onOpenChat(ChatSessions.continueFresh(context, chat).id) }
+    } else null
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = chat.items.size)
     // A saved chat restarts its agent (and restores its context) when opened.
     LaunchedEffect(chat.id) { chat.resume() }
@@ -123,6 +129,7 @@ fun ChatScreen(
             chat,
             onBack = onBack,
             onNewChat = onNewChat,
+            onFreshChat = freshChat,
             onStop = chat::endSession,
             onDelete = {
                 chat.delete()
@@ -146,7 +153,7 @@ fun ChatScreen(
             item(key = "footer") { ChatFooter(chat, onLogin, onInstallAgents, onSystemChecks) }
         }
 
-        Composer(chat)
+        Composer(chat, onFreshChat = freshChat)
     }
 }
 
@@ -155,8 +162,11 @@ fun ChatScreen(
  * (title, folder, state, context use) and the session actions.
  */
 @Composable
-private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Unit)?, onStop: () -> Unit, onDelete: () -> Unit) {
+private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Unit)?, onFreshChat: (() -> Unit)?, onStop: () -> Unit, onDelete: () -> Unit) {
     var sheet by remember { mutableStateOf<String?>(null) }
+    val export = rememberExportChat(chat)
+    var exportMenu by remember { mutableStateOf(false) }
+    if (sheet == "rename" && chat is ChatSession) RenameChatDialog(chat.title, onRename = chat::rename, onDismiss = { sheet = null })
     when (sheet) {
         "checkpoints" -> (chat as? ChatSession)?.let { CheckpointsSheet(it) { sheet = null } }
         "usage" -> UsageSheet(chat) { sheet = null }
@@ -210,6 +220,30 @@ private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Un
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                if (chat is ChatSession) {
+                    DropdownMenuItem(
+                        leadingIcon = { PhIcon(Ph.PencilSimple, null, size = 18.dp) },
+                        text = { Text("Rename") },
+                        onClick = { menu = false; sheet = "rename" },
+                    )
+                    DropdownMenuItem(
+                        leadingIcon = { PhIcon(Ph.PushPin, null, size = 18.dp) },
+                        text = { Text(if (chat.pinned) "Unpin" else "Pin to top") },
+                        onClick = { menu = false; chat.pin(!chat.pinned) },
+                    )
+                }
+                DropdownMenuItem(
+                    leadingIcon = { PhIcon(Ph.DownloadSimple, null, size = 18.dp) },
+                    text = { Text("Export chat…") },
+                    enabled = chat.items.isNotEmpty(),
+                    onClick = { menu = false; exportMenu = true },
+                )
+                if (onFreshChat != null) DropdownMenuItem(
+                    leadingIcon = { PhIcon(Ph.ArrowsLeftRight, null, size = 18.dp) },
+                    text = { Text("Continue in a new chat") },
+                    enabled = chat.items.any { it is ChatItem.User },
+                    onClick = { menu = false; onFreshChat() },
+                )
                 if (chat is ChatSession) DropdownMenuItem(
                     leadingIcon = { PhIcon(Ph.ClockCounterClockwise, null, size = 18.dp) },
                     text = { Text("Checkpoints") },
@@ -253,6 +287,18 @@ private fun ChatTopBar(chat: ChatModel, onBack: () -> Unit, onNewChat: (() -> Un
                         menu = false
                         onDelete()
                     },
+                )
+            }
+            DropdownMenu(expanded = exportMenu, onDismissRequest = { exportMenu = false }) {
+                Text(
+                    "Export as",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+                for (format in ExportFormat.entries) DropdownMenuItem(
+                    text = { Text(format.label + if (format == ExportFormat.Markdown) " (to read)" else " (for tools)") },
+                    onClick = { exportMenu = false; export(format) },
                 )
             }
         }
@@ -403,11 +449,24 @@ private fun ToolCallCard(item: ChatItem.ToolCall) {
                     modifier = Modifier.padding(start = 28.dp, top = 2.dp),
                 )
             }
+            // Folded: a failed call still shows what went wrong.
+            val errorLine = if (!expanded && item.status == "failed") remember(item.content) { firstErrorLine(item) } else null
+            if (errorLine != null) {
+                Text(
+                    errorLine,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 28.dp, top = 2.dp),
+                )
+            }
             if (expanded) {
                 Spacer(Modifier.height(8.dp))
                 for (c in item.content) {
                     when (c) {
-                        is ToolContent.Text -> CodeBlock(c.text.take(8000), maxLines = 60)
+                        is ToolContent.Text -> ToolOutputBlock(c.text)
                         is ToolContent.Diff -> DiffView(c)
                         is ToolContent.Terminal -> Text("Terminal output (${c.terminalId})", style = MaterialTheme.typography.bodySmall)
                     }
@@ -454,19 +513,7 @@ private fun ToolStatus(status: String) {
 /** Shows only the changed region (common prefix/suffix lines trimmed). */
 @Composable
 private fun DiffView(diff: ToolContent.Diff) {
-    val lines = remember(diff) {
-        val old = diff.oldText?.lines().orEmpty()
-        val new = diff.newText.lines()
-        var prefix = 0
-        while (prefix < old.size && prefix < new.size && old[prefix] == new[prefix]) prefix++
-        var suffix = 0
-        while (suffix < old.size - prefix && suffix < new.size - prefix &&
-            old[old.size - 1 - suffix] == new[new.size - 1 - suffix]
-        ) suffix++
-        val removed = old.subList(prefix, old.size - suffix).map { "-$it" }
-        val added = new.subList(prefix, new.size - suffix).map { "+$it" }
-        listOf("@@ ${diff.path}:${prefix + 1}") + (removed + added).take(300)
-    }
+    val lines = remember(diff) { ChatExport.changedLines(diff) }
     Column(
         Modifier
             .fillMaxWidth()

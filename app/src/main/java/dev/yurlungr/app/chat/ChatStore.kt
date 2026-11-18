@@ -33,6 +33,10 @@ data class SavedChat(
     val pendingText: String? = null,
     /** Messages queued behind a running turn, sent in order once the agent is free (text only). */
     val queuedTexts: List<String> = emptyList(),
+    /** Kept at the top of the chat list. */
+    val pinned: Boolean = false,
+    /** The user named this chat: the agent's own titles no longer replace it. */
+    val titleLocked: Boolean = false,
 )
 
 /**
@@ -78,6 +82,8 @@ object ChatStore {
         put("cwd", chat.cwd)
         put("title", chat.title)
         put("skipPermissions", chat.skipPermissions)
+        if (chat.pinned) put("pinned", true)
+        if (chat.titleLocked) put("titleLocked", true)
         chat.pendingText?.let { put("pending", it) }
         if (chat.queuedTexts.isNotEmpty()) putJsonArray("queued") { chat.queuedTexts.forEach { add(JsonPrimitive(it)) } }
         chat.acpSessionId?.let { put("acpSessionId", it) }
@@ -158,6 +164,8 @@ object ChatStore {
         title = obj.str("title") ?: "Chat",
         skipPermissions = (obj["skipPermissions"] as? JsonPrimitive)?.booleanOrNull ?: false,
         pendingText = obj.str("pending"),
+        pinned = (obj["pinned"] as? JsonPrimitive)?.booleanOrNull ?: false,
+        titleLocked = (obj["titleLocked"] as? JsonPrimitive)?.booleanOrNull ?: false,
         queuedTexts = (obj["queued"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull },
         acpSessionId = obj.str("acpSessionId"),
         updatedAt = (obj["updatedAt"] as? JsonPrimitive)?.longOrNull ?: 0L,

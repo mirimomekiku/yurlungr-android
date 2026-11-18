@@ -143,6 +143,33 @@ class ChatSession(
     var updatedAt by mutableStateOf(restored?.updatedAt ?: System.currentTimeMillis())
         private set
 
+    /** Kept at the top of the chat list. */
+    var pinned by mutableStateOf(restored?.pinned ?: false)
+        private set
+
+    /** The user named this chat; the agent's titles no longer replace it. */
+    private var titleLocked = restored?.titleLocked ?: false
+
+    /** Names the chat (blank: back to the automatic title, which the agent may update again). */
+    fun rename(newTitle: String) {
+        val t = newTitle.trim().replace(Regex("\\s+"), " ").take(80)
+        titleLocked = t.isNotEmpty()
+        title = t.ifEmpty { items.firstNotNullOfOrNull { (it as? ChatItem.User)?.text?.lineSequence()?.firstOrNull { l -> l.isNotBlank() }?.take(48) } ?: defaultTitle }
+        save()
+    }
+
+    fun pin(value: Boolean) {
+        if (pinned == value) return
+        pinned = value
+        save()
+    }
+
+    /** Saves without counting as activity (pinning or renaming doesn't move a chat to "Today"). */
+    private fun save() {
+        if (closed) return
+        onChanged?.invoke(this)
+    }
+
     /** The agent-side session to resume with `session/load` after a restart. */
     private var acpSessionId: String? = restored?.acpSessionId
     /** While loading a saved session the agent replays history we already show; drop it. */
@@ -426,6 +453,8 @@ class ChatSession(
         skipPermissions = skipPermissions,
         pendingText = pendingPrompt?.first,
         queuedTexts = queued.map { it.text },
+        pinned = pinned,
+        titleLocked = titleLocked,
     )
 
     // ---- user actions ------------------------------------------------------------------
@@ -450,7 +479,7 @@ class ChatSession(
 
     private fun showUserMessage(text: String, attachments: List<Attachment>) {
         // Like ChatGPT: the first message names the chat (an agent-provided title still wins later).
-        if (items.none { it is ChatItem.User } && title == defaultTitle) {
+        if (!titleLocked && items.none { it is ChatItem.User } && title == defaultTitle) {
             title = text.trim().lineSequence().firstOrNull { it.isNotBlank() }?.take(48)
                 ?: attachments.firstOrNull()?.name ?: title
         }
@@ -478,6 +507,19 @@ class ChatSession(
             queued.removeAt(index)
             changed()
         }
+    }
+
+    override val canEditQueue: Boolean get() = true
+
+    override fun moveQueued(from: Int, to: Int) {
+        if (from !in queued.indices || to !in queued.indices || from == to) return
+        queued.add(to, queued.removeAt(from))
+        changed()
+    }
+
+    override fun takeQueued(index: Int): QueuedMessage? {
+        if (index !in queued.indices) return null
+        return queued.removeAt(index).also { changed() }
     }
 
     override fun sendQueuedNow() {
@@ -705,7 +747,7 @@ class ChatSession(
             "tool_call", "tool_call_update" -> upsertToolCall(update)
             "plan" -> updatePlan(update)
             "current_mode_update" -> currentModeId = update.string("currentModeId") ?: currentModeId
-            "session_info_update" -> update.string("title")?.let { title = it }
+            "session_info_update" -> update.string("title")?.takeIf { !titleLocked }?.let { title = it }
             "notice" -> (update.string("message") ?: update.string("text"))?.let { add(ChatItem.Notice(it)) }
             "available_commands_update" -> commands = AcpExtras.parseCommands(update["availableCommands"])
             "config_option_update" -> configOptions = AcpExtras.parseConfigOptions(update["configOptions"])

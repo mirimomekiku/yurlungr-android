@@ -43,6 +43,12 @@ interface ChatModel {
     /** Sends [text] now when idle; otherwise queues it behind the running turn. */
     fun enqueue(text: String, attachments: List<Attachment>) = send(text, attachments)
     fun removeQueued(index: Int) {}
+    /** Queued messages can be reordered and taken back for editing (chats on this phone). */
+    val canEditQueue: Boolean get() = false
+    /** Moves a queued message from [from] to [to] (both indexes into [queued]). */
+    fun moveQueued(from: Int, to: Int) {}
+    /** Takes a queued message out of the queue (to edit it in the message box). */
+    fun takeQueued(index: Int): QueuedMessage? = null
     /** Stops the running turn so the first queued message goes out right away. */
     fun sendQueuedNow() {}
     /** Project files matching [query] for @-mentions (relative paths). */

@@ -67,7 +67,26 @@ fun AppDrawer(
             }
         }
 
-        val groups = remember(ChatSessions.chats.toList(), ChatSessions.chats.map { it.updatedAt }) { groupByDay(ChatSessions.chats) }
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val byProject = ChatListPrefs.byProject(context)
+        val groups = remember(ChatSessions.chats.toList(), ChatSessions.chats.map { Triple(it.updatedAt, it.pinned, it.title) }, byProject) {
+            chatGroups(ChatSessions.chats, byProject)
+        }
+        var renaming by remember { mutableStateOf<ChatSession?>(null) }
+        renaming?.let { chat ->
+            dev.yurlungr.app.chat.RenameChatDialog(chat.title, onRename = chat::rename, onDismiss = { renaming = null })
+        }
+        if (ChatSessions.chats.isNotEmpty()) Row(
+            Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Chats", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+            androidx.compose.material3.TextButton(onClick = { ChatListPrefs.setByProject(context, !byProject) }) {
+                Text(if (byProject) "By project" else "By day", style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.width(4.dp))
+                PhIcon(Ph.ArrowsLeftRight, "Group chats by day or by project", size = 14.dp)
+            }
+        }
         LazyColumn(Modifier.weight(1f).padding(horizontal = 12.dp)) {
             if (groups.isEmpty()) {
                 item {
@@ -86,7 +105,9 @@ fun AppDrawer(
                         chat,
                         modifier = Modifier.animateItem(),
                         selected = current == Route.Chat(chat.id),
+                        showFolder = !byProject || label == PINNED,
                         onOpen = { onOpenChat(chat) },
+                        onRename = { renaming = chat },
                         onDelete = { onDeleteChat(chat) },
                     )
                 }
@@ -146,7 +167,15 @@ private fun GroupLabel(text: String) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChatEntry(chat: ChatSession, selected: Boolean, onOpen: () -> Unit, onDelete: () -> Unit, modifier: Modifier = Modifier) {
+private fun ChatEntry(
+    chat: ChatSession,
+    selected: Boolean,
+    showFolder: Boolean,
+    onOpen: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     var menu by remember { mutableStateOf(false) }
     Box(modifier) {
         Row(
@@ -161,7 +190,7 @@ private fun ChatEntry(chat: ChatSession, selected: Boolean, onOpen: () -> Unit, 
             Column(Modifier.weight(1f)) {
                 Text(chat.title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
-                    chat.agent.displayName + " · " + chat.folderName,
+                    chat.agent.displayName + if (showFolder) " · " + chat.folderName else "",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -174,6 +203,16 @@ private fun ChatEntry(chat: ChatSession, selected: Boolean, onOpen: () -> Unit, 
             }
         }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(
+                text = { Text(if (chat.pinned) "Unpin" else "Pin to top") },
+                leadingIcon = { PhIcon(Ph.PushPin, null, size = 18.dp) },
+                onClick = { menu = false; chat.pin(!chat.pinned) },
+            )
+            DropdownMenuItem(
+                text = { Text("Rename") },
+                leadingIcon = { PhIcon(Ph.PencilSimple, null, size = 18.dp) },
+                onClick = { menu = false; onRename() },
+            )
             DropdownMenuItem(text = { Text("Delete chat", color = MaterialTheme.colorScheme.error) }, onClick = {
                 menu = false
                 onDelete()
@@ -188,18 +227,55 @@ private fun Activity(color: Color) {
     Box(Modifier.size(8.dp).clip(CircleShape).background(color))
 }
 
+private const val PINNED = "Pinned"
+
+/** Whether the sidebar groups chats by project instead of by day (remembered). */
+object ChatListPrefs {
+    private val state = mutableStateOf<Boolean?>(null)
+
+    fun byProject(context: android.content.Context): Boolean =
+        state.value ?: context.getSharedPreferences("chat_list", android.content.Context.MODE_PRIVATE)
+            .getBoolean("by_project", false).also { state.value = it }
+
+    fun setByProject(context: android.content.Context, value: Boolean) {
+        state.value = value
+        context.getSharedPreferences("chat_list", android.content.Context.MODE_PRIVATE).edit().putBoolean("by_project", value).apply()
+    }
+}
+
+/** Pinned chats first, then the rest by day or by project folder. */
+internal fun <T> groupChats(
+    chats: List<T>,
+    byProject: Boolean,
+    pinned: (T) -> Boolean,
+    updatedAt: (T) -> Long,
+    folder: (T) -> String,
+    now: Long = System.currentTimeMillis(),
+): List<Pair<String, List<T>>> {
+    val sorted = chats.sortedByDescending(updatedAt)
+    val top = sorted.filter(pinned)
+    val rest = sorted.filterNot(pinned)
+    val groups = if (byProject) rest.groupBy(folder).toList() else groupByDay(rest, updatedAt, now)
+    return (if (top.isEmpty()) emptyList() else listOf(PINNED to top)) + groups
+}
+
+private fun chatGroups(chats: List<ChatSession>, byProject: Boolean) =
+    groupChats(chats, byProject, { it.pinned }, { it.updatedAt }, { it.cwdLabel })
+
 /** Today / Yesterday / Previous 7 days / Older, newest first. */
-private fun groupByDay(chats: List<ChatSession>): List<Pair<String, List<ChatSession>>> {
+private fun <T> groupByDay(chats: List<T>, updatedAt: (T) -> Long, now: Long): List<Pair<String, List<T>>> {
     val today = Calendar.getInstance().apply {
+        timeInMillis = now
         set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
     }.timeInMillis
     val day = 24 * 60 * 60 * 1000L
-    return chats.sortedByDescending { it.updatedAt }
+    return chats.sortedByDescending(updatedAt)
         .groupBy { c ->
+            val t = updatedAt(c)
             when {
-                c.updatedAt >= today -> "Today"
-                c.updatedAt >= today - day -> "Yesterday"
-                c.updatedAt >= today - 7 * day -> "Previous 7 days"
+                t >= today -> "Today"
+                t >= today - day -> "Yesterday"
+                t >= today - 7 * day -> "Previous 7 days"
                 else -> "Older"
             }
         }

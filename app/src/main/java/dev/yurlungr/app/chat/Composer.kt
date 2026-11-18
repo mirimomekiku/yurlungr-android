@@ -87,7 +87,7 @@ import kotlinx.coroutines.withContext
 
 /** Composer bound to an existing chat. */
 @Composable
-fun Composer(chat: ChatModel) {
+fun Composer(chat: ChatModel, onFreshChat: (() -> Unit)? = null) {
     val appContext = LocalContext.current
     var input by rememberSaveable(chat.id, stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(Drafts.get(appContext, chat.id))) }
     // Unsent text survives restarts: saved shortly after the last keystroke.
@@ -103,7 +103,13 @@ fun Composer(chat: ChatModel) {
     }
     val attachments = remember(chat.id) { mutableStateListOf<Attachment>() }
     Column {
-    QueueChips(chat)
+    ContextMeter(chat, onFreshChat)
+    QueueChips(chat, onEdit = { m ->
+        // Back into the message box: after what's already typed, not over it.
+        val text = if (input.text.isBlank()) m.text else input.text.trimEnd() + "\n\n" + m.text
+        input = TextFieldValue(text, selection = TextRange(text.length))
+        attachments += m.attachments
+    })
     ComposerField(
         value = input,
         onValueChange = { input = it },
@@ -128,9 +134,54 @@ fun Composer(chat: ChatModel) {
     }
 }
 
-/** Messages typed while the agent was busy, in the order they'll be sent. */
+/** How full the agent's context window is, shown once it passes [ContextUse.SHOW_AT], with ways to make room. */
+object ContextUse {
+    const val SHOW_AT = 0.6f
+    const val WARN_AT = 0.85f
+
+    /** Share of the context window in use, or null when the agent doesn't report it. */
+    fun fraction(u: Usage?): Float? = u?.takeIf { it.size > 0 }?.let { (it.used.toFloat() / it.size).coerceIn(0f, 1f) }
+
+    /** The agent's own command for summarizing its context, if it has one (Claude Code's /compact). */
+    fun compactCommand(commands: List<SlashCommand>): SlashCommand? = commands.firstOrNull { it.name.equals("compact", ignoreCase = true) }
+}
+
 @Composable
-private fun QueueChips(chat: ChatModel) {
+private fun ContextMeter(chat: ChatModel, onFreshChat: (() -> Unit)?) {
+    val fraction = ContextUse.fraction(chat.usage) ?: return
+    if (fraction < ContextUse.SHOW_AT) return
+    val warn = fraction >= ContextUse.WARN_AT
+    val colors = MaterialTheme.colorScheme
+    val tint = if (warn) colors.error else colors.primary
+    val compact = ContextUse.compactCommand(chat.commands)
+    Row(
+        Modifier.fillMaxWidth().background(colors.background).padding(start = 14.dp, end = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        androidx.compose.material3.LinearProgressIndicator(
+            progress = { fraction },
+            color = tint,
+            trackColor = colors.surfaceContainerHighest,
+            modifier = Modifier.width(56.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            "Context ${(fraction * 100).toInt()}% full",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (warn) colors.error else colors.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        if (compact != null) TextButton(
+            onClick = { chat.enqueue("/${compact.name}", emptyList()) },
+            enabled = chat.state == ChatState.Ready || chat.isRunning,
+        ) { Text("Compact") }
+        if (onFreshChat != null && (warn || compact == null)) TextButton(onClick = onFreshChat) { Text("New chat with summary") }
+    }
+}
+
+/** Messages typed while the agent was busy, in the order they'll be sent. Tap one to edit, move or remove it. */
+@Composable
+private fun QueueChips(chat: ChatModel, onEdit: (QueuedMessage) -> Unit) {
     val queued = chat.queued
     if (queued.isEmpty()) return
     Row(
@@ -140,12 +191,37 @@ private fun QueueChips(chat: ChatModel) {
     ) {
         PhIcon(Ph.ListChecks, null, size = 16.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         queued.forEachIndexed { i, m ->
-            InputChip(
-                selected = false,
-                onClick = { chat.removeQueued(i) },
-                label = { Text("${i + 1}. " + m.text.ifBlank { m.attachments.firstOrNull()?.name.orEmpty() }, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 180.dp)) },
-                trailingIcon = { PhIcon(Ph.X, "Remove from queue", size = 14.dp) },
-            )
+            var menu by remember { mutableStateOf(false) }
+            Box {
+                InputChip(
+                    selected = false,
+                    onClick = { if (chat.canEditQueue) menu = true else chat.removeQueued(i) },
+                    label = { Text("${i + 1}. " + m.text.ifBlank { m.attachments.firstOrNull()?.name.orEmpty() }, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 180.dp)) },
+                    trailingIcon = if (chat.canEditQueue) null else ({ PhIcon(Ph.X, "Remove from queue", size = 14.dp) }),
+                )
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Edit") },
+                        leadingIcon = { PhIcon(Ph.PencilSimple, null, size = 18.dp) },
+                        onClick = { menu = false; chat.takeQueued(i)?.let(onEdit) },
+                    )
+                    if (i > 0) DropdownMenuItem(
+                        text = { Text(if (i == 1) "Send first" else "Move earlier") },
+                        leadingIcon = { PhIcon(Ph.CaretLeft, null, size = 18.dp) },
+                        onClick = { menu = false; chat.moveQueued(i, i - 1) },
+                    )
+                    if (i < queued.lastIndex) DropdownMenuItem(
+                        text = { Text("Move later") },
+                        leadingIcon = { PhIcon(Ph.CaretRight, null, size = 18.dp) },
+                        onClick = { menu = false; chat.moveQueued(i, i + 1) },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Remove", color = MaterialTheme.colorScheme.error) },
+                        leadingIcon = { PhIcon(Ph.X, null, size = 18.dp, tint = MaterialTheme.colorScheme.error) },
+                        onClick = { menu = false; chat.removeQueued(i) },
+                    )
+                }
+            }
         }
         if (chat.isRunning) TextButton(onClick = chat::sendQueuedNow) { Text("Send now") }
         else if (chat.state == ChatState.Ready) TextButton(onClick = chat::sendQueuedNow) { Text("Send") }
