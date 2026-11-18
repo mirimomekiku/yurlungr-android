@@ -81,6 +81,7 @@ fun SettingsScreen(
     runInTerminal: (command: String, name: String) -> Unit,
     onDevEnvironment: () -> Unit = {},
     onTour: () -> Unit = {},
+    onFreeSpace: () -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -145,6 +146,13 @@ fun SettingsScreen(
                         icon = Ph.Wrench,
                         tile = tiles.lime,
                         onClick = onDevEnvironment,
+                    )
+                    GroupRow(
+                        "Free up space",
+                        subtitle = "node_modules, build output and package caches",
+                        icon = Ph.Trash,
+                        tile = tiles.peach,
+                        onClick = onFreeSpace,
                     )
                     val agents = checks["agents"]
                     GroupRow(

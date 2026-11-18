@@ -173,6 +173,7 @@ fun ProjectScreen(
     /** Runnable tasks (package.json scripts, make, Gradle…), found with the stacks. */
     var tasks by remember(dir.path) { mutableStateOf(emptyList<ProjectTask>()) }
     var showTasks by remember { mutableStateOf(false) }
+    var showDeploy by remember { mutableStateOf(false) }
     var setupBannerDismissed by remember(dir.path) { mutableStateOf(SetupBannerPrefs.dismissed(context, dir)) }
     var headerVisible by remember { mutableStateOf(true) }
     LaunchedEffect(tab) { headerVisible = true }
@@ -385,6 +386,8 @@ fun ProjectScreen(
             setupNeeded = needs.isNotEmpty(),
             extraTools = listOfNotNull(
                 DockTool("Scripts", Ph.Play, AppColors.tiles.lime, "Run package.json scripts, make, just, Gradle, Cargo…") { showTasks = true }.takeIf { tasks.isNotEmpty() },
+                DockTool("Build & deploy", Ph.CloudArrowUp, AppColors.tiles.sky, "Build the site, preview it, save it as a zip or publish it") { showDeploy = true }
+                    .takeIf { capabilities?.web?.isNotEmpty() == true },
                 DockTool("Agent settings", Ph.Sparkle, AppColors.tiles.lilac, "Default agent, instruction files and MCP servers for this project", onClick = onAgentSettings),
                 DockTool("Databases", Ph.FloppyDisk, AppColors.tiles.sky, "PostgreSQL, Redis and MariaDB for this project, with connection strings", onClick = onDatabases),
                 DockTool(".env", Ph.LockSimple, AppColors.tiles.peach, "Edit environment variables, values hidden until tapped", onClick = onEnvFile),
@@ -397,6 +400,11 @@ fun ProjectScreen(
             showTasks = false
             runInTerminal("cd ${shellQuote(task.dir.path)} && ${task.command}", "${task.name} · ${dir.name}")
         }
+    }
+
+    if (showDeploy) capabilities?.web?.takeIf { it.isNotEmpty() }?.let { webProjects ->
+        dev.yurlungr.app.web.BuildDeploySheet(dir, webProjects, onDismiss = { showDeploy = false },
+            runInTerminal = runInTerminal, onPreview = onPreview, onOpenTerminal = onOpenTerminal)
     }
 
     if (showSetup) {

@@ -118,6 +118,7 @@ fun ProjectsScreen(
     runInTerminal: (command: String, name: String) -> Unit,
     /** Opens a running web app in the in-app preview (after "install and run"). */
     onPreview: (url: String, title: String) -> Unit = { _, _ -> },
+    onFreeSpace: () -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -248,6 +249,10 @@ fun ProjectsScreen(
                     DropdownMenuItem(leadingIcon = { PhIcon(Ph.DownloadSimple, null, size = 18.dp) }, text = { Text("Clone from URL") }, onClick = {
                         addMenu = false
                         cloning = true
+                    })
+                    DropdownMenuItem(leadingIcon = { PhIcon(Ph.Trash, null, size = 18.dp) }, text = { Text("Free up space") }, onClick = {
+                        addMenu = false
+                        onFreeSpace()
                     })
                 }
             }

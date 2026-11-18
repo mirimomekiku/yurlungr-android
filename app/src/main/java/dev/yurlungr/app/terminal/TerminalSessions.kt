@@ -50,6 +50,8 @@ object TerminalSessions {
     private val commands = HashMap<TerminalSession, String?>()
     private val statusIds = HashMap<TerminalSession, String>()
     private val cwds = HashMap<TerminalSession, File>()
+    /** Extra variables a command was started with (deploy tokens), so a restart gets them too. Memory only. */
+    private val extraEnvs = HashMap<TerminalSession, Map<String, String>>()
     private val startedAt = HashMap<TerminalSession, Long>()
     private val finishedAt = HashMap<TerminalSession, Long>()
     /** Relaunches waiting for their old process to exit (see [restart]). */
@@ -102,10 +104,11 @@ object TerminalSessions {
         val command = commands[session]
         val name = names[session]
         val cwd = cwds[session]
+        val extra = extraEnvs[session].orEmpty()
         val relaunch = {
             val index = sessions.indexOf(session).takeIf { it >= 0 }
             closeDirect(context, session)
-            runCatching { create(context, command, name, workingDirectory = cwd, index = index) }.onFailure {
+            runCatching { create(context, command, name, workingDirectory = cwd, index = index, extraEnv = extra) }.onFailure {
                 Log.w("TerminalSessions", "Restart failed", it)
                 android.widget.Toast.makeText(context, "Couldn't restart: ${it.message}", android.widget.Toast.LENGTH_LONG).show()
             }
@@ -133,6 +136,8 @@ object TerminalSessions {
         workingDirectory: File? = null,
         /** Position in the tab list (a restarted tab keeps its place); appended when null. */
         index: Int? = null,
+        /** Added to the environment: how secrets reach a command without being in its text. */
+        extraEnv: Map<String, String> = emptyMap(),
     ): TerminalSession {
         val paths = RuntimePaths(context)
         // Before (or during a re)install there's no shell to run: say so instead of "exited with code 1".
@@ -159,7 +164,7 @@ object TerminalSessions {
             val profiled = "${dev.yurlungr.app.runtime.RuntimeEnv.PROFILE_SNIPPET}\n$command"
             paths.bash to arrayOf("bash", "-c", if (keepShell) "$profiled\n$status\n$welcome\nexec bash -l" else profiled)
         }
-        val env = RuntimeEnv.map(paths, cwd) + ("YURLUNGR_SESSION_ID" to statusId)
+        val env = RuntimeEnv.map(paths, cwd) + extraEnv + ("YURLUNGR_SESSION_ID" to statusId)
         val session = TerminalSession(
             shell.path,
             cwd.path,
@@ -171,6 +176,7 @@ object TerminalSessions {
         statusIds[session] = statusId
         commands[session] = command
         cwds[session] = cwd
+        if (extraEnv.isNotEmpty()) extraEnvs[session] = extraEnv
         startedAt[session] = System.currentTimeMillis()
         javaHomes[session] = env["JAVA_HOME"]
         if (name != null) names[session] = name
@@ -200,6 +206,7 @@ object TerminalSessions {
         commands.remove(session)
         statusIds.remove(session)
         cwds.remove(session)
+        extraEnvs.remove(session)
         startedAt.remove(session)
         finishedAt.remove(session)
         if (current === session) current = sessions.lastOrNull()

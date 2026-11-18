@@ -92,6 +92,8 @@ sealed interface Route {
     data class ProjectDatabases(val path: String) : Route
     /** A project's .env editor. */
     data class EnvFile(val path: String) : Route
+    /** Regenerable folders and shared caches to delete. */
+    data object FreeSpace : Route
 }
 
 /**
@@ -386,7 +388,9 @@ class MainActivity : ComponentActivity() {
                 runInTerminal = { command, name -> runInTerminal(context, nav, command, name) },
                 onDevEnvironment = { nav.push(Route.DevEnvironment) },
                 onTour = { nav.push(Route.Tour) },
+                onFreeSpace = { nav.push(Route.FreeSpace) },
             )
+            Route.FreeSpace -> dev.yurlungr.app.projects.FreeSpaceScreen(onBack = back)
             Route.DevEnvironment -> dev.yurlungr.app.setup.DevEnvironmentScreen(
                 refreshTick = resumeTick,
                 onBack = back,
@@ -417,6 +421,7 @@ class MainActivity : ComponentActivity() {
                 onOpenProject = { nav.reset(Route.Project(it.path)) },
                 runInTerminal = { command, name -> runInTerminal(context, nav, command, name) },
                 onPreview = { url, title -> nav.push(Route.Preview(url, title)) },
+                onFreeSpace = { nav.push(Route.FreeSpace) },
             )
             is Route.Project -> ProjectScreen(
                 dir = File(route.path),
