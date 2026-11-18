@@ -3,7 +3,8 @@
     <string name="app_name">Yurlungr</string>
     <string name="widget_new_chat">New chat</string>
     <string name="widget_ask">Ask an agent…</string>
-    <string name="widget_description">New chat, your last project and running servers</string>
+    <string name="widget_description">New chat, your last project, running servers and what your agents are doing</string>
     <string name="tile_servers">Dev servers</string>
     <string name="tile_terminal">Terminal</string>
+    <string name="tile_agents">Agents</string>
 </resources>

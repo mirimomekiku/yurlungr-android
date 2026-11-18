@@ -33,6 +33,25 @@ object OpenIn {
     /** New chat with the keyboard already up: type and send. */
     const val QUICK_ASK = "quick_ask"
     const val PROJECT = "project:"
+    const val ACTIVITY = "activity"
+
+    /** The chat waiting for an answer, or the Activity screen (what agents are doing). */
+    fun agentsIntent(context: Context): Intent {
+        val chatId = dev.yurlungr.app.chat.AgentStatus.chatNeedingYou()
+        return if (chatId != null) {
+            Intent(context, MainActivity::class.java).setAction(Intent.ACTION_VIEW).putExtra(MainActivity.EXTRA_CHAT_ID, chatId)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        } else intent(context, ACTIVITY)
+    }
+
+    fun agentsPending(context: Context): PendingIntent =
+        PendingIntent.getActivity(context, ACTIVITY.hashCode(), agentsIntent(context), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+
+    /** The agents tile and the widget's agents button, after a chat started, stopped or asked for something. */
+    fun refreshAgents(context: Context) {
+        HomeWidget.update(context)
+        runCatching { TileService.requestListeningState(context, ComponentName(context, AgentsTileService::class.java)) }
+    }
 
     fun intent(context: Context, place: String): Intent =
         Intent(context, MainActivity::class.java).setAction(Intent.ACTION_VIEW).putExtra(MainActivity.EXTRA_OPEN, place)
@@ -64,15 +83,34 @@ object OpenIn {
         HomeWidget.update(context)
         updateShortcuts(context)
         runCatching { TileService.requestListeningState(context, ComponentName(context, ServersTileService::class.java)) }
+        runCatching { TileService.requestListeningState(context, ComponentName(context, AgentsTileService::class.java)) }
     }
 }
 
 // Android 14 takes a PendingIntent; older versions only the Intent form.
 @android.annotation.SuppressLint("StartActivityAndCollapseDeprecated")
-private fun TileService.open(place: String) {
-    val intent = OpenIn.intent(this, place)
-    if (Build.VERSION.SDK_INT >= 34) startActivityAndCollapse(OpenIn.pending(this, place))
+private fun TileService.open(place: String) = open(OpenIn.intent(this, place), OpenIn.pending(this, place))
+
+@android.annotation.SuppressLint("StartActivityAndCollapseDeprecated")
+private fun TileService.open(intent: Intent, pending: PendingIntent) {
+    if (Build.VERSION.SDK_INT >= 34) startActivityAndCollapse(pending)
     else @Suppress("DEPRECATION") startActivityAndCollapse(intent)
+}
+
+/** Quick Settings: what the agents are doing; tap for the chat that needs you, or Activity. */
+class AgentsTileService : TileService() {
+    override fun onStartListening() {
+        val tile = qsTile ?: return
+        val s = dev.yurlungr.app.chat.AgentStatus.summary()
+        tile.label = "Agents"
+        tile.state = if (s.active) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+        val label = dev.yurlungr.app.chat.AgentStatus.label(s)
+        if (Build.VERSION.SDK_INT >= 29) tile.subtitle = label else tile.label = if (s.active) "Agents · $label" else "Agents"
+        tile.icon = Icon.createWithResource(this, R.drawable.ic_stat_terminal)
+        tile.updateTile()
+    }
+
+    override fun onClick() = open(OpenIn.agentsIntent(this), OpenIn.agentsPending(this))
 }
 
 /** Quick Settings: how many dev servers are running; tap for Servers. */
@@ -119,6 +157,11 @@ class HomeWidget : AppWidgetProvider() {
             val n = OpenIn.runningServers()
             setTextViewText(R.id.widget_servers, if (n == 0) "Servers" else "Servers · $n")
             setOnClickPendingIntent(R.id.widget_servers, OpenIn.pending(context, OpenIn.SERVERS))
+            // Agents: hidden while none run; otherwise what they're doing, and a tap to the one that needs you.
+            val agents = dev.yurlungr.app.chat.AgentStatus.summary()
+            setViewVisibility(R.id.widget_agents, if (agents.active) android.view.View.VISIBLE else android.view.View.GONE)
+            setTextViewText(R.id.widget_agents, dev.yurlungr.app.chat.AgentStatus.label(agents))
+            setOnClickPendingIntent(R.id.widget_agents, OpenIn.agentsPending(context))
         }
 
         fun update(context: Context) = runCatching {

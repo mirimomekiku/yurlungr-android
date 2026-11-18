@@ -75,6 +75,7 @@ object ChatSessions {
                 }
                 loaded = true
                 if (saved.isNotEmpty()) onRegistryChanged?.invoke()
+                AgentStatus.changed(appContext)
             }
         }
     }
@@ -88,6 +89,7 @@ object ChatSessions {
         chat.onChanged?.invoke(chat)
         onRegistryChanged?.invoke() // before start(), so listeners see its first events
         chat.start()
+        AgentStatus.changed(context)
         return chat
     }
 
@@ -112,6 +114,7 @@ object ChatSessions {
     fun stopAll() = chats.filter { it.isActive || it.state != ChatState.Saved }.forEach { it.stop() }
 
     fun delete(context: Context, chat: ChatSession) {
+        AgentStatus.changed(context)
         chat.close()
         chats.remove(chat)
         clearUrgent(chat.id)
@@ -141,19 +144,25 @@ object ChatSessions {
             clearUrgent(c.id)
             // A finished turn needs no answer: no popup, no sound. Drop a stale approval alert if one is up.
             if (awaitingApproval.remove(c.id)) runCatching { NotificationManagerCompat.from(appContext).cancel(c.id.hashCode()) }
+            // Away from the app: a quiet note with Reply, so the next message can go without opening it.
+            if (!appVisible) ChatNotifications.finished(appContext, c, summary)
+            AgentStatus.changed(appContext)
         }
         onNeedsAttention = { c, what ->
             awaitingApproval += c.id
             clearUrgent(c.id)
             urgent += Urgent(c.id, c.agent.displayName, what)
             notify(c, "${c.agent.displayName} needs you", what)
+            AgentStatus.changed(appContext)
         }
         onAttentionResolved = { c ->
             clearUrgent(c.id)
             if (awaitingApproval.remove(c.id)) {
                 runCatching { NotificationManagerCompat.from(appContext).cancel(c.id.hashCode()) }
             }
+            AgentStatus.changed(appContext)
         }
+        listeners += AgentStatus
     }
 
     /** Chats whose current notification asks for an approval (cleared once it's answered). */
@@ -169,25 +178,8 @@ object ChatSessions {
             }
             return
         }
-        val open = PendingIntent.getActivity(
-            context,
-            chat.id.hashCode(),
-            Intent(context, MainActivity::class.java)
-                .putExtra(MainActivity.EXTRA_CHAT_ID, chat.id)
-                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        val notification = NotificationCompat.Builder(context, YurlungrApp.CHANNEL_ATTENTION)
-            .setPriority(NotificationCompat.PRIORITY_HIGH) // heads-up on Android 7.x, before channels
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
-            .setSmallIcon(R.drawable.ic_stat_terminal)
-            .setContentTitle(title)
-            .setContentText(text.take(200))
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text.take(1000)))
-            .setContentIntent(open)
-            .setAutoCancel(true)
-            .build()
-        runCatching { NotificationManagerCompat.from(context).notify(chat.id.hashCode(), notification) }
+        // The prompt just added: its options become Allow / Deny buttons on the notification.
+        val item = chat.items.lastOrNull { it is ChatItem.Permission && it.resolved == null } as? ChatItem.Permission
+        ChatNotifications.approval(context, chat, item, title, text)
     }
 }

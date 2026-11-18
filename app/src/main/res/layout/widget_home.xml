@@ -6,15 +6,37 @@
     android:orientation="vertical"
     android:padding="12dp">
 
-    <TextView
-        android:layout_width="wrap_content"
+    <LinearLayout
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:paddingStart="4dp"
-        android:paddingBottom="8dp"
-        android:text="@string/app_name"
-        android:textColor="#F4F4F5"
-        android:textSize="14sp"
-        android:textStyle="bold" />
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingBottom="8dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingStart="4dp"
+            android:text="@string/app_name"
+            android:textColor="#F4F4F5"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <!-- What the agents are doing; shown only while some run. Tap: the chat that needs you, or Activity. -->
+        <TextView
+            android:id="@+id/widget_agents"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:gravity="end"
+            android:maxLines="1"
+            android:paddingStart="12dp"
+            android:paddingEnd="4dp"
+            android:textColor="#D4F36B"
+            android:textSize="12sp"
+            android:visibility="gone" />
+    </LinearLayout>
 
     <LinearLayout
         android:layout_width="match_parent"

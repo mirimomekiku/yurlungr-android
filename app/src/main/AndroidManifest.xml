@@ -62,6 +62,18 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
+        <service
+            android:name=".widgets.AgentsTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_stat_terminal"
+            android:label="@string/tile_agents"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+        <!-- Allow / Deny / Reply on chat notifications; only this app's notifications can reach it. -->
+        <receiver android:name=".chat.ChatActionReceiver" android:exported="false" />
         <receiver android:name=".widgets.HomeWidget" android:exported="false" android:label="@string/app_name">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
