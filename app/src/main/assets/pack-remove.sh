@@ -16,6 +16,29 @@ setup_init "$HOME/pack-remove.log"
 eval 'pkgs=("${YURLUNGR_PACKAGES_'"$PACK"'[@]}")' 2>/dev/null || pkgs=()
 [ "${#pkgs[@]}" -gt 0 ] || { bad "unknown pack $PACK"; setup_finish ""; }
 protected=" ${YURLUNGR_DEV_PACKAGES[*]} ${YURLUNGR_AGENT_PACKAGES[*]} ${YURLUNGR_AGENT_GLIBC_PACKAGES[*]} ${YURLUNGR_SDK_PACKAGES[*]} "
+
+# Ubuntu and Flutter live in Ubuntu's root file system rather than in packages.
+DISTROS_DIR="$PREFIX/var/lib/proot-distro/installed-rootfs"
+case "$PACK" in
+  FLUTTER)
+    step "Flutter SDK"
+    rm -rf "$DISTROS_DIR/ubuntu/opt/flutter" "$DISTROS_DIR/ubuntu/opt/flutter.partial" "$DISTROS_DIR/ubuntu/etc/profile.d/flutter.sh" \
+      && ok "removed /opt/flutter from Ubuntu" || bad "removing /opt/flutter"
+    # proot-distro stays: Ubuntu needs it.
+    setup_finish "Flutter removed. The Ubuntu environment stays installed."
+    exit 0
+    ;;
+  UBUNTU)
+    step "Ubuntu"
+    if [ -d "$DISTROS_DIR/ubuntu" ]; then
+      run_logged with_timeout 1800 proot-distro remove ubuntu && ok "removed Ubuntu (and Flutter in it)" || { bad "proot-distro remove ubuntu"; setup_finish ""; }
+    else
+      ok "Ubuntu (not installed)"
+    fi
+    ;;
+esac
+# proot-distro runs the distros still installed: keep it while there are any.
+if [ -n "$(ls -A "$DISTROS_DIR" 2>/dev/null)" ]; then protected+="proot-distro "; fi
 mine=" ${pkgs[*]} "
 # Packages other installed packs list (a pack counts as installed when a package only it lists
 # is there): those stay, e.g. python when Python Science goes but the Python pack stays.

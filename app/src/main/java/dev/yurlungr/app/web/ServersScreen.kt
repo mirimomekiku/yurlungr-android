@@ -169,6 +169,8 @@ fun ServersScreen(onBack: () -> Unit, onPreview: (url: String, title: String) ->
                     }
                 }
             }
+            // Projects' own PostgreSQL, Redis and MariaDB (shows nothing when none run).
+            item { dev.yurlungr.app.databases.DatabaseServersSection() }
 
             val links = TunnelSessions.tunnels.values.filter { it.active }
             if (links.isNotEmpty()) {

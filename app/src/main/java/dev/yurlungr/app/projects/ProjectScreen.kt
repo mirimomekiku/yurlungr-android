@@ -138,6 +138,10 @@ fun ProjectScreen(
     onOpenFileAt: (File, Int?) -> Unit = { f, _ -> onOpenFile(f) },
     /** The merge view for a conflicted file. */
     onResolveConflict: (File) -> Unit = onOpenFile,
+    /** This project's PostgreSQL / Redis / MariaDB servers. */
+    onDatabases: () -> Unit = {},
+    /** The .env editor. */
+    onEnvFile: () -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -286,6 +290,7 @@ fun ProjectScreen(
             )
         }
         dev.yurlungr.app.web.WebRunCard(dir, onLogs = onOpenTerminal, onOptions = { showWebRun = true }, onPreview = onPreview)
+        dev.yurlungr.app.databases.ProjectDatabasesStrip(dir, onOpen = onDatabases)
         AnimatedVisibility(headerVisible, enter = reveal, exit = collapse) {
             SectionTabs(tab, changeCount = status?.changes?.size ?: 0) { tab = it }
         }
@@ -379,6 +384,8 @@ fun ProjectScreen(
             extraTools = listOfNotNull(
                 DockTool("Scripts", Ph.Play, AppColors.tiles.lime, "Run package.json scripts, make, just, Gradle, Cargo…") { showTasks = true }.takeIf { tasks.isNotEmpty() },
                 DockTool("Agent settings", Ph.Sparkle, AppColors.tiles.lilac, "Default agent, instruction files and MCP servers for this project", onClick = onAgentSettings),
+                DockTool("Databases", Ph.FloppyDisk, AppColors.tiles.sky, "PostgreSQL, Redis and MariaDB for this project, with connection strings", onClick = onDatabases),
+                DockTool(".env", Ph.LockSimple, AppColors.tiles.peach, "Edit environment variables, values hidden until tapped", onClick = onEnvFile),
             ))
     }
 

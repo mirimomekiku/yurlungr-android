@@ -147,7 +147,8 @@ fun SetupScreen(
         Fix.InstallAndroidSdk -> onInstallAndroidSdk()
         Fix.InstallDevTools -> onInstallDevTools()
         Fix.InstallPython, Fix.InstallBuildTools, Fix.InstallUtils, Fix.InstallEditors,
-        Fix.InstallGo, Fix.InstallRust, Fix.InstallRuby, Fix.InstallJsRuntimes, Fix.InstallJvm, Fix.InstallPhp, Fix.InstallDart, Fix.InstallDotnet, Fix.InstallDatabases, Fix.InstallSwift, Fix.InstallZig, Fix.InstallElixir, Fix.InstallLua, Fix.InstallCrystal, Fix.InstallNim, Fix.InstallHaskell, Fix.InstallScala, Fix.InstallDlang, Fix.InstallPerl, Fix.InstallShell, Fix.InstallCliTools, Fix.InstallServers, Fix.InstallDevOps, Fix.InstallMedia, Fix.InstallLocalAi, Fix.InstallDistros, Fix.InstallNativeLibs, Fix.InstallPyScience, Fix.InstallDebugging, Fix.InstallLanguageServers, Fix.InstallNetworking, Fix.InstallSecurity, Fix.InstallDataTools, Fix.InstallTaskRunners, Fix.InstallDocs, Fix.InstallArchives, Fix.InstallOcr, Fix.InstallBrowser -> onInstallSetup(requireNotNull(fix.setup))
+        Fix.InstallGo, Fix.InstallRust, Fix.InstallRuby, Fix.InstallJsRuntimes, Fix.InstallJvm, Fix.InstallPhp, Fix.InstallDart, Fix.InstallDotnet, Fix.InstallDatabases, Fix.InstallSwift, Fix.InstallZig, Fix.InstallElixir, Fix.InstallLua, Fix.InstallCrystal, Fix.InstallNim, Fix.InstallHaskell, Fix.InstallScala, Fix.InstallDlang, Fix.InstallPerl, Fix.InstallShell, Fix.InstallCliTools, Fix.InstallServers, Fix.InstallDevOps, Fix.InstallMedia, Fix.InstallLocalAi, Fix.InstallDistros, Fix.InstallNativeLibs, Fix.InstallPyScience, Fix.InstallDebugging, Fix.InstallLanguageServers, Fix.InstallNetworking, Fix.InstallSecurity, Fix.InstallDataTools, Fix.InstallTaskRunners, Fix.InstallDocs, Fix.InstallArchives, Fix.InstallOcr, Fix.InstallBrowser,
+        Fix.InstallUbuntu, Fix.InstallFlutter -> onInstallSetup(requireNotNull(fix.setup))
         Fix.ReinstallBootstrap -> confirmReinstall = true
         Fix.RepairRuntime -> vm.repairRuntime()
         Fix.ChooseJdk -> onDevEnvironment()
@@ -407,7 +408,8 @@ private fun shortFixLabel(fix: Fix) = when (fix) {
     Fix.InstallAndroidSdk -> "Set up"
     Fix.InstallDevTools -> "Install"
     Fix.InstallPython, Fix.InstallBuildTools, Fix.InstallUtils, Fix.InstallEditors,
-    Fix.InstallGo, Fix.InstallRust, Fix.InstallRuby, Fix.InstallJsRuntimes, Fix.InstallJvm, Fix.InstallPhp, Fix.InstallDart, Fix.InstallDotnet, Fix.InstallDatabases, Fix.InstallSwift, Fix.InstallZig, Fix.InstallElixir, Fix.InstallLua, Fix.InstallCrystal, Fix.InstallNim, Fix.InstallHaskell, Fix.InstallScala, Fix.InstallDlang, Fix.InstallPerl, Fix.InstallShell, Fix.InstallCliTools, Fix.InstallServers, Fix.InstallDevOps, Fix.InstallMedia, Fix.InstallLocalAi, Fix.InstallDistros, Fix.InstallNativeLibs, Fix.InstallPyScience, Fix.InstallDebugging, Fix.InstallLanguageServers, Fix.InstallNetworking, Fix.InstallSecurity, Fix.InstallDataTools, Fix.InstallTaskRunners, Fix.InstallDocs, Fix.InstallArchives, Fix.InstallOcr, Fix.InstallBrowser -> "Install"
+    Fix.InstallGo, Fix.InstallRust, Fix.InstallRuby, Fix.InstallJsRuntimes, Fix.InstallJvm, Fix.InstallPhp, Fix.InstallDart, Fix.InstallDotnet, Fix.InstallDatabases, Fix.InstallSwift, Fix.InstallZig, Fix.InstallElixir, Fix.InstallLua, Fix.InstallCrystal, Fix.InstallNim, Fix.InstallHaskell, Fix.InstallScala, Fix.InstallDlang, Fix.InstallPerl, Fix.InstallShell, Fix.InstallCliTools, Fix.InstallServers, Fix.InstallDevOps, Fix.InstallMedia, Fix.InstallLocalAi, Fix.InstallDistros, Fix.InstallNativeLibs, Fix.InstallPyScience, Fix.InstallDebugging, Fix.InstallLanguageServers, Fix.InstallNetworking, Fix.InstallSecurity, Fix.InstallDataTools, Fix.InstallTaskRunners, Fix.InstallDocs, Fix.InstallArchives, Fix.InstallOcr, Fix.InstallBrowser,
+    Fix.InstallUbuntu, Fix.InstallFlutter -> "Install"
     Fix.ReinstallBootstrap -> "Reinstall"
     Fix.RepairRuntime -> "Repair"
     Fix.ChooseJdk -> "Change"

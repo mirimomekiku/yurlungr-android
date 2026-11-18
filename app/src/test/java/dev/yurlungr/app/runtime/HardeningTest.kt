@@ -78,7 +78,7 @@ class HardeningTest {
 
     @Test fun `every optional pack has its own script, packages, tools and fix`() {
         val packs = ToolSetup.entries.filter { it.optional }
-        assertEquals(42, packs.size)
+        assertEquals(44, packs.size)
         assertEquals(packs.size, packs.mapNotNull { it.script }.toSet().size)
         assertEquals(Toolchain.tools.map { it.id }.toSet().size, Toolchain.tools.size)
         val manifest = Toolchain.shellManifest()
@@ -98,7 +98,22 @@ class HardeningTest {
                 assertTrue("${p.script} uses its pack", script.readText().contains("YURLUNGR_PACKAGES_${p.name.uppercase()}[@]"))
             }
         }
-        assertEquals(listOf(ToolSetup.Browser), packs.filter { it.asset != "pack-setup.sh" })
+        assertEquals(listOf(ToolSetup.Ubuntu, ToolSetup.Flutter, ToolSetup.Browser), packs.filter { it.asset != "pack-setup.sh" })
+    }
+
+    @Test fun `the Ubuntu helper keeps its contract`() {
+        val text = java.io.File("src/main/assets/yurlungr-ubuntu.sh").readText()
+        assertEquals("#!/usr/bin/env bash", text.lineSequence().first().trimEnd()) // RuntimeAssets swaps it for an absolute path
+        assertTrue(text.contains("installed-rootfs/ubuntu"))
+        assertTrue(text.contains("exit 69"))
+        assertTrue(text.contains("--bind \"\$HOME:\$HOME\""))
+        assertTrue(text.contains("bash -lc \"\$script\""))
+        assertTrue(text.contains("for name in PORT "))
+        // Flutter's check is the SDK's launcher inside Ubuntu.
+        assertEquals("$UBUNTU_ROOTFS/opt/flutter/bin/flutter", ToolSetup.Flutter.marker)
+        assertEquals("var/lib/proot-distro/installed-rootfs/ubuntu", UBUNTU_ROOTFS)
+        val flutter = java.io.File("src/main/assets/flutter-setup.sh").readText()
+        for (part in listOf("--depth 1 --branch stable", "/etc/profile.d/flutter.sh", "flutter precache --web", "--enable-web")) assertTrue(part, flutter.contains(part))
     }
 
     @Test fun `the generic pack script keeps the per-pack behavior`() {

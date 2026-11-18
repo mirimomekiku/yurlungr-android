@@ -24,11 +24,11 @@ enum class ToolSetup(
     Editors("editors-setup.sh", "Editors", true, listOf("nano", "vim", "neovim", "helix", "micro", "emacs"), 450, "bin/vim", "nano, vim, Neovim, Helix, micro and Emacs"),
     Go("go-setup.sh", "Go", true, listOf("golang"), 700, "bin/go", "Go"),
     Rust("rust-setup.sh", "Rust", true, listOf("rust"), 1500, "bin/cargo", "Rust (rustc, cargo)"),
-    Ruby("ruby-setup.sh", "Ruby", true, listOf("ruby"), 400, "bin/ruby", "Ruby with gem"),
+    Ruby("ruby-setup.sh", "Ruby", true, listOf("ruby"), 400, "bin/ruby", "Ruby with gem and Bundler (Rails: `gem install rails`, slow; native gems need Build tools)"),
     JsRuntimes("js-runtimes-setup.sh", "JavaScript runtimes", true, listOf("pnpm", "yarn", "bun", "deno"), 500, "bin/pnpm", "pnpm, Yarn, Bun and Deno (Node.js is in the developer tools)"),
     Jvm("jvm-setup.sh", "Java & Kotlin", true, listOf("openjdk-21", "kotlin", "maven", "gradle"), 700, "bin/kotlinc", "JDK 21, Kotlin, Maven and Gradle (other JDKs: Settings → Development environment)"),
     Php("php-setup.sh", "PHP", true, listOf("php", "composer"), 250, "bin/composer", "PHP with Composer"),
-    Dart("dart-setup.sh", "Dart", true, listOf("dart"), 700, "bin/dart", "Dart SDK (Flutter itself isn't available on Android)"),
+    Dart("dart-setup.sh", "Dart", true, listOf("dart"), 700, "bin/dart", "Dart SDK (for Flutter, see the experimental Flutter pack)"),
     Dotnet("dotnet-setup.sh", ".NET", true, listOf("dotnet8.0"), 1200, "bin/dotnet", ".NET 8 SDK"),
     Databases("databases-setup.sh", "Databases", true, listOf("sqlite", "postgresql", "mariadb", "redis"), 700, "bin/psql", "SQLite, PostgreSQL, MariaDB and Redis (servers start on demand)"),
     Swift("swift-setup.sh", "Swift", true, listOf("swift"), 1500, "bin/swift", "Swift toolchain"),
@@ -59,6 +59,11 @@ enum class ToolSetup(
     Docs("docs-setup.sh", "Docs & static sites", true, listOf("pandoc", "hugo", "zola", "mdbook", "mandoc"), 400, "bin/pandoc", "pandoc, Hugo, Zola, mdBook and man pages (mandoc)"),
     Archives("archives-setup.sh", "Archives", true, listOf("7zip", "xz-utils", "zstd", "brotli"), 60, "bin/zstd", "7-Zip, xz, zstd and brotli"),
     Ocr("ocr-pdf-setup.sh", "OCR & PDF", true, listOf("tesseract", "poppler", "qpdf"), 250, "bin/tesseract", "Tesseract OCR, poppler (pdftotext…) and qpdf"),
+    Ubuntu("ubuntu-setup.sh", "Ubuntu environment", true, listOf("proot-distro"), 1000, "$UBUNTU_ROOTFS/usr/bin/bash",
+        "Ubuntu in proot for glibc-only tools: `yurlungr-ubuntu 'command'` runs a command in it, in the current folder (slower than native)"),
+    // Needs Ubuntu (its script checks). Web target only: proot has no Android or desktop toolchain for it.
+    Flutter("flutter-setup.sh", "Flutter (experimental)", true, listOf("proot-distro"), 3500, "$UBUNTU_ROOTFS/opt/flutter/bin/flutter",
+        "Flutter (experimental, web only) inside Ubuntu at /opt/flutter: `yurlungr-ubuntu 'flutter run -d web-server --web-port 8080'`"),
     Browser("browser-setup.sh", "Headless browser", true, listOf("chromium"), 900, "bin/chromium-browser", "Chromium (from Termux's x11 repository) for Puppeteer and Selenium tests; Playwright doesn't support Android"),
     ;
 
@@ -66,8 +71,14 @@ enum class ToolSetup(
      * The bundled file installed as [script]. Packs that only install their packages share the generic
      * `pack-setup.sh`, which picks its pack from the name it runs under; the rest have their own.
      */
-    val asset: String? get() = if (optional && this != Browser) "pack-setup.sh" else script
+    val asset: String? get() = if (optional && this !in CUSTOM_SCRIPTS) "pack-setup.sh" else script
 }
+
+/** Optional packs whose setup does more than install packages, so they ship their own script. */
+private val CUSTOM_SCRIPTS = setOf(ToolSetup.Browser, ToolSetup.Ubuntu, ToolSetup.Flutter)
+
+/** Where `proot-distro install ubuntu` puts Ubuntu, relative to the prefix. */
+const val UBUNTU_ROOTFS = "var/lib/proot-distro/installed-rootfs/ubuntu"
 
 /**
  * A command-line tool the app or its users rely on. [probe] is a shell command that prints a
@@ -166,6 +177,7 @@ object Toolchain {
         Tool("cargo", "Cargo", "cargo --version", ToolSetup.Rust),
         Tool("ruby", "Ruby", "ruby --version", ToolSetup.Ruby),
         Tool("gem", "RubyGems", "gem --version", ToolSetup.Ruby),
+        Tool("bundle", "Bundler", "bundle --version", ToolSetup.Ruby),
         Tool("uv", "uv", "uv --version", ToolSetup.Python),
         Tool("pnpm", "pnpm", "pnpm --version", ToolSetup.JsRuntimes),
         Tool("yarn", "Yarn", "yarn --version", ToolSetup.JsRuntimes),
@@ -266,6 +278,16 @@ object Toolchain {
         Tool("tesseract", "Tesseract", "tesseract --version 2>&1 | sed -n 1p", ToolSetup.Ocr),
         Tool("pdftotext", "poppler", "pdftotext -v 2>&1 | sed -n 1p", ToolSetup.Ocr),
         Tool("qpdf", "qpdf", "qpdf --version | sed -n 1p", ToolSetup.Ocr),
+        Tool("ubuntu", "Ubuntu",
+            """r="${'$'}PREFIX/$UBUNTU_ROOTFS"; command -v proot-distro >/dev/null && test -x "${'$'}r/usr/bin/bash" && """ +
+                """{ sed -n 's/^PRETTY_NAME=//p' "${'$'}r/usr/lib/os-release" | tr -d '"' | grep . || echo Ubuntu; }""",
+            ToolSetup.Ubuntu),
+        // Read from the SDK's files: starting Flutter inside proot takes longer than a probe may.
+        Tool("flutter", "Flutter (Ubuntu)",
+            """f="${'$'}PREFIX/$UBUNTU_ROOTFS/opt/flutter"; test -f "${'$'}f/bin/flutter" && """ +
+                """{ v=${'$'}(sed -n 's/.*"frameworkVersion": *"\([^"]*\)".*/\1/p' "${'$'}f/bin/cache/flutter.version.json" 2>/dev/null); """ +
+                """echo "Flutter ${'$'}{v:-installed} (in Ubuntu, web only)"; }""",
+            ToolSetup.Flutter),
         Tool("chromium", "Chromium", "command -v chromium-browser || command -v chromium", ToolSetup.Browser),
         Tool("which", "which", "which --version | sed -n 1p", ToolSetup.Utils),
         Tool("file", "file", "file --version | sed -n 1p", ToolSetup.Utils),

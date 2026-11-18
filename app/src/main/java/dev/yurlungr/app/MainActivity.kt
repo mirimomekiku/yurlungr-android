@@ -86,6 +86,10 @@ sealed interface Route {
     data object Projects : Route
     data class Project(val path: String, val tab: String? = null) : Route
     data class FileView(val path: String, val edit: Boolean = false, val line: Int? = null) : Route
+    /** A project's own database servers. */
+    data class ProjectDatabases(val path: String) : Route
+    /** A project's .env editor. */
+    data class EnvFile(val path: String) : Route
 }
 
 /**
@@ -428,7 +432,17 @@ class MainActivity : ComponentActivity() {
                 onAgentSettings = { nav.push(Route.ProjectAgents(route.path)) },
                 onOpenFileAt = { f, line -> nav.push(Route.FileView(f.path, edit = line != null, line = line)) },
                 onResolveConflict = { nav.push(Route.Merge(it.path)) },
+                onDatabases = { nav.push(Route.ProjectDatabases(route.path)) },
+                onEnvFile = { nav.push(Route.EnvFile(route.path)) },
             )
+            is Route.ProjectDatabases -> dev.yurlungr.app.databases.DatabasesScreen(
+                File(route.path),
+                onBack = back,
+                onSystemChecks = { nav.push(Route.Setup) },
+                onOpenFile = { nav.push(Route.FileView(it.path)) },
+                onEnvFile = { nav.push(Route.EnvFile(route.path)) },
+            )
+            is Route.EnvFile -> dev.yurlungr.app.env.EnvScreen(File(route.path), onBack = back)
             Route.Servers -> dev.yurlungr.app.web.ServersScreen(
                 onBack = back,
                 onPreview = { url, title -> nav.push(Route.Preview(url, title)) },

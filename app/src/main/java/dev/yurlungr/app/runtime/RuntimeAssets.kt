@@ -25,6 +25,7 @@ object RuntimeAssets {
         "self-test.sh" to File(paths.libexec, "self-test.sh"),
         "android-sdk-setup.sh" to File(paths.libexec, "android-sdk-setup.sh"),
         "motd.sh" to File(paths.libexec, "motd.sh"),
+        "project-db.sh" to File(paths.libexec, "project-db.sh"),
     )
 
     /** Commands tools use to open a browser. All route to `yurlungr-open`. */
@@ -86,6 +87,10 @@ object RuntimeAssets {
         writeShim(paths, "yurlungr-open", openShim(paths))
         writeShim(paths, "yurlungr-install", installShim(paths))
         writeShim(paths, "yurlungr-notify", notifyShim(paths))
+        // In $PREFIX/bin (not the shims folder): templates and tools call it by that path. An absolute
+        // shebang, so the app can also start it directly, without termux-exec.
+        val ubuntu = context.assets.open("yurlungr-ubuntu.sh").bufferedReader(Charsets.UTF_8).use { it.readText() }
+        writeExecutable(File(paths.bin, "yurlungr-ubuntu"), ubuntu.replaceFirst("#!/usr/bin/env bash", "#!${paths.bash.path}"))
         for (alias in OPEN_ALIASES) {
             // An alias the user replaced with something else (e.g. a folder) is left alone.
             runCatching {

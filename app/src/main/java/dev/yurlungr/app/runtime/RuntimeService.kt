@@ -38,6 +38,7 @@ class RuntimeService : Service() {
                 // enabled in settings, so it comes back when the app is next opened.
                 dev.yurlungr.app.remote.RemoteServer.stop()
                 dev.yurlungr.app.web.WebRunSessions.stopAll(this)
+                dev.yurlungr.app.databases.ProjectDatabases.stopAll(this)
                 TerminalSessions.closeAll(this)
                 // Exit means nothing should keep the phone awake or the service alive.
                 wakeLock?.takeIf { it.isHeld }?.release()
@@ -91,6 +92,8 @@ class RuntimeService : Service() {
                     if (chats > 0) add(if (chats == 1) "1 chat" else "$chats chats")
                     if (terminals > 0) add(if (terminals == 1) "1 terminal" else "$terminals terminals")
                     if (RemoteServer.isRunning) add("sharing with ${RemoteServer.clientCount} device(s)")
+                    val databases = dev.yurlungr.app.databases.ProjectDatabases.running.size
+                    if (databases > 0) add(if (databases == 1) "1 database" else "$databases databases")
                     if (wakeLockHeld) add("wake lock held")
                 }.joinToString(" · "),
             )
@@ -110,11 +113,13 @@ class RuntimeService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val ACTION_EXIT = "dev.yurlungr.app.action.EXIT"
         private const val ACTION_TOGGLE_WAKE_LOCK = "dev.yurlungr.app.action.TOGGLE_WAKE_LOCK"
-        /** Starts/refreshes the service while chats or terminals exist, stops it when none are left. */
+        /** Starts/refreshes the service while chats, terminals or project databases run, stops it when none are left. */
         fun refresh(context: Context) {
             RuntimeStatus.refresh()
             val intent = Intent(context, RuntimeService::class.java)
-            if (ChatSessions.activeCount > 0 || TerminalSessions.sessions.any { it.isRunning } || RemoteServer.isRunning) {
+            if (ChatSessions.activeCount > 0 || TerminalSessions.sessions.any { it.isRunning } || RemoteServer.isRunning ||
+                dev.yurlungr.app.databases.ProjectDatabases.anyRunning
+            ) {
                 ContextCompat.startForegroundService(context, intent)
             } else {
                 context.stopService(intent)
