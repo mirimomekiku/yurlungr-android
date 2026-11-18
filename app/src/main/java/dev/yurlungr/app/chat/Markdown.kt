@@ -207,7 +207,7 @@ internal fun highlight(text: AnnotatedString, query: String, color: Color): Anno
 /** A chat reply (or any short Markdown): every block in order. */
 @Composable
 fun MarkdownText(text: String, modifier: Modifier = Modifier, allowLocalFiles: Boolean = true, baseDirectory: File? = null) {
-    val doc = remember(text) { MarkdownDoc.parse(text) }
+    val doc = remember(text) { MarkdownDoc.parse(RichBlocks.fenceDisplayMath(text)) }
     val host = rememberMdHost(allowLocalFiles, baseDirectory)
     Column(modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         doc.blocks.forEach { MdBlockView(it, host) }
@@ -289,7 +289,14 @@ private fun MarkdownBlock(node: Node, host: MdHost, depth: Int, tight: Boolean =
                 if (node.level <= 2) HorizontalDivider(Modifier.padding(top = 6.dp), color = colors.outlineVariant)
             }
         }
-        is FencedCodeBlock -> CodeBlock(node.literal.trimEnd('\n'), language = node.info?.trim()?.substringBefore(' '), copyable = true, query = host.query)
+        is FencedCodeBlock -> {
+            val language = node.info?.trim()?.substringBefore(' ')
+            val code = node.literal.trimEnd('\n')
+            val rich = RichBlocks.kindOf(language)
+            // Diagrams and math are drawn, except while searching (the hit is in their source).
+            if (rich != null && host.query.isBlank() && code.isNotBlank()) RichBlock(rich, code) { CodeBlock(code, language = language, copyable = true) }
+            else CodeBlock(code, language = language, copyable = true, query = host.query)
+        }
         is IndentedCodeBlock -> CodeBlock(node.literal.trimEnd('\n'), copyable = true, query = host.query)
         is BulletList, is OrderedList -> ListBlock(node, host, depth)
         is BlockQuote -> QuoteBlock(node, host, depth)
