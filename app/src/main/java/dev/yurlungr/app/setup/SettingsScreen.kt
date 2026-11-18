@@ -46,6 +46,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.buildAnnotatedString
+import dev.yurlungr.app.chat.RichAssets
 import dev.yurlungr.app.editor.EditorPrefs
 import dev.yurlungr.app.editor.EditorTheme
 import dev.yurlungr.app.editor.EditorThemes
@@ -264,6 +265,7 @@ fun SettingsScreen(
                         onClick = { dev.yurlungr.app.ui.ThemePrefs.setBlack(context, !dev.yurlungr.app.ui.ThemePrefs.black) },
                         trailing = { Switch(dev.yurlungr.app.ui.ThemePrefs.black, { dev.yurlungr.app.ui.ThemePrefs.setBlack(context, it) }) },
                     )
+                    DiagramsRow(tiles.sky)
                 }
             }
 
@@ -492,4 +494,28 @@ private fun LicensesSheet(onDismiss: () -> Unit) {
             Text(text.trim(), fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 13.sp)
         }
     }
+}
+
+/** Mermaid diagrams and KaTeX math in chats: a one-time download instead of part of the APK. */
+@Composable
+private fun dev.yurlungr.app.ui.GroupScope.DiagramsRow(tile: dev.yurlungr.app.ui.Tile) {
+    val context = LocalContext.current
+    LaunchedEffect(Unit) { RichAssets.check(context) }
+    val status = RichAssets.status
+    val size = dev.yurlungr.app.chat.RichBundle.sizeLabel()
+    val on = status == RichAssets.Status.Ready || status == RichAssets.Status.Downloading
+    fun toggle(enable: Boolean) = if (enable) RichAssets.download(context) else RichAssets.remove(context)
+    GroupRow(
+        "Diagrams and math in chats",
+        subtitle = when (status) {
+            RichAssets.Status.Ready -> "Mermaid and KaTeX downloaded · $size"
+            RichAssets.Status.Downloading -> "Downloading… ${(RichAssets.progress * 100).toInt()}%"
+            RichAssets.Status.Failed -> "Couldn't download: ${RichAssets.failure.orEmpty()}"
+            else -> "Downloads $size once; until then they show as code"
+        },
+        icon = Ph.CloudArrowDown,
+        tile = tile,
+        onClick = { toggle(!on) },
+        trailing = { Switch(on, { toggle(it) }) },
+    )
 }

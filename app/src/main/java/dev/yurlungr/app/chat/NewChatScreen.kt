@@ -120,6 +120,8 @@ fun NewChatScreen(
     onStarted: (ChatSession) -> Unit,
     onLogin: (Agent) -> Unit,
     onInstallAgents: () -> Unit,
+    /** A getting-started step's button (see [dev.yurlungr.app.home.FirstRunChecklist]). */
+    onFirstRunAction: (dev.yurlungr.app.home.FirstRunAction) -> Unit = {},
 ) {
     val context = LocalContext.current
     val paths = remember { RuntimePaths(context) }
@@ -165,6 +167,7 @@ fun NewChatScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(Modifier.height(24.dp))
+            dev.yurlungr.app.home.FirstRunChecklist(refreshTick, onFirstRunAction, Modifier.padding(bottom = 20.dp))
             Appear { ShuffleGreeting() }
             Spacer(Modifier.height(14.dp))
             Appear(delayMillis = 70) {

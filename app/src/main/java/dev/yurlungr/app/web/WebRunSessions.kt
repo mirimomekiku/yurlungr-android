@@ -67,6 +67,7 @@ internal object WebRunSessions {
         val id = UUID.randomUUID().toString()
         val run = WebRun(root.canonicalFile, config, id, File(app.cacheDir,"web-runs/$id"))
         runs[root.canonicalPath] = run // reserve before any asynchronous work
+        dev.yurlungr.app.home.FirstRunPrefs.markRan(app)
         scope.launch {
             try {
                 val paths = RuntimePaths(app)

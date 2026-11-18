@@ -111,7 +111,7 @@ object RichBlocks {
         return out.joinToString("\n")
     }
 
-    /** The page that draws [source]: the bundled library from assets, nothing from the network. */
+    /** The page that draws [source]: the downloaded library ([RichAssets]), nothing from the network. */
     internal fun page(kind: RichKind, source: String, dark: Boolean, fg: String): String {
         // As a JS string literal; "</" can't end the script element early.
         val src = JsonPrimitive(source).toString().replace("</", "<\\/")
@@ -137,8 +137,9 @@ $script</body></html>"""
 }
 
 /**
- * A Mermaid diagram or display math, drawn in a small sandboxed WebView with the libraries bundled
- * in the app (nothing loads from the network). Shows the source as code when it can't be drawn;
+ * A Mermaid diagram or display math, drawn in a small sandboxed WebView with the libraries
+ * downloaded once into the app ([RichAssets]; the page itself loads nothing from the network).
+ * Shows the source as code when it can't be drawn, or until the libraries are downloaded;
  * "Code" toggles between the two.
  */
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
@@ -157,8 +158,16 @@ fun RichBlock(kind: RichKind, source: String, fallback: @Composable () -> Unit) 
         kotlinx.coroutines.delay(SETTLE_MS)
         settled = true
     }
+    androidx.compose.runtime.LaunchedEffect(Unit) { RichAssets.check(context) }
     if (!settled) {
         fallback()
+        return
+    }
+    if (RichAssets.status != RichAssets.Status.Ready) {
+        Column {
+            fallback()
+            DownloadAction(kind)
+        }
         return
     }
     if (failed != null && !showCode) {
@@ -203,6 +212,8 @@ fun RichBlock(kind: RichKind, source: String, fallback: @Composable () -> Unit) 
                         settings.javaScriptEnabled = true
                         settings.blockNetworkLoads = true
                         settings.allowContentAccess = false
+                        // The libraries come through shouldInterceptRequest, never from files directly.
+                        settings.allowFileAccess = false
                         settings.allowFileAccessFromFileURLs = false
                         settings.allowUniversalAccessFromFileURLs = false
                         addJavascriptInterface(object {
@@ -217,12 +228,14 @@ fun RichBlock(kind: RichKind, source: String, fallback: @Composable () -> Unit) 
                             // Links in a diagram don't navigate the block.
                             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
 
-                            // Only the bundled libraries load.
-                            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
-                                if (request.url.toString().startsWith(BASE)) null
+                            // Only the downloaded, verified libraries load; everything else is refused.
+                            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                                val url = request.url.toString()
+                                return if (url.startsWith(RichBundle.BASE_URL)) RichAssets.response(ctx, url)
                                 else WebResourceResponse("text/plain", "utf-8", 403, "Blocked", emptyMap(), ByteArrayInputStream(ByteArray(0)))
+                            }
                         }
-                        loadDataWithBaseURL(BASE, RichBlocks.page(kind, source, dark, fg), "text/html", "utf-8", null)
+                        loadDataWithBaseURL(RichBundle.BASE_URL, RichBlocks.page(kind, source, dark, fg), "text/html", "utf-8", null)
                     }
                 },
                 onRelease = { it.stopLoading(); it.destroy() },
@@ -231,5 +244,39 @@ fun RichBlock(kind: RichKind, source: String, fallback: @Composable () -> Unit) 
     }
 }
 
-private const val BASE = "file:///android_asset/richtext/"
+/** Under a block not drawn yet: the one-time download, its progress, or why it failed. */
+@Composable
+private fun DownloadAction(kind: RichKind) {
+    val context = LocalContext.current
+    val colors = MaterialTheme.colorScheme
+    val what = if (kind == RichKind.Mermaid) "diagrams" else "math"
+    val size = RichBundle.sizeLabel()
+    @Composable
+    fun Action(label: String, onClick: () -> Unit) = Text(
+        label,
+        color = colors.primary,
+        fontSize = 12.sp,
+        modifier = Modifier.clip(MaterialTheme.shapes.small).clickable(onClick = onClick).padding(horizontal = 6.dp, vertical = 6.dp),
+    )
+    when (RichAssets.status) {
+        RichAssets.Status.Missing -> Action("Draw $what (downloads $size once)") { RichAssets.download(context) }
+        RichAssets.Status.Downloading -> Text(
+            "Downloading… ${(RichAssets.progress * 100).toInt()}%",
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+        )
+        RichAssets.Status.Failed -> Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Couldn't download: ${RichAssets.failure.orEmpty().take(100)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant,
+                modifier = Modifier.weight(1f, fill = false).padding(start = 6.dp),
+            )
+            Action("Try again") { RichAssets.download(context) }
+        }
+        else -> {}
+    }
+}
+
 private const val SETTLE_MS = 700L

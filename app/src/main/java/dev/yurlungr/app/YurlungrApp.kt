@@ -21,7 +21,8 @@ class YurlungrApp : Application() {
         // Before any UI: the first frame must already use the chosen light/dark theme.
         dev.yurlungr.app.ui.ThemePrefs.load(this)
         dev.yurlungr.app.ui.Feedback.load(this)
-        dev.yurlungr.app.widgets.OpenIn.updateShortcuts(this)
+        // A Binder call plus a disk check (the last project): nothing on screen waits for it.
+        Thread { dev.yurlungr.app.widgets.OpenIn.updateShortcuts(this) }.start()
         TerminalSessions.init(this)
         dev.yurlungr.app.web.WebRunSessions.init(this)
         ChatSessions.init(this)

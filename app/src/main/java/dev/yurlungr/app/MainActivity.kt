@@ -208,12 +208,8 @@ class MainActivity : ComponentActivity() {
                     nav.reset(target)
                 }
 
-                // The tour, once, the first time the app opens with the Linux environment ready.
-                LaunchedEffect(Unit) {
-                    if (RuntimePaths(context).isBootstrapInstalled && !dev.yurlungr.app.ui.TourPrefs.seen(context) && pendingScreen == null && pendingShare == null) {
-                        nav.push(Route.Tour)
-                    }
-                }
+                // First run is guided by the getting-started checklist on the start screen; the tour
+                // stays one tap away there and in Settings.
                 LaunchedEffect(pendingScreen) {
                     pendingScreen?.let(nav::reset)
                     pendingScreen = null
@@ -362,6 +358,7 @@ class MainActivity : ComponentActivity() {
                 onStarted = { nav.reset(Route.Chat(it.id)) },
                 onLogin = { openLogin(context, it, nav) },
                 onInstallAgents = { openAgentSetup(context, nav) },
+                onFirstRunAction = { action -> firstRunAction(context, nav, action) },
             )
             is Route.Chat -> {
                 val chat = ChatSessions.get(route.id)
@@ -624,6 +621,17 @@ class MainActivity : ComponentActivity() {
             command = "printf '\\033[1;36m%s\\033[0m\\n\\n' '$hint'; ${agent.loginCommand}",
             name = "${agent.displayName} sign-in",
         )
+    }
+
+    /** Getting-started steps: each opens the exact place to do it. */
+    private fun firstRunAction(context: Context, nav: Navigator, action: dev.yurlungr.app.home.FirstRunAction) = when (action) {
+        dev.yurlungr.app.home.FirstRunAction.SystemChecks -> nav.push(Route.Setup)
+        dev.yurlungr.app.home.FirstRunAction.InstallNode -> openDevToolsSetup(context, nav)
+        dev.yurlungr.app.home.FirstRunAction.Agents -> nav.reset(Route.Agents)
+        is dev.yurlungr.app.home.FirstRunAction.SignIn -> openLogin(context, action.agent, nav)
+        dev.yurlungr.app.home.FirstRunAction.Projects -> nav.reset(Route.Projects)
+        is dev.yurlungr.app.home.FirstRunAction.OpenProject -> nav.reset(Route.Project(action.path))
+        dev.yurlungr.app.home.FirstRunAction.Tour -> nav.push(Route.Tour)
     }
 
     private fun openAgentSetup(context: Context, nav: Navigator) =
