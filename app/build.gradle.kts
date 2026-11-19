@@ -18,7 +18,7 @@ fun signingValue(name: String): String? =
     (providers.gradleProperty(name).orNull ?: providers.environmentVariable(name).orNull ?: localProperties.getProperty(name))
         ?.takeIf { it.isNotBlank() }
 val releaseKeystore: File? = signingValue("YURLUNGR_KEYSTORE")?.let { rootProject.file(it) }
-// CI release builds set this so a missing key fails the build instead of shipping debug-signed APKs.
+// Set this so a missing key fails the build instead of shipping debug-signed APKs.
 val requireReleaseKey = signingValue("YURLUNGR_REQUIRE_RELEASE_KEY").toBoolean()
 if (releaseKeystore != null && !releaseKeystore.isFile) {
     throw GradleException("YURLUNGR_KEYSTORE points to $releaseKeystore, which doesn't exist.")

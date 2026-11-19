@@ -226,17 +226,9 @@ different key, so the first release-key build needs the old app uninstalled, whi
 embedded Linux environment, installed packs, agent sign-ins and all chats (projects in shared storage
 stay). Do it once, announce it in the release notes, and never change the key again.
 
-For the GitHub release workflow, add the repository secrets `YURLUNGR_KEYSTORE_BASE64`
-(`base64 -w0 yurlungr-release.jks`), `YURLUNGR_KEYSTORE_PASSWORD`, `YURLUNGR_KEY_ALIAS` and
-`YURLUNGR_KEY_PASSWORD`. It sets `YURLUNGR_REQUIRE_RELEASE_KEY=true`, which makes the build fail rather
-than fall back to a debug key.
+Set `YURLUNGR_REQUIRE_RELEASE_KEY=true` to make the build fail rather than fall back to a debug key.
 
-## Release workflow
-
-`.github/workflows/release.yml` runs when a tag is pushed (`0.0.5`, or `v0.0.5`). It checks that the tag
-matches `versionName`, builds `assembleRelease` with the release key from the repository secrets, renames
-the APKs to `yurlungr-<version>-<abi>.apk`, writes `SHA256SUMS.txt`, and creates a **draft** GitHub release
-with them and `docs/releases/<version>.md` as notes. Review the draft and publish it.
+## Build verification
 
 The Gradle wrapper's download is pinned by `distributionSha256Sum` in
 `gradle/wrapper/gradle-wrapper.properties`; update it with the wrapper version (the checksum is published
@@ -250,7 +242,7 @@ dependency or plugin, regenerate it and review the diff:
 ```
 
 AGP's `aapt2` jar is per OS: the generated file only lists the one for the machine that ran it, so add the
-`-linux` (release workflow) and `-osx` entries by hand from `https://dl.google.com/android/maven2/com/android/tools/build/aapt2/`.
+`-linux` and `-osx` entries by hand from `https://dl.google.com/android/maven2/com/android/tools/build/aapt2/`.
 
 ## Release
 
@@ -258,11 +250,11 @@ AGP's `aapt2` jar is per OS: the generated file only lists the one for the machi
    `versionCode` in `app/build.gradle.kts`. The ACP client reports the installed APK's version.
 2. Commit the release version and create a local annotated tag, for example
    `git tag -a 0.0.4 -m "Yurlungr 0.0.4"`.
-3. From that clean tagged commit, run `./gradlew testDebugUnitTest lintDebug assembleRelease` and
+3. From that clean tagged commit, run `./gradlew testDebugUnitTest lintDebug assembleRelease` (with JDK 17;
+   Gradle 8.14 fails on JDK 25) and
    `node --test tools/test-web-*.cjs`. Keep the four ABI APKs and the universal APK, rename them to
    `yurlungr-<version>-<abi>.apk`, and generate `SHA256SUMS.txt`. Check package version, included ABI and signatures.
-4. Push the branch and tag without force. With the signing secrets set, the release workflow builds the APKs
-   and `SHA256SUMS.txt` and opens a draft release: check its APKs (version, ABI, signing certificate) and publish it. Without the workflow, create the release with `gh release create <version>
+4. Push the branch and tag without force, then create the release with `gh release create <version>
    --verify-tag --title "Yurlungr <version>" --notes-file docs/releases/<version>.md`, passing all APKs and
    `SHA256SUMS.txt` as assets. Publish as a full release so the README's latest-release link resolves.
 
