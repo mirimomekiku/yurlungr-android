@@ -377,7 +377,7 @@ fun SettingsScreen(
             item {
                 Group {
                     GroupRow("Version", trailing = { Text(version, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) })
-                    GroupRow("Open-source licenses", onClick = { showLicenses = true })
+                    GroupRow("Licenses and notices", onClick = { showLicenses = true })
                 }
             }
         }
@@ -468,7 +468,7 @@ private fun ThemeSheet(onDismiss: () -> Unit, onPick: (EditorTheme) -> Unit) {
     }
 }
 
-/** Licenses of what's bundled in the APK (fonts, icons); runtime packages carry their own. */
+/** The application license and third-party notices; runtime packages carry their own. */
 @Composable
 private fun LicensesSheet(onDismiss: () -> Unit) {
     val context = LocalContext.current
@@ -481,9 +481,10 @@ private fun LicensesSheet(onDismiss: () -> Unit) {
         }
     }
     dev.yurlungr.app.ui.AppSheet(
-        "Open-source licenses",
+        "Licenses and notices",
         onDismiss = onDismiss,
-        subtitle = "The Linux environment is the Termux bootstrap (packages under their own licenses, see \$PREFIX/share/doc). " +
+        subtitle = "Yurlungr's original code uses PolyForm Noncommercial 1.0.0. Third-party components retain their own terms. " +
+            "The Linux environment is the Termux bootstrap (packages under their own licenses, see \$PREFIX/share/doc). " +
             "The terminal view uses Termux's terminal libraries (Apache 2.0).",
         icon = Ph.FileText,
         tile = AppColors.tiles.sky,

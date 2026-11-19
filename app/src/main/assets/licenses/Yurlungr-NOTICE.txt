@@ -1,0 +1,31 @@
+Yurlungr
+
+Required Notice: Copyright (c) 2026 dlord213
+
+Licensor: dlord213 (https://github.com/mirimomekiku)
+Project: https://github.com/mirimomekiku/yurlungr-android
+SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
+Original Yurlungr code and documentation are made available under the
+PolyForm Noncommercial License 1.0.0 in LICENSE. The complete license,
+including its permitted purposes and notice requirements, controls.
+For permissions outside those terms, contact the licensor through the
+GitHub profile above to arrange a separate license.
+
+Third-party components
+
+The Yurlungr license covers only original material controlled by its
+licensor. It does not replace or restrict the licenses or copyright
+notices of third-party software, dependencies, fonts, icons or assets.
+
+Bundled notices are in app/src/main/assets/licenses and are displayed
+under Settings > Licenses and notices. They include Termux terminal
+libraries and the native terminal source (Apache-2.0), CommonMark Java
+(BSD-2-Clause), Phosphor and LobeHub icons (MIT), Inter and Space
+Grotesk fonts (OFL-1.1), and Mermaid and KaTeX (MIT), which the app
+downloads on demand for diagrams and math. Other dependencies retain
+their upstream terms.
+
+The downloaded Termux bootstrap, runtime packages and agent tools keep
+their own licenses and notices; see their upstream projects and the
+installed runtime's $PREFIX/share/doc directory.

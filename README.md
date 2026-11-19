@@ -595,11 +595,26 @@ credential-file presence; Antigravity's is not documented, so it shows as *Insta
   not on every device.
 - Alpha release APKs use the debug signing key; see [Development](DEVELOPMENT.md) before changing it.
 
+## License
+
+Yurlungr's original code and documentation use the
+[PolyForm Noncommercial License 1.0.0](LICENSE)
+(`PolyForm-Noncommercial-1.0.0`). You may use, modify and distribute the software
+for the purposes permitted by that license, including noncommercial use. Keep the
+license and the [required copyright notice](NOTICE) with copies you share.
+For commercial permissions outside those terms, contact
+[the licensor](https://github.com/mirimomekiku) for a separate agreement.
+
+This is a source-available, noncommercial license. Third-party components retain
+their own licenses and notices; see [NOTICE](NOTICE) and
+[the bundled license files](app/src/main/assets/licenses). The app displays these
+under **Settings → Licenses and notices**.
+
 ## Credits
 
 Built on [Termux](https://termux.dev) (bootstrap, packages and terminal libraries) and the
 [Agent Client Protocol](https://agentclientprotocol.com) adapters. Bundled assets and their licences
-(also shown in Settings → Open-source licenses): [Inter](https://rsms.me/inter/) and
+(also shown in Settings → Licenses and notices): [Inter](https://rsms.me/inter/) and
 [Space Grotesk](https://github.com/floriankarsten/space-grotesk) (SIL OFL 1.1),
 [Phosphor Icons](https://phosphoricons.com) (MIT), agent logos from
 [LobeHub Icons](https://github.com/lobehub/lobe-icons) (MIT; trademarks of their owners), and
