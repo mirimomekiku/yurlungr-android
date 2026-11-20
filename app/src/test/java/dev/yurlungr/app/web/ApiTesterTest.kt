@@ -70,6 +70,36 @@ class ApiTesterTest {
         assertEquals(listOf(ApiRequest(name = "x", method = "GET")), ApiRequestStore.decode("""{"requests":[{"name":"x","bodyType":"Nope"},3]}"""))
     }
 
+    @Test fun headersAreStoredSealedAndOldPlaintextIsMigrated() {
+        // A software key stands in for Android Keystore's.
+        val key = javax.crypto.KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+        val box = dev.yurlungr.app.remote.SecretBox({ key })
+        val requests = listOf(
+            ApiRequest("Me", "GET", "http://127.0.0.1:8000/me", "Authorization: Bearer sk-live-123\nX-Api-Key: abc", ApiBodyType.None, ""),
+            ApiRequest("Health", "GET", "http://127.0.0.1:8000/health", "", ApiBodyType.None, ""),
+        )
+        val text = ApiRequestStore.encode("/p", requests, box)
+        assertTrue(text, !text.contains("sk-live-123") && !text.contains("X-Api-Key"))
+        val stored = Json.parseToJsonElement(text).jsonObject["requests"]!!.jsonArray
+        assertTrue(stored[0].jsonObject["headers"]!!.jsonPrimitive.content.startsWith(dev.yurlungr.app.remote.SecretBox.PREFIX))
+        assertEquals("", stored[1].jsonObject["headers"]!!.jsonPrimitive.content)
+        val back = ApiRequestStore.decodeChecked(text, box)
+        assertEquals(requests, back.requests)
+        assertTrue("already sealed: nothing to migrate", !back.plaintextHeaders)
+
+        // A file written before sealing: read as it is, and flagged so it's rewritten sealed.
+        val old = ApiRequestStore.encode("/p", requests)
+        val migrated = ApiRequestStore.decodeChecked(old, box)
+        assertEquals(requests, migrated.requests)
+        assertTrue(migrated.plaintextHeaders)
+
+        // Sealed with a key that's gone: the headers are dropped, never shown as ciphertext.
+        val otherKey = javax.crypto.KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+        val lost = ApiRequestStore.decode(text, dev.yurlungr.app.remote.SecretBox({ otherKey }))
+        assertEquals("", lost[0].headers)
+        assertEquals("http://127.0.0.1:8000/me", lost[0].url)
+    }
+
     @Test fun storageKeysAreStableFileNames() {
         val key = ApiRequestStore.key("/data/data/com.termux/files/home/projects/api")
         assertEquals(64, key.length)

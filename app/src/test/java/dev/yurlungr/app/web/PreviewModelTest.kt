@@ -46,4 +46,30 @@ class PreviewModelTest {
         assertTrue(qr[0, 0] && qr[qr.size - 1, 0] && qr[0, qr.size - 1])
         assertTrue(!qr[1, 1] && qr[3, 3])
     }
+
+    @Test fun siteDataIsPerLocalOrigin() {
+        assertEquals("http://127.0.0.1:5173", PreviewSiteData.origin("http://127.0.0.1:5173/shop?x=1#top"))
+        assertEquals("http://localhost:80", PreviewSiteData.origin("http://LOCALHOST/"))
+        assertEquals("https://127.0.0.1:443", PreviewSiteData.origin("https://127.0.0.1/"))
+        assertNull(PreviewSiteData.origin("https://example.com/"))
+        assertNull(PreviewSiteData.origin("file:///sdcard/x.html"))
+        assertNull(PreviewSiteData.origin("not a url"))
+    }
+
+    @Test fun anotherProjectOnTheSameOriginGetsACleanSlate() {
+        assertTrue(PreviewSiteData.needsClear("/home/projects/shop", "/home/projects/blog"))
+        assertTrue(!PreviewSiteData.needsClear("/home/projects/shop", "/home/projects/shop"))
+        // First time here, or a server Yurlungr didn't start: nothing known to clear for.
+        assertTrue(!PreviewSiteData.needsClear(null, "/home/projects/shop"))
+        assertTrue(!PreviewSiteData.needsClear("/home/projects/shop", null))
+    }
+
+    @Test fun cookieNamesComeFromTheCookieHeader() {
+        assertEquals(listOf("session", "theme", "a"), PreviewSiteData.cookieNames("session=abc; theme=dark;a=1; session=dup"))
+        assertEquals(emptyList<String>(), PreviewSiteData.cookieNames(null))
+        assertEquals(emptyList<String>(), PreviewSiteData.cookieNames(""))
+        assertTrue(PreviewSiteData.clearScript(reloadIfAny = true).contains("getRegistrations"))
+        assertTrue(PreviewSiteData.clearScript(reloadIfAny = true).contains("location.reload()"))
+        assertTrue(!PreviewSiteData.clearScript(reloadIfAny = false).contains("location.reload()"))
+    }
 }

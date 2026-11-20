@@ -46,6 +46,11 @@ class WebDeployTest {
         assertNull(WebDeploy.resolveOutput(root, "dist/../../x"))
         assertNull(WebDeploy.resolveOutput(root, "~/x"))
         assertNull(WebDeploy.resolveOutput(root, temp.root.absolutePath))
+        // An absolute path is refused even when the same path exists inside the project.
+        File(root, "tmp/x").mkdirs()
+        assertNull(WebDeploy.resolveOutput(root, "/tmp/x"))
+        assertNull(WebDeploy.resolveOutput(root, " /tmp/x/ "))
+        assertNotNull(WebDeploy.resolveOutput(root, "tmp/x/"))
         // Not built yet is fine: it's still inside.
         assertNotNull(WebDeploy.resolveOutput(root, "out"))
     }
@@ -62,6 +67,8 @@ class WebDeployTest {
 
     @Test fun `build uses the package manager and installs first when needed`() {
         val dir = temp.newFolder("my app")
+        // Without a package.json there's nothing to install (a custom server): this one is a Node project.
+        file(dir, "package.json", """{"scripts":{"build":"vite build"}}""")
         assertNull(WebDeploy.buildCommand(project(dir, mapOf("dev" to "vite"))))
         val cmd = WebDeploy.buildCommand(project(dir, mapOf("build" to "vite build")))!!
         assertTrue(cmd, cmd.contains("pnpm install && "))
@@ -73,21 +80,42 @@ class WebDeployTest {
 
     @Test fun `deploy commands quote paths, never contain tokens and clear them afterwards`() {
         val dir = File("/home/projects/it's")
+        val cli = File("/app/cache/deploy-cli")
         val out = File(dir, "dist")
-        val cf = WebDeploy.deployCommand(DeployProvider.Cloudflare, dir, out, "my-site")!!
-        assertTrue(cf, cf.contains("npx --yes wrangler pages deploy '/home/projects/it'\\''s/dist' --project-name 'my-site'"))
+        val cf = WebDeploy.deployCommand(DeployProvider.Cloudflare, dir, cli, out, "my-site")!!
+        assertTrue(cf, cf.contains("-- wrangler pages deploy '/home/projects/it'\\''s/dist' --project-name 'my-site'"))
         assertTrue(cf, cf.contains("unset CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID"))
         assertTrue(cf, cf.endsWith("(exit \$_deploy_exit)"))
-        assertNull("Cloudflare needs a project name", WebDeploy.deployCommand(DeployProvider.Cloudflare, dir, out, ""))
-        assertNull(WebDeploy.deployCommand(DeployProvider.Cloudflare, dir, out, "x; rm -rf ~"))
-        assertNull(WebDeploy.deployCommand(DeployProvider.Netlify, dir, out, "-oops"))
+        assertNull("Cloudflare needs a project name", WebDeploy.deployCommand(DeployProvider.Cloudflare, dir, cli, out, ""))
+        assertNull(WebDeploy.deployCommand(DeployProvider.Cloudflare, dir, cli, out, "x; rm -rf ~"))
+        assertNull(WebDeploy.deployCommand(DeployProvider.Netlify, dir, cli, out, "-oops"))
 
-        val nl = WebDeploy.deployCommand(DeployProvider.Netlify, dir, out, null)!!
-        assertTrue(nl, nl.contains("netlify-cli deploy --dir '/home/projects/it'\\''s/dist' --prod --no-build;"))
-        assertTrue(WebDeploy.deployCommand(DeployProvider.Netlify, dir, out, "abc-123")!!.contains("--site 'abc-123'"))
-        val vc = WebDeploy.deployCommand(DeployProvider.Vercel, dir, out, "shop")!!
-        assertTrue(vc, vc.contains("npx --yes vercel deploy '/home/projects/it'\\''s/dist' --prod --yes --project 'shop'"))
+        val nl = WebDeploy.deployCommand(DeployProvider.Netlify, dir, cli, out, null)!!
+        assertTrue(nl, nl.contains("-- netlify deploy --dir '/home/projects/it'\\''s/dist' --prod --no-build;"))
+        assertTrue(WebDeploy.deployCommand(DeployProvider.Netlify, dir, cli, out, "abc-123")!!.contains("--site 'abc-123'"))
+        val vc = WebDeploy.deployCommand(DeployProvider.Vercel, dir, cli, out, "shop")!!
+        assertTrue(vc, vc.contains("-- vercel deploy '/home/projects/it'\\''s/dist' --prod --yes --project 'shop'"))
         assertTrue(vc, vc.contains("unset VERCEL_TOKEN"))
+    }
+
+    @Test fun `deploy CLIs are pinned and never come from the project or its npm config`() {
+        val dir = File("/home/projects/shop")
+        val cli = File("/app/cache/deploy-cli")
+        val out = File(dir, "dist")
+        for (provider in DeployProvider.entries) {
+            val pinned = WebDeploy.DEPLOY_CLIS.getValue(provider)
+            assertTrue(pinned, Regex("^[a-z-]+@\\d+\\.\\d+\\.\\d+$").matches(pinned))
+            val cmd = WebDeploy.deployCommand(provider, dir, cli, out, "site-1", npm = "/usr/bin/npm")!!
+            assertTrue(cmd, cmd.contains("'/usr/bin/npm' exec --yes --prefix '/app/cache/deploy-cli' --userconfig '/app/cache/deploy-cli/npmrc' --registry=https://registry.npmjs.org/ --package=$pinned --"))
+            // Never npx, never from inside the project: its node_modules/.bin and .npmrc are the project's to control.
+            assertFalse(cmd, cmd.contains("npx"))
+            assertFalse(cmd, cmd.contains("cd '/home/projects/shop'"))
+            val work = WebDeploy.deployWorkDir(cli, dir).invariantSeparatorsPath
+            assertTrue(work, work.startsWith("/app/cache/deploy-cli/work/"))
+            assertTrue(cmd, cmd.startsWith("mkdir -p '$work' && : > '/app/cache/deploy-cli/npmrc' && cd '$work' && "))
+        }
+        // Each project keeps its own site link (the CLIs write it in the working folder).
+        assertFalse(WebDeploy.deployWorkDir(cli, dir) == WebDeploy.deployWorkDir(cli, File("/home/projects/blog")))
     }
 
     @Test fun `deploy environment needs every key`() {

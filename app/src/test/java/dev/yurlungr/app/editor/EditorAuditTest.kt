@@ -53,6 +53,17 @@ class EditorAuditTest {
         assertEquals("a\nb", Formatter.normalize("a\nb"))
     }
 
+    @Test fun `an untrusted project's prettier config and plugins are never loaded`() {
+        val file = java.io.File("/home/projects/repo/src/app.ts")
+        val input = java.io.File("/cache/in-1.txt")
+        val output = java.io.File("/cache/out-1.txt")
+        val trusted = Formatter.command(file, input, output, trusted = true)
+        assertTrue(trusted, !trusted.contains("--no-config"))
+        val untrusted = Formatter.command(file, input, output, trusted = false)
+        assertTrue(untrusted, untrusted.contains(" --no-config --no-editorconfig --stdin-filepath '/home/projects/repo/src/app.ts'"))
+        assertTrue(untrusted, untrusted.startsWith("npx --yes prettier@"))
+    }
+
     @Test fun `first visible gutter line is found by binary search`() {
         val tops = floatArrayOf(0f, 20f, 40f, 100f, 120f) // line 2 wraps
         fun first(y: Float) = firstLineAtOrBelow(tops.size, y) { tops[it] }

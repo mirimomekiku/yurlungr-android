@@ -102,3 +102,62 @@ test('compiler and environment failures have distinct recovery states',async()=>
  const missing=await fixture({kind:'Script',mode:'Custom',command:"echo 'DATABASE_URL environment variable is required' >&2; exit 1"});
  assert.equal((await state(missing,'NeedsSetup')).code,'MISSING_ENV');
 });
+async function send(port,url='/',headers={}) { return new Promise((resolve,reject)=> {
+  const r=http.get({host:'127.0.0.1',port,path:url,headers},res=> {let body='';res.on('data',chunk=>body+=chunk);res.on('end',()=>resolve({code:res.statusCode,headers:res.headers,body}));});r.on('error',reject);
+}); }
+function echoBackend() {
+  const code=`require('http').createServer((req,res)=>res.end(JSON.stringify({url:req.url,headers:req.headers,allowed:process.env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS}))).listen(Number(process.env.PORT),'127.0.0.1')`;
+  return nodeBinary+' -e '+"'"+code.replaceAll("'","'\\''")+"'";
+}
+test('public link requests reach the dev server with a loopback Host and keep the forwarded protocol',async()=> {
+ const f=await fixture({kind:'Script',mode:'Custom',command:echoBackend()});await state(f,'Running');
+ const seen=JSON.parse((await send(f.config.port,'/a?b=1',{host:'quiet-river.trycloudflare.com','x-forwarded-proto':'https','cf-ray':'1'})).body);
+ assert.equal(seen.headers.host,'127.0.0.1:'+f.config.port);
+ assert.equal(seen.headers['x-forwarded-host'],'quiet-river.trycloudflare.com');
+ assert.equal(seen.headers['x-forwarded-proto'],'https');
+ assert.equal(seen.headers['x-forwarded-port'],'443');
+ assert.equal(seen.url,'/a?b=1');
+ assert.equal(seen.allowed,'.trycloudflare.com');
+ // Local requests keep their own Host, and an odd protocol value falls back to http.
+ const local=JSON.parse((await send(f.config.port,'/',{host:'localhost:'+f.config.port,'x-forwarded-proto':'gopher'})).body);
+ assert.equal(local.headers.host,'localhost:'+f.config.port);assert.equal(local.headers['x-forwarded-proto'],'http');
+ assert.equal(local.headers['x-forwarded-port'],String(f.config.port));
+});
+test('an access key gates public requests only, through a one-time query that becomes a cookie',async()=> {
+ const f=await fixture({kind:'Script',mode:'Custom',command:echoBackend()});await state(f,'Running');
+ const key='k3y-for-tests_0123456789abcdef';fs.writeFileSync(path.join(f.dir,'access'),key);await pause(400);
+ const pub={host:'quiet-river.trycloudflare.com','x-forwarded-proto':'https'};
+ assert.equal((await send(f.config.port,'/',pub)).code,401);
+ assert.equal((await send(f.config.port,'/?key=wrong',pub)).code,401);
+ // Cloudflare's headers count as public even with a loopback Host.
+ assert.equal((await send(f.config.port,'/',{host:'127.0.0.1','cf-connecting-ip':'203.0.113.9'})).code,401);
+ // The phone itself (preview, health checks) never needs the key.
+ assert.equal((await send(f.config.port,'/')).code,200);
+ const enter=await send(f.config.port,'/shop?key='+key+'&page=2',pub);
+ assert.equal(enter.code,302);assert.equal(enter.headers.location,'/shop?page=2');
+ const cookie=enter.headers['set-cookie'][0];
+ assert.match(cookie,/^yurlungr_access=k3y-for-tests_0123456789abcdef; Path=\/; HttpOnly; SameSite=Lax/);assert.match(cookie,/; Secure/);
+ // A crafted path can't turn the redirect into one to another site.
+ assert.equal((await send(f.config.port,'//evil.example/x?key='+key,pub)).headers.location,'/x');
+ const inside=await send(f.config.port,'/shop?page=2',{...pub,cookie:'theme=dark; yurlungr_access='+key});
+ assert.equal(inside.code,200);
+ assert.equal(JSON.parse(inside.body).headers.cookie,'theme=dark','the app never sees the access cookie');
+ assert.equal((await send(f.config.port,'/',{...pub,cookie:'yurlungr_access=nope'})).code,401);
+ // WebSocket upgrades need it too.
+ const upgrade=await new Promise((resolve,reject)=> {
+  const socket=net.connect(f.config.port,'127.0.0.1');socket.setTimeout(3000,()=>{socket.destroy();reject(new Error('timed out'));});
+  socket.on('connect',()=>socket.write('GET /hmr HTTP/1.1\r\nHost: quiet-river.trycloudflare.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'));
+  socket.once('data',data=>{socket.destroy();resolve(data.toString());});socket.on('error',reject);
+ });
+ assert.match(upgrade,/^HTTP\/1.1 401/);
+ // Once the app removes the key (the link stopped), the gate is gone with it.
+ fs.unlinkSync(path.join(f.dir,'access'));await pause(400);
+ assert.equal((await send(f.config.port,'/',pub)).code,200);
+});
+test('static sites are gated by the access key too',async()=> {
+ const f=await fixture();await state(f,'Running');
+ fs.writeFileSync(path.join(f.dir,'access'),'static-key-0123456789');await pause(400);
+ const pub={host:'calm-bird.trycloudflare.com'};
+ const denied=await send(f.config.port,'/',pub);assert.equal(denied.code,401);assert.ok(!denied.body.includes('Local preview'));
+ assert.equal((await send(f.config.port,'/',{...pub,cookie:'yurlungr_access=static-key-0123456789'})).body,'<h1>Local preview</h1>');
+});

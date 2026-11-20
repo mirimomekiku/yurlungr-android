@@ -34,7 +34,7 @@ class CodeToolsTest {
         assertEquals("keep\nours line\ntheirs line\nafter\n", Merge.render(parts, listOf("ours line\ntheirs line")))
         assertEquals("keep\nafter\n", Merge.render(parts, listOf("")))
         // Unresolved: the markers stay, so nothing is lost.
-        assertTrue(Merge.render(parts, listOf(null)).contains("<<<<<<< HEAD\nours line\n|||||||\nbase line\n=======\ntheirs line\n>>>>>>> feature\n"))
+        assertEquals(conflicted, Merge.render(parts, listOf(null)))
     }
 
     @Test fun `text without markers is one plain part`() {

@@ -83,4 +83,15 @@ class WebRunWatcherTest {
         assertTrue(config.restartsOnChange)
         assertFalse(config.copy(restartOnChange = false).restartsOnChange)
     }
+
+    @Test fun watchingBacksOffWhileNothingChanges() {
+        var pace = WatchPace.MIN_MS
+        val seen = mutableListOf<Long>()
+        repeat(6) { pace = WatchPace.next(pace, changed = false, visible = true); seen += pace }
+        assertEquals(listOf(1_500L, 2_250L, 3_375L, 5_000L, 5_000L, 5_000L), seen)
+        // A change brings it straight back to every second; the background waits the longest, but still watches.
+        assertEquals(WatchPace.MIN_MS, WatchPace.next(5_000L, changed = true, visible = true))
+        assertEquals(WatchPace.MIN_MS, WatchPace.next(5_000L, changed = true, visible = false))
+        assertEquals(WatchPace.MAX_MS, WatchPace.next(WatchPace.MIN_MS, changed = false, visible = false))
+    }
 }
