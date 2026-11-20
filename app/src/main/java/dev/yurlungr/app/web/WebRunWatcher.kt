@@ -92,11 +92,28 @@ internal object FileWatch {
 }
 
 /**
- * Restarts a run when its project's files change: polls every second, waits for half a second of
- * quiet so a burst of saves restarts it once, and only restarts a server that's up. Stops with the run.
+ * How often to look for changes: every second right after one, backing off to [MAX_MS] while nothing
+ * changes (a walk of a big project every second costs battery for hours), and straight to [MAX_MS] while
+ * the app is in the background. It keeps watching there: agents edit files with the app closed, and a
+ * restart-on-save server must still pick that up, a few seconds later at most.
+ */
+internal object WatchPace {
+    const val MIN_MS = 1_000L
+    const val MAX_MS = 5_000L
+
+    fun next(current: Long, changed: Boolean, visible: Boolean): Long = when {
+        changed -> MIN_MS
+        !visible -> MAX_MS
+        else -> (current * 3 / 2).coerceIn(MIN_MS, MAX_MS)
+    }
+}
+
+/**
+ * Restarts a run when its project's files change: polls (paced by [WatchPace], skipping dependency,
+ * build and dot folders), waits for half a second of quiet so a burst of saves restarts it once, and
+ * only restarts a server that's up. Stops with the run.
  */
 internal object WebRunWatcher {
-    private const val POLL_MS = 1_000L
     private const val QUIET_MS = 500L
     private const val MIN_GAP_MS = 3_000L
 
@@ -105,10 +122,13 @@ internal object WebRunWatcher {
         var last = FileWatch.snapshot(root)
         var pending = false
         var lastRestart = 0L
+        var pause = WatchPace.MIN_MS
         while (isActive && !run.finalized) {
-            delay(POLL_MS)
+            delay(pause)
             val now = FileWatch.snapshot(root)
-            if (FileWatch.diff(last, now).any) {
+            val changed = FileWatch.diff(last, now).any
+            pause = WatchPace.next(pause, changed, dev.yurlungr.app.chat.ChatSessions.appVisible)
+            if (changed) {
                 last = now
                 // Saves often come in bursts (formatters, git checkouts): wait for them to settle, within reason.
                 for (attempt in 1..10) {

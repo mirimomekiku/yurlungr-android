@@ -1,6 +1,7 @@
 package dev.yurlungr.app.web
 
 import android.content.Context
+import dev.yurlungr.app.remote.SecretBox
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -161,44 +162,70 @@ internal object ApiRequests {
     }
 }
 
-/** Saved requests per project, in app-private storage (never in the project's own folder). */
+/**
+ * Saved requests per project, in app-private storage (never in the project's own folder). Headers carry
+ * secrets (Authorization, API keys), so with a [SecretBox] they're stored sealed, like deploy tokens:
+ * `cat` on the file from a runtime process (an agent) shows ciphertext. Files from before are plaintext
+ * and get sealed the next time they're read.
+ */
 internal object ApiRequestStore {
+    /** What a file held: the requests, and whether any headers were still plaintext (so it should be rewritten). */
+    data class Decoded(val requests: List<ApiRequest>, val plaintextHeaders: Boolean)
+
     /** A file name for a project path: its SHA-256, so any path maps to a safe, fixed-length name. */
     fun key(projectPath: String): String =
         MessageDigest.getInstance("SHA-256").digest(projectPath.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 
-    fun encode(projectPath: String, requests: List<ApiRequest>): String = buildJsonObject {
+    fun encode(projectPath: String, requests: List<ApiRequest>, box: SecretBox? = null): String = buildJsonObject {
         put("project", projectPath)
         put("requests", buildJsonArray {
             for (r in requests) add(buildJsonObject {
                 put("name", r.name); put("method", r.method); put("url", r.url)
-                put("headers", r.headers); put("bodyType", r.bodyType.name); put("body", r.body)
+                put("headers", if (box == null || r.headers.isEmpty()) r.headers else box.seal(r.headers))
+                put("bodyType", r.bodyType.name); put("body", r.body)
             })
         })
     }.toString()
 
-    fun decode(text: String): List<ApiRequest> = runCatching {
+    fun decode(text: String, box: SecretBox? = null): List<ApiRequest> = decodeChecked(text, box).requests
+
+    /** Sealed headers that can't be opened (the key is gone) come back empty rather than as ciphertext. */
+    fun decodeChecked(text: String, box: SecretBox? = null): Decoded = runCatching {
         val root = Json.parseToJsonElement(text) as JsonObject
-        (root["requests"] as JsonArray).mapNotNull { element ->
+        var plaintext = false
+        val requests = (root["requests"] as JsonArray).mapNotNull { element ->
             val o = element as? JsonObject ?: return@mapNotNull null
             fun s(name: String) = (o[name] as? JsonPrimitive)?.contentOrNull.orEmpty()
+            val stored = s("headers")
+            val headers = when {
+                box == null || stored.isEmpty() -> stored
+                box.isSealed(stored) -> box.open(stored).orEmpty()
+                else -> stored.also { plaintext = true }
+            }
             ApiRequest(
-                name = s("name"), method = s("method").ifBlank { "GET" }, url = s("url"), headers = s("headers"),
+                name = s("name"), method = s("method").ifBlank { "GET" }, url = s("url"), headers = headers,
                 bodyType = ApiBodyType.entries.firstOrNull { it.name == s("bodyType") } ?: ApiBodyType.None, body = s("body"),
             )
         }
-    }.getOrDefault(emptyList())
+        Decoded(requests, plaintext)
+    }.getOrDefault(Decoded(emptyList(), false))
 
     private fun file(context: Context, projectPath: String) = File(context.filesDir, "api-requests/${key(projectPath)}.json")
 
-    fun load(context: Context, projectPath: String): List<ApiRequest> =
-        runCatching { decode(file(context, projectPath).readText()) }.getOrDefault(emptyList())
+    /** Blocking (Keystore): call off the main thread. */
+    fun load(context: Context, projectPath: String): List<ApiRequest> {
+        val decoded = runCatching { decodeChecked(file(context, projectPath).readText(), SecretBox.app) }.getOrNull() ?: return emptyList()
+        // Migrate: an older file kept headers in plaintext.
+        if (decoded.plaintextHeaders) runCatching { save(context, projectPath, decoded.requests) }
+        return decoded.requests
+    }
 
+    /** Blocking (Keystore): call off the main thread. */
     fun save(context: Context, projectPath: String, requests: List<ApiRequest>) {
         val target = file(context, projectPath)
         target.parentFile?.mkdirs()
         val temp = File(target.path + ".tmp")
-        temp.writeText(encode(projectPath, requests))
+        temp.writeText(encode(projectPath, requests, SecretBox.app))
         if (!temp.renameTo(target)) { target.delete(); temp.renameTo(target) }
     }
 }

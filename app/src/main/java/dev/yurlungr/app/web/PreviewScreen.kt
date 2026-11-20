@@ -7,6 +7,14 @@ import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
+import android.webkit.CookieManager
+import android.webkit.WebStorage
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -93,6 +101,8 @@ fun PreviewScreen(url: String, title: String, onBack: () -> Unit, onOpenTerminal
     var more by remember { mutableStateOf(false) }
     var showConsole by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf(false) }
+    // Set when another project used this origin before: the first page load also unregisters its service workers.
+    var clearWorkersOnLoad by remember { mutableStateOf(false) }
     val webView = remember {
         // Inspectable from a computer's chrome://inspect in debug builds.
         if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) WebView.setWebContentsDebuggingEnabled(true)
@@ -112,6 +122,12 @@ fun PreviewScreen(url: String, title: String, onBack: () -> Unit, onOpenTerminal
                     return true
                 }
                 override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { current = url; error = null }
+                override fun onPageFinished(view: WebView, url: String) {
+                    if (clearWorkersOnLoad && PreviewSiteData.origin(url) != null) {
+                        clearWorkersOnLoad = false
+                        view.evaluateJavascript(PreviewSiteData.clearScript(reloadIfAny = true), null)
+                    }
+                }
                 override fun onReceivedError(view: WebView, request: WebResourceRequest, err: WebResourceError) {
                     if (request.isForMainFrame) error = "${err.description} (${request.url})"
                     add(PreviewLogs.request(request.method, request.url.toString(), null, err.description?.toString().orEmpty()))
@@ -132,8 +148,41 @@ fun PreviewScreen(url: String, title: String, onBack: () -> Unit, onOpenTerminal
                     return true
                 }
             }
-            loadUrl(url)
         }
+    }
+    val scope = rememberCoroutineScope()
+    /** Clears [origin]'s storage, cookies and cache; the page itself unregisters its service workers first when it's showing. */
+    fun clearSiteData(origin: String, then: () -> Unit) {
+        if (PreviewSiteData.origin(webView.url.orEmpty()) == origin) webView.evaluateJavascript(PreviewSiteData.clearScript(reloadIfAny = false), null)
+        scope.launch {
+            delay(300) // let the page's own clearing finish before its storage goes
+            WebStorage.getInstance().deleteOrigin(origin)
+            // Cookies have no per-origin delete: expire each one this origin sees (they're shared by every port on 127.0.0.1).
+            val cookies = CookieManager.getInstance()
+            for (name in PreviewSiteData.cookieNames(cookies.getCookie(origin))) cookies.setCookie(origin, "$name=; Max-Age=0; Path=/")
+            cookies.flush()
+            webView.clearCache(true)
+            then()
+        }
+    }
+    // Which project showed this origin last: a different one gets a clean slate rather than its leftovers.
+    LaunchedEffect(Unit) {
+        val origin = PreviewSiteData.origin(url)
+        val port = localPort(url)
+        val owner = port?.let { p -> WebRunSessions.all().firstOrNull { it.config.port == p && it.state.active }?.root?.path }
+        if (origin != null && owner != null) {
+            val prefs = context.getSharedPreferences("preview_origins", android.content.Context.MODE_PRIVATE)
+            val previous = withContext(Dispatchers.IO) { prefs.getString(origin, null).also { prefs.edit().putString(origin, owner).apply() } }
+            if (PreviewSiteData.needsClear(previous, owner)) {
+                clearWorkersOnLoad = true
+                clearSiteData(origin) {
+                    Toast.makeText(context, "Another project used this port before: its site data was cleared.", Toast.LENGTH_SHORT).show()
+                    webView.loadUrl(url)
+                }
+                return@LaunchedEffect
+            }
+        }
+        webView.loadUrl(url)
     }
     DisposableEffect(Unit) { onDispose { webView.stopLoading(); webView.destroy() } }
     BackHandler { if (webView.canGoBack()) webView.goBack() else onBack() }
@@ -179,6 +228,19 @@ fun PreviewScreen(url: String, title: String, onBack: () -> Unit, onOpenTerminal
                 DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
                     DropdownMenuItem(text = { Text("Open in browser") }, leadingIcon = { PhIcon(Ph.ArrowUp, null, size = 18.dp) },
                         onClick = { more = false; RuntimeBridge.open(context, current) })
+                    PreviewSiteData.origin(current)?.let { origin ->
+                        DropdownMenuItem(
+                            text = { Text("Clear site data") },
+                            leadingIcon = { PhIcon(Ph.Trash, null, size = 18.dp) },
+                            onClick = {
+                                more = false
+                                clearSiteData(origin) {
+                                    Toast.makeText(context, "Cleared storage, cookies, cache and service workers", Toast.LENGTH_SHORT).show()
+                                    webView.reload()
+                                }
+                            },
+                        )
+                    }
                     if (port != null) DropdownMenuItem(
                         text = { Text(if (tunnel?.state == TunnelState.Live) "Public link & QR code" else "Share public link") },
                         leadingIcon = { PhIcon(Ph.Globe, null, size = 18.dp, tint = if (tunnel?.state == TunnelState.Live) AppColors.status.success else colors.onSurface) },

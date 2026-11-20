@@ -32,6 +32,47 @@ internal data class PreviewFrame(val width: Int, val height: Int, val scale: Flo
     }
 }
 
+/**
+ * Site data in the preview. The WebView keeps storage, cookies and service workers per origin, and an
+ * origin here is just 127.0.0.1 and a port, which every project reuses (5173, 3000…): one project's
+ * login, cached app shell or service worker would otherwise show up in the next one on that port.
+ */
+internal object PreviewSiteData {
+    /** "http://127.0.0.1:5173" for a local [url]; null for anything else. */
+    fun origin(url: String): String? = runCatching {
+        val uri = java.net.URI(url)
+        val host = uri.host?.lowercase() ?: return null
+        if (host != "127.0.0.1" && host != "localhost") return null
+        val scheme = uri.scheme?.lowercase() ?: return null
+        if (scheme != "http" && scheme != "https") return null
+        val port = uri.port.takeIf { it > 0 } ?: if (scheme == "https") 443 else 80
+        "$scheme://$host:$port"
+    }.getOrNull()
+
+    /** Clear before showing [owner] when the origin last showed a different, known project. */
+    fun needsClear(previousOwner: String?, owner: String?): Boolean = owner != null && previousOwner != null && previousOwner != owner
+
+    /** Cookie names in a `name=value; name2=value2` header (as CookieManager.getCookie returns it). */
+    fun cookieNames(header: String?): List<String> =
+        header.orEmpty().split(';').mapNotNull { part -> part.substringBefore('=').trim().takeIf { it.isNotEmpty() } }.distinct()
+
+    /**
+     * Run in the page: unregisters its service workers and empties its caches and storage (only the
+     * page's own origin can reach them). With [reloadIfAny], reloads once when a service worker was
+     * there, so the next load comes from the server rather than the old worker.
+     */
+    fun clearScript(reloadIfAny: Boolean): String = """
+        (function(){
+          try { localStorage.clear(); sessionStorage.clear(); } catch (e) {}
+          if (window.caches) caches.keys().then(function(keys){ keys.forEach(function(k){ caches.delete(k); }); }).catch(function(){});
+          if (!navigator.serviceWorker) return;
+          navigator.serviceWorker.getRegistrations().then(function(rs){
+            return Promise.all(rs.map(function(r){ return r.unregister(); })).then(function(){ ${if (reloadIfAny) "if (rs.length) location.reload();" else ""} });
+          }).catch(function(){});
+        })();
+    """.trimIndent()
+}
+
 internal enum class PreviewLogLevel { Error, Warning, Info }
 
 /** A console message or a failed request from the previewed page. */
