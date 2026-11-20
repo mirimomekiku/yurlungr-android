@@ -61,8 +61,8 @@ android {
         // data directory, which is where the embedded runtime's binaries live (same as Termux).
         // Sideload-only as a result; Play Store would reject it.
         targetSdk = 28
-        versionCode = 5
-        versionName = "0.0.5"
+        versionCode = 6
+        versionName = "0.0.6"
     }
 
     // One APK per CPU architecture (smaller downloads; each carries only its own native libraries),

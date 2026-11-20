@@ -59,7 +59,7 @@ and install it (allow installs from your browser or file manager when asked):
 Not sure? `adb shell getprop ro.product.cpu.abi` prints your phone's ABI. Each release lists SHA-256
 checksums in `SHA256SUMS.txt`.
 
-Changes in this version: [0.0.5 release notes](docs/releases/0.0.5.md).
+Changes in this version: [0.0.6 release notes](docs/releases/0.0.6.md).
 
 ## Quick start
 
