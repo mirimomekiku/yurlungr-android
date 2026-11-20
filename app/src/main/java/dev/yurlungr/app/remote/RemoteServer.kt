@@ -393,9 +393,23 @@ object RemoteServer : ChatListener {
         conn.close(code, reason)
     }
 
-    /** A message from a paired device (already opened from its sealed frame). */
-    private fun handle(conn: WebSocket, text: String) {
-        val msg = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
+    /**
+     * A message from a paired device, parsed off the main thread (frames reach 64 MB): the JSON,
+     * and for a message with attachments their decoded bytes.
+     */
+    private class Incoming(val msg: JsonObject, val attachments: List<Attachment>)
+
+    /** Parses an opened frame on the connection's socket thread; null for anything that isn't a JSON object. */
+    private fun parse(text: String): Incoming? {
+        val msg = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return null
+        val type = msg.str("t")
+        val files = if (type == "send" || type == "enqueue") decodeAttachments(msg["attachments"]) else emptyList()
+        return Incoming(msg, files)
+    }
+
+    /** A message from a paired device (opened and parsed on its socket thread); applied here, on the main thread. */
+    private fun handle(conn: WebSocket, incoming: Incoming) {
+        val msg = incoming.msg
         val client = conn.client ?: return
         if (!client.authed) return
         val type = msg.str("t")
@@ -421,12 +435,23 @@ object RemoteServer : ChatListener {
                     put("chat", created.id)
                 })
             }
-            "send" -> chat?.send(msg.str("text").orEmpty(), decodeAttachments(msg["attachments"]))
+            // Both queue behind a running turn like the phone's own composer (older clients send "send").
+            "send", "enqueue" -> chat?.deliver(msg.str("text").orEmpty(), incoming.attachments)
+            "unqueue" -> {
+                val index = msg.long("index")?.toInt() ?: return
+                chat?.removeQueued(index, msg.str("text").orEmpty())
+            }
+            "sendNow" -> chat?.sendQueuedNow()
             "config" -> {
                 val id = msg.str("id") ?: return
                 val value = msg["value"] as? JsonPrimitive ?: return
                 if (value.isString) {
-                    if (!allowRemoteSkip && dev.yurlungr.app.chat.PermissionModes.isSkipMode(value.content)) return
+                    val option = chat?.configOptions?.firstOrNull { it.id == id }
+                    // Select values that turn approvals off (bypassPermissions, danger-full-access, never…).
+                    if (!allowRemoteSkip && RemoteProtocol.isRiskyConfigValue(id, option?.name, option?.category, value.content)) {
+                        Log.w(TAG, "Refused remote change of config option $id to ${value.content} (allow remote skip is off)")
+                        return
+                    }
                     chat?.setConfigOption(id, value.content)
                 } else {
                     val on = value.booleanOrNull ?: return
@@ -445,7 +470,7 @@ object RemoteServer : ChatListener {
                 val option = msg.str("option") ?: return
                 chat?.answerPermission(key, option)
             }
-            "mode" -> msg.str("mode")?.takeIf { allowRemoteSkip || !dev.yurlungr.app.chat.PermissionModes.isSkipMode(it) }?.let { chat?.setMode(it) }
+            "mode" -> msg.str("mode")?.takeIf { allowRemoteSkip || !RemoteProtocol.isRiskyConfigValue("mode", null, "mode", it) }?.let { chat?.setMode(it) }
             "resume" -> chat?.resume()
             "restart" -> chat?.restart()
             "stop" -> chat?.stop()
@@ -532,7 +557,9 @@ object RemoteServer : ChatListener {
                 conn.close(CLOSE_TAMPERED, "Message failed authentication")
                 return
             }
-            main.post { handle(conn, text) }
+            // Parsed here too (JSON and base64 attachments of a big frame would stall the UI); applied on main.
+            val incoming = parse(text) ?: return
+            main.post { handle(conn, incoming) }
         }
 
         override fun onError(conn: WebSocket?, ex: Exception) {

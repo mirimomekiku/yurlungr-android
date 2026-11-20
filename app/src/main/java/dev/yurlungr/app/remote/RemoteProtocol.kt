@@ -26,13 +26,19 @@ import kotlinx.serialization.json.putJsonArray
  * → host auth{proof}. After that every message is a binary frame sealed by [SecureChannel]:
  *
  * client → host: open{chat} · close{chat} · create{req,agent,folder,skipPermissions}
- *                send{chat,text} · cancel · permission{chat,k,option} · mode{chat,mode}
+ *                send{chat,text} · enqueue{chat,text} · unqueue{chat,index,text} · sendNow{chat}
+ *                cancel · permission{chat,k,option} · mode{chat,mode}
  *                resume · restart · stop · delete (all {chat})
  * host → client: welcome{device,agents,chats} · chats{chats} · created{req,chat}
  *                snapshot{chat} · item{chat,item} · append{chat,k,text} · state{chat,…} · meta{chat,…}
  *                error{message}
  *
  * Version 1 sent the pairing code itself in hello{token}; hosts now refuse it.
+ *
+ * Queueing: a host that queues messages behind a running turn sends `queued` (the texts waiting)
+ * in meta; a client that sees it sends `enqueue` (and may unqueue or send now). Hosts deliver
+ * `send` the same way, so older clients' messages queue too. A client of an older host (no
+ * `queued` in meta) keeps its own queue and sends the next message when the chat is ready.
  */
 object RemoteProtocol {
     const val VERSION = 2
@@ -132,6 +138,27 @@ object RemoteProtocol {
         return RISKY_TOGGLE.containsMatchIn(text)
     }
 
+    /**
+     * A select value that turns approvals off or widens what runs without asking: skip modes
+     * (bypassPermissions, yolo…), Codex's danger-full-access and full-auto, approval policy
+     * never, accept-edits and auto-edit modes, dontAsk. Values that only mean that for a
+     * permission-like option (never, auto) count when [id], [name] or [category] say it is one.
+     */
+    fun isRiskyConfigValue(id: String, name: String?, category: String?, value: String): Boolean {
+        if (dev.yurlungr.app.chat.PermissionModes.isSkipMode(value)) return true
+        val v = value.lowercase().replace('_', '-')
+        if (RISKY_VALUES.any { v == it || v.contains(it) }) return true
+        val permissionLike = category == "mode" || id == "mode" || isRiskyConfigToggle(id, name)
+        return permissionLike && v in RISKY_FOR_PERMISSIONS
+    }
+
+    private val RISKY_VALUES = listOf(
+        "bypasspermissions", "bypass-permissions", "danger-full-access", "dangerously", "yolo", "full-auto",
+        "fullauto", "acceptedits", "accept-edits", "auto-edit", "autoedit", "dontask", "dont-ask", "full-access",
+        "auto-approve", "autoapprove", "skip-permissions", "no-sandbox",
+    )
+    private val RISKY_FOR_PERMISSIONS = setOf("never", "auto", "off", "none", "allow-all", "all")
+
     private val RISKY_TOGGLE = Regex("auto[-_ ]?approv|approv|permission|skip|bypass|yolo|danger|unsafe|sandbox|confirm|full[-_ ]?access|trust|allow[-_ ]?all")
 
     fun encodeState(state: ChatState): Pair<String, String?> = when (state) {
@@ -189,6 +216,8 @@ object RemoteProtocol {
         put("commands", AcpExtras.encodeCommands(chat.commands))
         put("configOptions", AcpExtras.encodeConfigOptions(chat.configOptions))
         chat.usage?.let { put("usage", AcpExtras.encodeUsage(it)) }
+        // Messages waiting behind the running turn; its presence also says this host queues (see above).
+        putJsonArray("queued") { chat.queued.forEach { add(JsonPrimitive(it.text)) } }
         put("caps", buildJsonObject {
             put("image", chat.caps.image)
             put("embeddedContext", chat.caps.embeddedContext)

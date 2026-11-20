@@ -20,6 +20,8 @@ import dev.yurlungr.app.chat.ChatModel
 import dev.yurlungr.app.chat.ChatState
 import dev.yurlungr.app.chat.ChatStore
 import dev.yurlungr.app.chat.PermissionOption
+import dev.yurlungr.app.chat.QueuedMessage
+import kotlinx.serialization.json.contentOrNull
 import dev.yurlungr.app.chat.SessionMode
 import dev.yurlungr.app.remote.RemoteProtocol.long
 import dev.yurlungr.app.remote.RemoteProtocol.str
@@ -93,9 +95,47 @@ class RemoteChat(
                     else -> Unit
                 }
             }
-            "state" -> state = RemoteProtocol.decodeState(msg.str("state"), msg.str("message"))
+            "state" -> {
+                state = RemoteProtocol.decodeState(msg.str("state"), msg.str("message"))
+                sendLocalQueue()
+            }
             "meta" -> applyMeta(msg)
         }
+    }
+
+    /** The host queues messages itself (it sends `queued` in meta); else this side holds them. */
+    private var hostQueues = false
+
+    /** Messages waiting behind the host's turn: mirrored from the host, or held here for an older host. */
+    override val queued = mutableStateListOf<QueuedMessage>()
+
+    override fun enqueue(text: String, attachments: List<Attachment>) {
+        if (text.isBlank() && attachments.isEmpty()) return
+        when {
+            hostQueues -> sendMessage("enqueue", text, attachments)
+            // An older host drops a message sent while it's busy: hold it until the chat is ready.
+            state == ChatState.Running || state == ChatState.Starting -> queued += QueuedMessage(text, attachments)
+            else -> send(text, attachments)
+        }
+    }
+
+    override fun removeQueued(index: Int) {
+        val m = queued.getOrNull(index) ?: return
+        if (hostQueues) command("unqueue", "index" to index.toLong(), "text" to m.text)
+        else queued.removeAt(index)
+    }
+
+    override fun sendQueuedNow() {
+        if (hostQueues) command("sendNow")
+        else if (state == ChatState.Ready) sendLocalQueue()
+        else cancel() // the next one goes when the host says it's ready again
+    }
+
+    /** For an older host: the next held message, once the chat is free. */
+    private fun sendLocalQueue() {
+        if (hostQueues || state != ChatState.Ready) return
+        val next = queued.removeFirstOrNull() ?: return
+        send(next.text, next.attachments)
     }
 
     private fun applyMeta(obj: JsonObject) {
@@ -108,6 +148,20 @@ class RemoteChat(
         obj["commands"]?.let { commands = AcpExtras.parseCommands(it) }
         obj["configOptions"]?.let { configOptions = AcpExtras.parseConfigOptions(it) }
         usage = AcpExtras.parseUsage(obj["usage"] as? JsonObject)
+        (obj["queued"] as? JsonArray)?.let { arr ->
+            if (!hostQueues) {
+                // Held here until now (or from before a host update): they go to the host's queue.
+                hostQueues = true
+                val held = queued.toList()
+                queued.clear()
+                held.forEach { sendMessage("enqueue", it.text, it.attachments) }
+            }
+            val texts = arr.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            if (texts != queued.map { it.text }) {
+                queued.clear()
+                queued += texts.map { QueuedMessage(it) }
+            }
+        }
         (obj["caps"] as? JsonObject)?.let { c ->
             caps = PromptCaps(
                 image = (c["image"] as? JsonPrimitive)?.booleanOrNull ?: false,
@@ -161,6 +215,10 @@ class RemoteChat(
     override fun restart() = command("restart")
     override fun send(text: String, attachments: List<Attachment>) {
         if (text.isBlank() && attachments.isEmpty()) return
+        sendMessage("send", text, attachments)
+    }
+
+    private fun sendMessage(type: String, text: String, attachments: List<Attachment>) {
         val files = JsonArray(attachments.map { a ->
             buildJsonObject {
                 put("name", a.name)
@@ -168,7 +226,7 @@ class RemoteChat(
                 put("data", Base64.encodeToString(a.bytes, Base64.NO_WRAP))
             }
         })
-        command("send", "text" to text.trim(), "attachments" to files)
+        command(type, "text" to text.trim(), "attachments" to files)
     }
 
     override fun setConfigOption(id: String, value: String) = command("config", "id" to id, "value" to value)
