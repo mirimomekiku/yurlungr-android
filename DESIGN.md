@@ -58,9 +58,11 @@ Screens compose these rather than styling from scratch.
 
 Patterns used across screens:
 
-- **Bottom sheets, not dialogs** (`ui/Sheets.kt` `AppSheet`), with actions pinned at the bottom.
+- **Bottom sheets, not dialogs** (`ui/Sheets.kt` `AppSheet`), with actions pinned at the bottom. A sheet
+  can pin a header (tabs, a search field) under its title while its content scrolls, and keep a scroll
+  position per tab (Install tools).
 - **Segmented controls:** a rounded track with a raised thumb. Used for the project tabs, the Files
-  filter and History's branch scope. A count badge widens its segment rather than being clipped.
+  filter, History's branch scope and Install tools' Essentials · Optional packs tabs. A count badge widens its segment rather than being clipped.
 - **The project dock:** at most three buttons: Chat, the project's main action, and **More**, which opens
   a sheet listing every other tool with a line saying what it does. A small ringed dot marks a tool that
   needs you (orange) or is live (green).

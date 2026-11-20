@@ -93,8 +93,13 @@ normalizes CRLF/lone CR when installing them, including scripts from older APKs.
 Executable files are published by atomic rename so a refresh cannot leave a
 partially written script. Setup launchers parse with `bash -n` before executing.
 
-The developer-tools, agent and SDK installers share an exclusive kernel lock, preserve one previous
-log (`*.log.previous`), and return nonzero on a failed step. The terminal shows
+Every installer (developer tools, agents, SDK, the packs and Install tools' `essentials-setup.sh`) takes one
+exclusive kernel lock, preserves one previous log (`*.log.previous`), and returns nonzero on a failed step.
+So setups never run inside each other: Install tools chains them one after another in the same terminal.
+Closing a setup's tab or pressing Exit gives it 10 s (`SetupLock.STOP_GRACE_MS`, instead of 1.5 s) before
+SIGKILL, so dpkg can finish what it's unpacking; an interrupted install is repaired with `dpkg --configure -a`
+and then `apt-get -f install`. Scripts can register temporary files with `cleanup_on_exit <path>` (removed however the
+run ends) and print `warn` lines for things the user should see, such as a download without a checksum. The terminal shows
 the exit code before returning to its shell. Retry setup after fixing the reported
 failure; it will update or repair the existing installation.
 
@@ -116,22 +121,33 @@ from the other. To add a tool to an existing setup, add it to `Toolchain` and no
 
 - **A new optional pack** needs:
   - a `ToolSetup` entry (packages, disk space, marker file, one-line blurb) and its `Tool` probes;
-  - a `Fix` entry, plus its branches in `SetupScreen`.
+  - a `Fix` entry, plus its branches in `SetupScreen`;
+  - its heading in `ToolPacks.category` (`runtime/Essentials.kt`) for the Install tools sheet. The `when`
+    has no `else`, so the build fails until it's given one.
 
   No script to write: the generic `assets/pack-setup.sh` is installed under the pack's script name and
   installs that pack (a pack needing custom steps gets its own asset, like `browser-setup.sh`, and an
-  exception in `ToolSetup.asset`). `HardeningTest` checks that every pack has all of these.
+  exception in `ToolSetup.asset`). `HardeningTest` checks that every pack has all of these, and
+  `EssentialsTest` that the Install tools sheet offers it under a heading.
+- **A new essential** (Install tools' first tab) is an `Essential` entry: its packages and the `Tool` ids
+  whose probes say it's installed, plus its section in `SetupScreen`'s `essentialSection`. `toolchain.sh`
+  carries its packages and checks for `essentials-setup.sh` (`YURLUNGR_ESSENTIAL_PACKAGES`,
+  `YURLUNGR_ESSENTIAL_TOOLS`, `YURLUNGR_CHECKS_ESSENTIALS`).
 - **Probes:**
   - print a version line and exit 0;
   - avoid `head` in a pipe: `pipefail` turns its early exit (SIGPIPE) into a failure, so use `sed -n 1p`;
   - tools that start a JVM need `timeoutS = SLOW_PROBE_S`;
   - tools that may not be installed (optional agents) need `onlyIf`, so neither System checks nor the
     scripts report them as failures.
+- **Deploy CLIs** (wrangler, netlify-cli, vercel) are pinned in `WebDeploy.DEPLOY_CLIS` and run from an
+  app-owned npm prefix, never the project's. Bump them deliberately, to releases at least a few weeks old.
 - **JDK versions** live in `runtime/Jdks.kt`. Termux's Gradle, Kotlin, Maven, d8 and apksigner need
   JDK 21, so that's the one the setups install.
 
 Each setup writes `$PREFIX/var/lib/yurlungr/setup/<name>.status` when it exits: the exit code,
-log path, time and failed steps. System checks shows a failed run with a **Log** button.
+log path, time and failed steps. System checks shows a failed run with a **Log** button (Install tools' own
+runs as "Last Install tools run"). When `essentials-setup.sh` installs and verifies a pack, it also rewrites
+that pack's status as a success, so an older failed run of the pack's own setup stops showing.
 Setups wait up to two minutes for an apt lock held by a terminal, repair an interrupted dpkg
 run first, and stop with a mirror hint when the package index can't be downloaded.
 

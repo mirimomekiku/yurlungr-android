@@ -26,14 +26,29 @@ agents running inside it.
 - **Bridges.** Android's `am` is unusable from an app UID, so `runtime/RuntimeAssets.kt` installs shims
   (`xdg-open`, `termux-open-url`, `yurlungr-install`, `yurlungr-notify`) that drop requests into an
   inbox folder. `runtime/RuntimeBridge.kt` watches it and does one of four things:
-  - opens URLs (http/https only);
+  - opens http(s) URLs, and local files under home (`FileOpenStaging` copies an existing, non-hidden file
+    under 100 MB into the FileProvider's `share-out/` and opens it with ACTION_VIEW); other schemes are
+    refused with an error;
   - opens the package installer;
-  - posts notifications;
+  - posts notifications (`yurlungr-notify` notices rotate through 5 fixed ids in their own group, so they
+    can't fill Android's 50-per-app limit and push out approval alerts);
   - handles `.done` reports, which terminal commands write when they ran 20 s or more
     (`runtime/TaskNotifications.kt`).
+
+  While the app is in the background (Android blocks starting activities then), link, install and
+  file requests become notifications whose tap opens them. Exit 137 (Android's SIGKILL, usually the
+  phantom process limit) gets an explanation and a Fix action through `PhantomHint`.
 - **Storage.** `runtime/Storage.kt` reads pack sizes from dpkg's status file, measures and clears
-  caches, and counts upgradable packages. `assets/pack-remove.sh` removes a pack's packages but keeps
-  anything the core setups need.
+  caches, and counts upgradable packages (`UpgradableCount` caches the count until dpkg's status or apt's
+  lists change, at most 6 h, so quick refreshes never run apt). `assets/pack-remove.sh` removes a pack's
+  packages but stops, removing nothing, when apt would also take a core or other-pack package or one the
+  user installed.
+- **Reinstalling the base system.** `BootstrapInstaller` downloads the newest bootstrap through the GitHub
+  API, falling back to the newest pinned release (same checksum check) when the API is rate-limited or
+  unreachable. A reinstall renames `usr` aside, renames the new one in, and deletes the old copy in the
+  background (it puts the old one back if the swap fails). Before that, `RestoreList` saves the packages,
+  global npm packages, setups and agents the user had; System checks then offers to reinstall them
+  (`assets/restore-packages.sh`).
 - **Agent notes.** On every launch the app rewrites a managed "you're on an Android phone" block in each
   agent's instructions file (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`).
 - **Staying alive.** `runtime/RuntimeService.kt` is a foreground service that keeps agents and terminal processes running (with an
@@ -56,11 +71,20 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
 - `agents/Agents.kt` holds each agent's launch command, extra environment, sign-in command and
   install / sign-in detection. `assets/agents-setup.sh` installs them (see the README's Agents table).
 - `acp/AcpConnection.kt` is JSON-RPC 2.0 over the agent's stdio; incoming messages are handled in order on
-  the main thread.
+  the main thread. Agents start through `setsid` (`acp/ProcessGroup.kt`), so ending a chat kills the whole
+  group: dev servers, MCP servers and shells the agent started don't outlive it.
 - `chat/ChatSession.kt` is one chat = one agent process: `initialize` → `session/new` (or `session/load`
   when reopening) → `session/prompt`. It renders `session/update` items, answers
-  `session/request_permission`, serves `fs/read_text_file` / `fs/write_text_file`, and applies session
-  options (`session/set_config_option`, modes).
+  `session/request_permission`, serves `fs/read_text_file` / `fs/write_text_file` (writes keep the
+  file's mode) and `terminal/*` (`chat/AcpTerminals.kt`: each command in its own process group, output
+  capped and truncated from the start, live in the tool card with Stop, released when the session ends),
+  and applies session options (`session/set_config_option`, modes). `session/new` and `session/load`
+  pass the project's `.mcp.json` servers for trusted projects (`McpServers.toAcp`; HTTP ones only when
+  the agent advertises them; Gemini and Qwen skip those already in their own settings).
+- Permission prompts carry `PermissionDetails` (command, paths, diffs) to the card, the notification and
+  paired phones. `PathPolicy.isSensitive` keeps approval rules from auto-approving edits to agent and
+  tool configuration (`.claude/`, `.gemini/`, `.codex/`, `.mcp.json`, `.envrc`, `.env*`, git hooks…),
+  and search or fetch rules only match calls that name paths inside the project.
 - New-chat Skip permissions is stored with the chat. Before the first prompt, `ChatSession` selects an
   advertised bypass mode; Antigravity instead receives its documented launch flag. Remote creation
   forwards the same setting, and remote metadata includes its current state.
@@ -69,11 +93,14 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
     front matter) into top-level blocks. It groups `<details>` sections, gives headings GitHub-style
     anchors, and allowlists safe HTML (`HtmlLite`).
   - `chat/Markdown.kt` renders the blocks: code with the editor's lexer and theme, images (remote ones
-    only after a tap), callouts, and find highlighting.
+    only after a tap), callouts, and find highlighting. A reply that's still streaming goes through
+    `chat/MarkdownStream.kt`: it re-parses at most ~10 times a second and keeps finished blocks stable.
 - Queue: while a turn runs, `enqueue` adds to `ChatSession.queued`; the turn's end sends the oldest
   (unless the user pressed Stop; `sendQueuedNow` cancels and then drains). It is client-side because
   agents differ: Claude's adapter queues a mid-turn prompt and Codex's waits for the running turn, but
-  Gemini aborts the running turn. `ChatModel` has defaults so remote chats compile without it.
+  Gemini aborts the running turn. Messages from a paired phone go through the same queue: the host
+  mirrors `queued` in its metadata and accepts `enqueue`, `unqueue` and `sendNow`; with an older host the
+  client holds its messages and sends them when the chat is ready.
 - `chat/Artifacts.kt` derives a chat's artifacts from its edit tool calls (`ToolContent.Diff` with an
   absolute path) and merges them with each prompt's checkpoint snapshot (`Checkpoints.changedFilesWithStatus`),
   which also sees files commands wrote; one entry per file, by prompt. `editor/FilePreview.kt` is the shared
@@ -88,7 +115,9 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
   files by format), create from templates, delete (only inside the known folders) and the validated shell commands
   for plugins and `git clone`. `agents/AgentExtensionsScreen.kt` is the screen (`Route.Extensions`, opened through
   `LocalOpenExtensions`); `chat/CommandsSheet.kt` lists the agent's advertised slash commands.
-- `chat/ChatSessions.kt` is the app-wide registry; saved chats cost nothing until opened.
+- `chat/ChatSessions.kt` is the app-wide registry; saved chats cost no process until opened. Each chat has
+  at most one pending save, and tool output is capped at 20k characters in memory as on disk. Usage and
+  per-turn cost are saved with the chat and its turns.
 - `chat/ChatModel.kt` is the interface the chat screen draws, implemented by local sessions and by remote
   chats mirrored from another phone.
 
@@ -102,7 +131,18 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
   changes (All, Changed, Source, Ignored). The Changed view includes deleted paths, and folders count the
   changes inside them.
 - `projects/ProjectChanges.kt` is the Changes tab: Conflicts, Staged and Changes groups, stage, unstage
-  and discard (`Git.stage/unstage/discard`), and a pinned commit box that commits staged files or all.
+  and discard (`Git.stage/unstage/discard`), single hunks (`HunkPatch.kt` builds a one-hunk patch for
+  `git apply --cached`, keeping CRs and missing final newlines; off for new, renamed, binary or truncated
+  diffs), and a pinned commit box that commits staged files or all. After a git action only status is
+  refreshed, not the whole project.
+- `Git.operationInProgress` reads `--git-path` for MERGE_HEAD, rebase-merge/-apply, CHERRY_PICK_HEAD and
+  REVERT_HEAD; `GitOperationUi.kt` shows Continue / Conclude merge / Abort, and the agent's conflict
+  prompt follows the operation. Git writes run in the app-level `GitJobs` (long timeouts, they finish if
+  the screen closes). Stashes are acted on by SHA, and `RoutineStashes` remembers the stash Get latest or
+  Stash & switch made until it's restored. `GitLock.kt` offers to remove a stale `index.lock` when no git
+  process is working in the repo. `BranchCleanup.kt` finds merged and gone branches.
+- Pull requests: merges pass `--match-head-commit` (the commit that was reviewed), checkout runs with git
+  hooks switched off, and PR text reaches agents only inside a fenced `<pr-data>` block marked as data.
 - `projects/ProjectChecks.kt` is the Checks tab. It works out check and test commands per stack and
   runs them in a terminal with `tee` into `.yurlungr/`. Parsers turn compiler and linter output,
   JUnit XML, Jest JSON and `go`/`cargo` test output into problems and test results.
@@ -110,7 +150,9 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
   (a ripgrep regex for definition-like lines). The editor opens at `Route.FileView.line`.
 - `editor/Lsp.kt` is a small LSP client (Content-Length JSON-RPC over the server's stdio): diagnostics,
   definition, hover and completion. There's one server per project and language (`LspManager`), started
-  with the runtime's environment and stopped when the last editor using it closes. `OpenFiles` keeps
+  with the runtime's environment and stopped when the last editor using it closes; never for untrusted
+  projects. The editor checks the open file's stamp every 2 s: a clean buffer reloads, unsaved edits get a
+  Reload / Diff / Keep mine banner. `OpenFiles` keeps
   tabs and unsaved buffers; `MergeScreen.kt` parses conflict markers (diff3 bases included);
   `Snippets.kt` holds snippets and new-file templates; `DatabaseScreen.kt` opens SQLite with Android's
   `SQLiteDatabase`.
@@ -138,10 +180,21 @@ ChatScreen ── ChatSession ── AcpConnection ── stdio ── agent CLI
   setup (once per need).
 - `editor/` contains the Markdown viewer (lazy blocks, find, outline, anchors, text size, live reload)
   with an explicit Edit route, plus the text editor: `Highlighter` (a linear, pure-Kotlin lexer), `EditorThemes`, `Formatter`
-  (Prettier via `npx` in the runtime) and `EditorScreen`.
+  (Prettier via `npx` in the runtime; `--no-config --no-editorconfig` from an app folder for untrusted
+  projects, and the result is applied only if the buffer didn't change meanwhile) and `EditorScreen`.
 - `terminal/` wraps Termux's `terminal-view`; `TerminalSessions` owns sessions across screens. Long-press
   actions and confirmations use bottom sheets, while extra-key visibility is saved independently.
   Managed lifecycle callbacks let web supervisors handle End/Close/Restart and cleanup before a tab is removed.
+
+## Project trust
+
+`projects/ProjectTrust.kt` records which projects the user trusts to run their own code without asking. Projects
+are trusted unless marked, so folders made on the phone keep working; cloning a repository the user doesn't own
+(not their gh login, orgs or listed repos; any non-GitHub URL) marks it untrusted. Untrusted projects don't
+install and run after cloning or run the automatic setup, don't start language servers, run Prettier without the
+project's config, don't put a committed `.venv` on PATH (a venv also needs its python inside `$PREFIX`), and
+don't pass `.mcp.json` servers to agents. `ProjectTrustUi.kt` shows the banner and the Overview card with
+**Trust this project**; the project menu can mark it untrusted again.
 
 ## Local web runs
 
@@ -176,7 +229,9 @@ Run reservations remain busy until supervisor cleanup is finalized, and disable 
 `web-node-preload.cjs` corrects Termux's linker execPath in forked Node workers without changing globals.
 Readiness probes compile the selected route and require HTTP 200–399 within a configurable timeout.
 Native compiler and setup failures are classified from bounded output; raw output remains in Logs.
-The proxy preserves the public Host and forwards host/protocol/port for SSR and authentication.
+For requests that arrive through a public link, the proxy sends the dev server the run's loopback Host
+(Vite and webpack refuse unknown hosts) and keeps the original in `X-Forwarded-Host`; an incoming
+`X-Forwarded-Proto` is kept, so apps behind the https link don't redirect forever.
 
 Terminal lifecycle hooks route End/Close/Restart through the supervisor. A process exit changes run
 state even if its terminal remains visible. The registry is process-local; startup asks stale supervisors
@@ -188,7 +243,15 @@ terminal processes alive.
 `web/TunnelSessions.kt` shares a local port through cloudflared's account-free Quick Tunnel: one managed terminal per
 port runs `cloudflared tunnel --url http://127.0.0.1:PORT`, and the https link is read from its output (live only once
 cloudflared reports a registered connection). `web/TunnelUi.kt` is the sheet (confirmation first, then Copy / Share /
-Open / Stop) opened from a run's menu or from Servers, which also lists active links. A tunnel stops with its server.
+Open / Stop) opened from a run's menu or from Servers, which also lists active links and their time left. A tunnel
+stops with its server, or after its lifetime (15 min, 1 h by default, 4 h or until stopped). While any link is live an
+ongoing notification has Stop (`TunnelNotifications`, `TunnelActionReceiver`). Links to Yurlungr's own runs need an
+access key by default: the runner answers 401 to public requests without it, and `?key=` sets an HttpOnly cookie, so
+the link the app shows, copies and puts in the QR code includes the key.
+
+Deploy (`web/WebDeploy.kt`) runs pinned CLI versions (`DEPLOY_CLIS`) from an app-owned npm prefix with its own empty
+npmrc and the public registry, in an app-owned folder per project: the project's `node_modules` and `.npmrc` never see
+the deploy token.
 
 ## Two phones
 
@@ -206,18 +269,31 @@ as `ChatModel`s and reconnects with backoff unless the host disconnected it.
 
 ## Optional toolchains
 
-`ToolSetup` entries marked `optional` (42 of them: Python, Build tools, Utilities, Editors, Go, Rust, Ruby,
+`ToolSetup` entries marked `optional` (44 of them: Python, Build tools, Utilities, Editors, Go, Rust, Ruby,
 JavaScript runtimes, Java & Kotlin, PHP, Dart, .NET, Databases, Swift, Zig, Elixir, Lua, Crystal, Nim, Haskell,
 Scala, D, Perl, Shell, CLI tools, Servers, DevOps, Media, Local AI, Linux distros, Native libraries, Python
-science, Debugging, Language servers, Networking, Security, Data tools, Task runners, Docs, Archives, OCR & PDF and
-a headless browser) are separate packs.
+science, Debugging, Language servers, Networking, Security, Data tools, Task runners, Docs, Archives, OCR & PDF,
+the Ubuntu environment, Flutter and a headless browser) are separate packs.
 Each has its own script in the runtime (`libexec/yurlungr/<pack>-setup.sh`, so its own log and status file), its own
 Install button in System checks (one "(optional)" group each; a missing tool is Info, not a warning) and its own `Fix`.
 The scripts are all one asset, `assets/pack-setup.sh` (`ToolSetup.asset`), which `RuntimeAssets` installs under each
 pack's script name; it picks its pack from that name (`YURLUNGR_PACK_OF_SCRIPT` in the generated `toolchain.sh`) and
 reads that pack's `YURLUNGR_PACKAGES_<PACK>`, space need, title and `YURLUNGR_CHECKS_<PACK>`. To add a pack: a
-`ToolSetup` entry, its `Tool` probes and a `Fix` entry (with its branches in `SetupScreen`). `browser-setup.sh` is the one
-custom script: it enables Termux's x11 repository first. The managed agent notes list the packs that are installed, refreshed on app launch.
+`ToolSetup` entry, its `Tool` probes, a `Fix` entry (with its branches in `SetupScreen`) and its heading in
+`ToolPacks.category` (an exhaustive `when`, so the build fails without one). Three packs have custom scripts
+(`CUSTOM_SCRIPTS`): `browser-setup.sh` enables Termux's x11 repository first, `ubuntu-setup.sh` installs Ubuntu with
+proot-distro, and `flutter-setup.sh` installs Flutter inside it. The managed agent notes list the packs that are
+installed, refreshed on app launch.
+
+**Install tools** (System checks' card and sheet, in `setup/SetupScreen.kt`) installs several things in one terminal
+run. `runtime/Essentials.kt` holds what it offers: `Essential` (git, gh, Node, ripgrep, the agents, Python, pip,
+uv, SQLite: each item's packages and the `Tool` ids that say it's installed), `ToolPacks` (the optional packs but
+Python, which the essentials cover, plus the Android SDK; their dependencies and headings), `InstallStatus` (from
+the checks that ran) and `installToolsCommand`. That command runs `assets/essentials-setup.sh` once for the
+essentials and the package-only packs (lowercase names for essentials, the pack's uppercase name for packs, looked up
+in `toolchain.sh`: one package index refresh, shared packages installed once), then the agents setup and any custom
+pack or SDK setups one after another, each with the setup lock. A pack it installs and verifies gets its own status
+file rewritten as a success, so an older failed run stops showing; its own failures show as "Last Install tools run".
 
 Tools with `onlyIf` (optional agents) are checked only when installed, by System checks and by the scripts
 (`YURLUNGR_ONLY_IF` in `toolchain.sh`). JVM tools have a longer probe time (`Tool.timeoutS`).
@@ -245,7 +321,7 @@ Transitions come from `ui/Motion.kt`.
 
 | Path (`app/src/main/java/dev/yurlungr/app/`) | What it does |
 |---|---|
-| `runtime/` | Bootstrap, environment, command runner, foreground service, bridges and MOTD status |
+| `runtime/` | Bootstrap, environment, command runner, foreground service, bridges, MOTD status, toolchain and Install tools' choices |
 | `acp/` | JSON-RPC 2.0 over the agent's stdio |
 | `chat/` | Chat sessions, persistence, attachments, the chat and new-chat screens, the composer; approval rules (`ApprovalRules`), the artifacts sheet (`Artifacts`), the Activity screen (`ActivityScreen`), saved prompts (`PromptLibrary`) and search inside chats (`ChatSearch`) |
 | `agents/` | Agent launch recipes, install / sign-in detection, logos |
@@ -261,5 +337,6 @@ Transitions come from `ui/Motion.kt`.
 | `widgets/` | Quick Settings tiles, the home-screen widget (with its quick-ask bar) and launcher shortcuts |
 | `MainActivity.kt` | Routes and navigation |
 
-`app/src/main/assets/` holds the runtime scripts (`agents-setup.sh`, `android-sdk-setup.sh`, `pack-setup.sh` for the optional packs plus the custom `browser-setup.sh`,
+`app/src/main/assets/` holds the runtime scripts (`agents-setup.sh`, `android-sdk-setup.sh`, `dev-tools-setup.sh`, `essentials-setup.sh` for Install tools,
+`pack-setup.sh` for the optional packs plus the custom `browser-setup.sh`, `ubuntu-setup.sh` and `flutter-setup.sh`,
 `spike-test.sh`, `motd.sh`, `web-runner.cjs`) and the bundled licences.
