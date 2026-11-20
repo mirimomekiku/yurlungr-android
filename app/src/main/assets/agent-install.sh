@@ -39,6 +39,12 @@ GLIBC_LD="$PREFIX/glibc/lib/ld-linux-aarch64.so.1"
 DL_OPTS=(-fsSL --proto =https --proto-redir =https --retry 3 --connect-timeout 20 --speed-limit 1024 --speed-time 60)
 REGISTRY="https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
 
+# An update killed between moving the old copy aside and moving the new one in leaves only
+# $DEST.old: that's the working install. Put it back first, so it works even if this run fails.
+if [ ! -e "$DEST" ] && [ -e "$DEST.old" ]; then
+  mv "$DEST.old" "$DEST" && ok "restored the previous $AGENT install (an earlier update was interrupted)"
+fi
+
 # A command on PATH that runs [target]; glibc programs leave the Bionic preload out.
 write_wrapper() { # NAME BODY
   local wrapper="$PREFIX/bin/$1"
@@ -110,9 +116,13 @@ elif apt_prepare; then
 fi
 [ -x "$GLIBC_LD" ] || { bad "glibc loader missing ($GLIBC_LD)"; setup_finish ""; }
 
+# Folders left by runs that were killed outright (no trap runs then). The setup lock is held, so
+# no other install is using them.
+rm -rf "$PREFIX"/tmp/agent-install.?????? 2>/dev/null
 WORK=$(mktemp -d "$PREFIX/tmp/agent-install.XXXXXX") || { bad "temporary folder"; setup_finish ""; }
-# setup-common's EXIT trap reports the outcome, so clean up explicitly rather than replacing it.
-fail() { bad "$1"; rm -rf "$WORK"; setup_finish ""; }
+# Removed however the run ends (Ctrl-C, a closed tab, an error): setup-common's EXIT trap does it.
+cleanup_on_exit "$WORK"
+fail() { bad "$1"; setup_finish ""; }
 
 need_node() { command -v node >/dev/null || { echo "Node.js is needed to $1: install the developer tools" >&2; return 1; }; }
 
@@ -149,7 +159,9 @@ github_url() { # OWNER/REPO ASSET
       const a = (JSON.parse(s).assets || []).find(x => x.name === process.argv[1]);
       if (!a || !a.browser_download_url) process.exit(1);
       process.stdout.write(a.browser_download_url + (/^sha256:[0-9a-f]{64}$/.test(a.digest || "") ? " " + a.digest : ""));
-    });' "$2" 2>/dev/null || printf 'https://github.com/%s/releases/latest/download/%s' "$1" "$2"
+    });' "$2" 2>/dev/null && return 0
+  warn "GitHub's API didn't answer (it's rate-limited), so $2 comes from the plain latest-release link"
+  printf 'https://github.com/%s/releases/latest/download/%s' "$1" "$2"
 }
 # Checks [file] against [checksum] (formats above).
 verify_sum() { # FILE CHECKSUM
@@ -171,7 +183,7 @@ fetch() { # URL DIR [CHECKSUM]
   if [ -n "${3:-}" ]; then
     run_logged verify_sum "$file" "$3" || return 1
   else
-    printf 'No published checksum for %s: relying on HTTPS alone.\n' "$1" >> "$LOG"
+    warn "No published checksum for $(basename "${1%%\?*}"): relying on HTTPS alone"
   fi
   case "$file" in
     *.zip) run_logged unzip -q -o "$file" -d "$2" ;;

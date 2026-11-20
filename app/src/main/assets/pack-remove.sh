@@ -5,7 +5,8 @@
 #
 # Never removes what the developer tools, agents or Android SDK setups install, packages another
 # installed pack also lists, or packages dpkg marks essential. apt would also remove packages that
-# depend on the removed ones: it simulates first and stops if that would take any of those.
+# depend on the removed ones: it simulates first and stops if that would take anything that isn't
+# the pack's own (those, or packages the user installed), listing them.
 # Safe to re-run.
 set -u
 PACK=${1:-}
@@ -72,13 +73,23 @@ if [ "${#remove[@]}" -gt 0 ]; then
   fi
   gone=$(printf '%s\n' "$sim" | sed -n 's/^Remv \([^ :]*\).*/\1/p')
   printf '%s\n' "$gone" | sed 's/^/  - /'
-  blocked=""
+  # Only the pack's own packages may go. Anything else apt would take with them depends on them:
+  # the core setups' or another pack's (kept), or something installed by hand (the user's call).
+  wanted=" ${remove[*]} "
+  blocked="" theirs=""
   for g in $gone; do
-    case "$protected$shared" in *" $g "*) blocked+=" $g" ;; esac
-    [ "$(dpkg-query -W -f='${Essential}' "$g" 2>/dev/null)" = yes ] && blocked+=" $g"
+    case "$wanted" in *" $g "*) continue ;; esac
+    case "$protected$shared" in
+      *" $g "*) blocked+=" $g" ;;
+      *) if [ "$(dpkg-query -W -f='${Essential}' "$g" 2>/dev/null)" = yes ]; then blocked+=" $g"; else theirs+=" $g"; fi ;;
+    esac
   done
-  if [ -n "$blocked" ]; then
-    bad "removing this pack would also remove${blocked} (used by the core setups or another pack); nothing was removed"
+  if [ -n "$blocked$theirs" ]; then
+    [ -z "$blocked" ] || bad "removing this pack would also remove${blocked} (used by the core setups or another pack)"
+    [ -z "$theirs" ] || bad "removing this pack would also remove${theirs}, which depend on it and aren't part of the pack"
+    printf '  Nothing was removed.\n' >&2
+    # Packages the user installed are theirs to remove; the core setups' are never suggested.
+    [ -n "$blocked" ] || printf '  If you no longer need them, remove them yourself first: apt remove%s\n' "$theirs" >&2
     setup_finish ""
   fi
   if run_logged with_timeout 1800 apt-get remove -y "${APT_LOCK[@]}" "${remove[@]}"; then ok "removed"; else bad "apt-get remove"; fi

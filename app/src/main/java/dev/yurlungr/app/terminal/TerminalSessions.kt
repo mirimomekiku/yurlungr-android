@@ -82,8 +82,14 @@ object TerminalSessions {
         if (!session.isRunning) return
         val pid = session.pid
         if (pid <= 0) return // never started: nothing to stop
-        // termux.c calls setsid(), so the shell's pid is also its process group id.
-        dev.yurlungr.app.runtime.ProcessTree.terminate(pid, alsoGroup = true)
+        // termux.c calls setsid(), so the shell's pid is also its process group id. A setup may be
+        // in the middle of dpkg: it gets longer to stop before anything is killed.
+        val setup = dev.yurlungr.app.runtime.SetupLock.isSetupCommand(commands[session])
+        dev.yurlungr.app.runtime.ProcessTree.terminate(
+            pid,
+            graceMs = if (setup) dev.yurlungr.app.runtime.SetupLock.STOP_GRACE_MS else 1_500,
+            alsoGroup = true,
+        )
     }
 
     fun rename(session: TerminalSession, name: String) {
@@ -121,7 +127,9 @@ object TerminalSessions {
         pendingRestarts[session] = relaunch
         stopProcess(session)
         // If the exit callback never comes (a process that won't die), relaunch anyway.
-        main.postDelayed({ pendingRestarts.remove(session)?.invoke() }, 4_000)
+        // A setup gets longer to stop (see stopProcess): wait past that.
+        val wait = if (dev.yurlungr.app.runtime.SetupLock.isSetupCommand(command)) dev.yurlungr.app.runtime.SetupLock.STOP_GRACE_MS + 1_000 else 4_000L
+        main.postDelayed({ pendingRestarts.remove(session)?.invoke() }, wait)
     }
 
     /**
@@ -153,6 +161,8 @@ object TerminalSessions {
             login to arrayOf("-${login.name}")
         } else {
             val status = "_yurlungr_exit=\$?; if [ \"\$_yurlungr_exit\" -ne 0 ]; then printf '\\nCommand failed (exit %s). Review the output above before retrying.\\n' \"\$_yurlungr_exit\"; fi" +
+                // Signal 9 is almost always Android's background process limit, not the command.
+                "\nif [ \"\$_yurlungr_exit\" -eq ${dev.yurlungr.app.runtime.PhantomHint.EXIT_SIGKILL} ]; then printf '%s\\n' '${dev.yurlungr.app.runtime.PhantomHint.MESSAGE}'; fi" +
                 // A long command tells the app it ended, for a "finished" notification.
                 "\nif [ \"\$SECONDS\" -ge ${dev.yurlungr.app.runtime.TaskNotifications.MIN_SECONDS} ]; then _t='${paths.inbox}'/.\$\$.tmp; " +
                 "mkdir -p '${paths.inbox}' && printf '%s\\n%s\\n%s' \"\$_yurlungr_exit\" \"\$SECONDS\" '$statusId' > \"\$_t\" && " +

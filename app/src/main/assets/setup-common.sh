@@ -26,6 +26,8 @@ setup_init() {
   STATUS_DIR="$PREFIX/var/lib/yurlungr/setup"
   FAILED=()
   FINISH_REPORTED=0
+  CLEANUP=()
+  SIGKILLED=0
   mkdir -p "$PREFIX/var/lock" "$PREFIX/tmp" "${LOG%/*}" "$STATUS_DIR" || exit 73
   # One lock for all installers. The kernel releases it even after a crash or reboot.
   exec 9>"$PREFIX/var/lock/yurlungr-setup.lock" || exit 73
@@ -42,7 +44,7 @@ setup_init() {
   trap 'stop_steps; exit 129' HUP
   trap 'stop_steps; exit 130' INT
   trap 'stop_steps; exit 143' TERM
-  trap 'status=$?; stop_steps; [ "$STEP_GROUPS" = /dev/null ] || rm -f "$STEP_GROUPS"; write_status "$status"; if [ "$status" -ne 0 ] && [ "$FINISH_REPORTED" -eq 0 ]; then printf "\nSetup stopped (exit %s). Details: %s. Fix the error above and rerun setup.\n" "$status" "$LOG" >&2; fi' EXIT
+  trap 'status=$?; stop_steps; cleanup_paths; [ "$STEP_GROUPS" = /dev/null ] || rm -f "$STEP_GROUPS"; write_status "$status"; if [ "$status" -ne 0 ] && [ "$FINISH_REPORTED" -eq 0 ]; then printf "\nSetup stopped (exit %s). Details: %s. Fix the error above and rerun setup.\n" "$status" "$LOG" >&2; fi' EXIT
   # "Running" until it ends: a run killed outright (SIGKILL, the app or phone dying) skips every
   # trap, and must then read as interrupted, not as whatever the previous run recorded.
   write_status -1
@@ -99,8 +101,17 @@ require_space() { # MB
 apt_prepare() {
   if [ -n "$(dpkg --audit 2>/dev/null)" ]; then
     # Answer config-file questions up front: a prompt would wait forever on a line that's never shown.
-    run_logged with_timeout 1800 dpkg --force-confdef --force-confold --configure -a \
-      && ok "repaired an interrupted package install" || bad "package repair (dpkg --configure -a)"
+    run_logged with_timeout 1800 dpkg --force-confdef --force-confold --configure -a
+    # A killed `apt-get install` can leave packages unpacked without their dependencies, which
+    # `dpkg --configure -a` can't finish: apt completes them (or removes what can't be).
+    if [ -n "$(dpkg --audit 2>/dev/null)" ]; then
+      run_logged with_timeout 1800 apt-get -f install "${APT_OPTS[@]}"
+    fi
+    if [ -z "$(dpkg --audit 2>/dev/null)" ]; then
+      ok "repaired an interrupted package install"
+    else
+      bad "package repair (dpkg --configure -a, apt-get -f install)"
+    fi
   fi
   if run_logged with_timeout 600 apt-get "${APT_LOCK[@]}" update; then
     return 0
@@ -137,6 +148,23 @@ run_checks() {
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok() { printf '\033[32m  ✓ %s\033[0m\n' "$*"; }
 bad() { printf '\033[31m  ✗ %s\033[0m\n' "$*"; FAILED+=("$*"); }
+# Something the user should know that isn't a failure: on stderr, so it shows even from inside
+# $(...), and in the log.
+warn() {
+  printf '\033[33m  ! %s\033[0m\n' "$*" >&2
+  printf '\n[warning] %s\n' "$*" >> "${LOG:-/dev/null}" 2>/dev/null
+  return 0
+}
+
+# Removes a scratch folder the setup made when it ends, however it ends: Ctrl-C, a closed tab and
+# errors all go through the EXIT trap.
+cleanup_on_exit() { CLEANUP+=("$1"); }
+cleanup_paths() {
+  local p
+  for p in "${CLEANUP[@]+"${CLEANUP[@]}"}"; do [ -n "$p" ] && rm -rf -- "$p" 2>/dev/null; done
+  CLEANUP=()
+  return 0
+}
 
 # Runs a command with its output logged and shown one line at a time. Its stdin is /dev/null:
 # anything that asks a question fails at once instead of waiting on a prompt nobody can see.
@@ -151,6 +179,8 @@ run_logged() {
     printf 'Cannot save setup output to %s. Check free storage.\n' "$LOG" >&2
     return "${statuses[1]}"
   fi
+  # 137: killed by signal 9, usually Android's limit on background processes (see setup_finish).
+  if [ "${statuses[0]}" -eq 137 ]; then SIGKILLED=1; fi
   if [ "${statuses[0]}" -ne 0 ]; then return "${statuses[0]}"; fi
   return "${statuses[2]}"
 }
@@ -205,6 +235,8 @@ setup_finish() {
   if [ "${#FAILED[@]}" -ne 0 ]; then
     printf '\n\033[1;31mFailed: %s\033[0m (details: %s)\n' "${FAILED[*]}" "$LOG" >&2
     FINISH_REPORTED=1 # the EXIT trap needn't say it again
+    # A step was killed by signal 9: exit 137 lets System checks and the terminal say Android did it.
+    if [ "${SIGKILLED:-0}" = 1 ]; then exit 137; fi
     exit 1
   fi
   printf '\n\033[1;32m%s\033[0m\n' "$1"

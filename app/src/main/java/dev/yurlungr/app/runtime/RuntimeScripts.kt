@@ -47,6 +47,22 @@ object SetupLock {
     const val BUSY = 75
     const val BUSY_MESSAGE = "A setup is running. Try again when it finishes."
 
+    /**
+     * How long a setup gets to stop before what's left is killed (other commands get 1.5 s). dpkg
+     * killed mid-unpack leaves a package half-installed; given a few seconds after SIGTERM, it and
+     * the setup's traps finish the file they're on and record the stop. Bounded, so a stuck step
+     * can't keep a closed tab's processes around.
+     */
+    const val STOP_GRACE_MS = 10_000L
+
+    /**
+     * Whether a terminal command is a setup or package action: one of the app's scripts in
+     * `libexec/yurlungr` (setups, pack removal, agent installs, project setup) or a command wrapped
+     * with [wrap]. Those can be running apt or dpkg, which get [STOP_GRACE_MS] to stop.
+     */
+    fun isSetupCommand(command: String?): Boolean =
+        command != null && ("/libexec/yurlungr/" in command || "yurlungr-setup.lock" in command)
+
     /** [command] run while holding the lock, or exit [BUSY] with a message if a setup has it. */
     fun wrap(command: String): String {
         val quoted = "'" + command.replace("'", "'\\''") + "'"
