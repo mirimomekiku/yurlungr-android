@@ -413,6 +413,7 @@ class MainActivity : ComponentActivity() {
                 onDevices = { nav.push(Route.Devices) },
                 onDevEnvironment = { nav.push(Route.DevEnvironment) },
                 onUpdatePackages = { runInTerminal(context, nav, dev.yurlungr.app.runtime.packagesUpgradeCommand(), "Update packages") },
+                onRunInTerminal = { command, name -> runInTerminal(context, nav, command, name) },
             )
             Route.Settings -> SettingsScreen(
                 setupViewModel,
@@ -569,6 +570,7 @@ class MainActivity : ComponentActivity() {
         dev.yurlungr.app.widgets.OpenIn.SERVERS -> Route.Servers
         dev.yurlungr.app.widgets.OpenIn.TERMINAL -> Route.Terminal
         dev.yurlungr.app.widgets.OpenIn.ACTIVITY -> Route.Activity
+        dev.yurlungr.app.widgets.OpenIn.SYSTEM_CHECKS -> Route.Setup
         dev.yurlungr.app.widgets.OpenIn.NEW_CHAT -> Route.NewChat
         dev.yurlungr.app.widgets.OpenIn.QUICK_ASK -> { dev.yurlungr.app.widgets.QuickAsk.pending = true; Route.NewChat }
         // This activity is exported, so any app can send this: only folders under ~/projects, or the

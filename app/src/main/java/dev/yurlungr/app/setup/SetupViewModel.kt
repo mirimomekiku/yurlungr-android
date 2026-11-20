@@ -9,6 +9,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.yurlungr.app.runtime.BootstrapInstaller
 import dev.yurlungr.app.runtime.RuntimeAssets
+import dev.yurlungr.app.runtime.RestoreList
 import dev.yurlungr.app.runtime.RuntimePaths
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +31,8 @@ sealed interface InstallState {
 object BootstrapJob {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var job: Job? = null
+    /** How long a reinstall waits for database servers to stop (their own stop allows 60 s). */
+    private const val DB_STOP_WAIT_MS = 75_000L
 
     var state by mutableStateOf<InstallState>(InstallState.Idle)
         private set
@@ -43,14 +46,27 @@ object BootstrapJob {
      */
     fun start(app: Application, onFinished: () -> Unit) {
         if (isRunning) return
-        if (RuntimePaths(app).hasBaseSystem) {
+        val stopping = RuntimePaths(app).hasBaseSystem
+        if (stopping) {
             dev.yurlungr.app.chat.ChatSessions.stopAll()
             dev.yurlungr.app.web.WebRunSessions.stopAll(app)
+            // Public links (cloudflared) run in terminal tabs; stopped as links, so none reads as live.
+            dev.yurlungr.app.web.TunnelSessions.stopAll(app)
             dev.yurlungr.app.terminal.TerminalSessions.closeAll(app)
+            // Database servers are daemons (no terminal): stopped cleanly with their own script,
+            // which needs the old system, so the install waits for them below.
+            dev.yurlungr.app.databases.ProjectDatabases.stopAll(app)
         }
-        state = InstallState.Running("Starting…", null, emptyList())
+        state = InstallState.Running(if (stopping) "Stopping what runs from the old system…" else "Starting…", null, emptyList())
         job = scope.launch {
             try {
+                if (stopping) {
+                    // Bounded: a server that won't stop must not block the repair (the old system
+                    // is moved aside, not deleted from under it while the install runs).
+                    kotlinx.coroutines.withTimeoutOrNull(DB_STOP_WAIT_MS) {
+                        while (dev.yurlungr.app.databases.ProjectDatabases.busy.isNotEmpty()) kotlinx.coroutines.delay(250)
+                    }
+                }
                 BootstrapInstaller(app, RuntimePaths(app)).install { message, fraction ->
                     scope.launch {
                         // Updates still queued after completion/failure must not resurrect the progress UI.
@@ -84,7 +100,13 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
     val bootstrapInstalled: Boolean
         get() = RuntimePaths(getApplication()).isBootstrapInstalled
 
+    /** What a base-system reinstall removed and can be reinstalled ([RestoreList]), or null. */
+    var restore by mutableStateOf<RestoreList.Plan?>(null)
+        private set
+
     init {
+        // Old systems a reinstall set aside but the app closed before deleting: free that space.
+        if (!BootstrapJob.isRunning) BootstrapInstaller.deleteOldPrefixes(RuntimePaths(app))
         refresh()
     }
 
@@ -108,7 +130,12 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 // Off the main thread: file reads, StatFs and system-service calls.
-                val base = withContext(Dispatchers.IO) { DoctorChecks.runAll(getApplication()) }
+                // Quick refreshes (every return to the app) leave the package update count to the cache.
+                val base = withContext(Dispatchers.IO) { DoctorChecks.runAll(getApplication(), deep = wantDeep) }
+                restore = withContext(Dispatchers.IO) {
+                    val paths = RuntimePaths(getApplication())
+                    if (paths.isBootstrapInstalled && !BootstrapJob.isRunning) RestoreList.pending(paths) else null
+                }
                 if (wantDeep) {
                     toolChecks = DoctorChecks.tools(RuntimePaths(getApplication()))
                     lastDeepAt = System.currentTimeMillis()
@@ -151,6 +178,16 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
     fun installBootstrap() {
         BootstrapJob.start(getApplication()) { refresh(deep = true, force = true) }
         refresh()
+    }
+
+    /** The terminal command that reinstalls [restore], or null when there's nothing to. */
+    fun restoreCommand(): String? = restore?.let { RestoreList.command(RestoreList.file(RuntimePaths(getApplication())), it) }
+
+    /** Forgets what was installed before the reinstall: the card goes away. */
+    fun dismissRestore() {
+        restore = null
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) { RestoreList.dismiss(RuntimePaths(app)) }
     }
 
     fun setPhantomFixDone(done: Boolean) {

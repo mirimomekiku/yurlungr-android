@@ -144,6 +144,8 @@ fun SetupScreen(
     onUpdatePackages: () -> Unit = {},
     /** Installs the chosen essentials and optional packs (and what they need) in a terminal. */
     onInstallTools: (Set<Essential>, Set<ToolSetup>) -> Unit = { _, _ -> },
+    /** Runs a command in a new terminal tab (command, tab name). */
+    onRunInTerminal: (String, String) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     var logPath by remember { mutableStateOf<String?>(null) }
@@ -299,6 +301,7 @@ fun SetupScreen(
                     }
                 }
             }
+            vm.restore?.let { plan -> item(key = "restore") { RestoreCard(plan, enabled = !installing, onRestore = { vm.restoreCommand()?.let { onRunInTerminal(it, "Reinstall packages") } }, onDismiss = vm::dismissRestore) } }
         }
         }
 
@@ -335,9 +338,9 @@ fun SetupScreen(
                 Button(onClick = { confirmReinstall = false; vm.reinstallBootstrap() }, modifier = Modifier.weight(2f).heightIn(min = 52.dp)) { Text("Reinstall") }
             },
         ) {
-            Text("Running chats, terminals and web servers are stopped first.", style = MaterialTheme.typography.bodyMedium)
+            Text("Running chats, terminals, web servers and databases are stopped first.", style = MaterialTheme.typography.bodyMedium)
             Text(
-                "Your home folder, projects and chats are kept. Installed packages and agents need their setup run again afterwards.",
+                "Your home folder, projects and chats are kept. Installed packages and agents are removed; afterwards System checks offers to reinstall them.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -979,5 +982,35 @@ private fun startSafely(context: Context, intent: Intent) {
         context.startActivity(intent)
     } catch (_: ActivityNotFoundException) {
         Toast.makeText(context, "Not available on this device", Toast.LENGTH_SHORT).show()
+    }
+}
+
+/**
+ * After a base-system reinstall: what the old system had that the new one doesn't (packages
+ * installed by hand, global npm packages, agents and setups), reinstalled in a terminal in one go.
+ */
+@Composable
+private fun RestoreCard(plan: dev.yurlungr.app.runtime.RestoreList.Plan, enabled: Boolean, onRestore: () -> Unit, onDismiss: () -> Unit) {
+    val title = if (plan.count > 0) "Reinstall the ${plan.count} package${if (plan.count == 1) "" else "s"} you had" else "Set up again what you had"
+    val reruns = plan.setups.map { it.title } + plan.agents.map { "agent: $it" }
+    val sample = (plan.packages + plan.npm).take(6)
+    val detail = buildList {
+        if (sample.isNotEmpty()) add(sample.joinToString(", ") + if (plan.count > sample.size) " and ${plan.count - sample.size} more" else "")
+        if (reruns.isNotEmpty()) add("Then runs again: " + reruns.joinToString(", "))
+    }.joinToString(". ") + ". Installed before the base system was reinstalled."
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(22.dp))
+            .background(MaterialTheme.colorScheme.secondaryContainer)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
+        Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onRestore, enabled = enabled) { Text("Reinstall") }
+            TextButton(onClick = onDismiss, enabled = enabled) { Text("Forget them") }
+        }
     }
 }

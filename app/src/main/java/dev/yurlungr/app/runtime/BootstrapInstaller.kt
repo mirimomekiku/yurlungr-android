@@ -40,11 +40,18 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
         // install that fails before touching the old prefix clears it again (unless it was
         // already there from an earlier interrupted install).
         val wasIncomplete = paths.bootstrapIncomplete.exists()
+        // Old systems an earlier reinstall moved aside but didn't get to delete (the app was closed).
+        deleteOldPrefixes(paths)
+        // What's installed now, to offer it again afterwards (System checks). Before anything changes.
+        if (paths.hasBaseSystem) {
+            progress.update("Noting the installed packages", null)
+            RestoreList.save(paths)
+        }
         paths.bootstrapIncomplete.writeText("installing")
         var prefixReplaced = false
         try {
             progress.update("Finding latest bootstrap for $arch…", null)
-            val release = resolveLatest(arch)
+            val release = resolveRelease(arch, progress)
 
             val zip = File(context.cacheDir, "bootstrap-$arch.zip")
             try {
@@ -70,6 +77,21 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
             if (!prefixReplaced && !wasIncomplete) paths.bootstrapIncomplete.delete()
             throw e
         }
+    }
+
+    /**
+     * The release to install: the newest from GitHub's API or, when the API can't be used (it
+     * allows 60 requests an hour per IP, often used up behind a carrier's shared address, or the
+     * network failed), the newest pinned release, downloaded by its plain link and checked against
+     * its pin. github.com's download links aren't rate-limited like the API.
+     */
+    private fun resolveRelease(arch: String, progress: Progress): Release = try {
+        resolveLatest(arch)
+    } catch (e: Exception) {
+        val pinned = pinnedFallback(arch) ?: throw e
+        Log.w(TAG, "GitHub API unavailable, using pinned ${pinned.tag}", e)
+        progress.update("GitHub's release list is unavailable (${e.message ?: e.javaClass.simpleName}); using ${pinned.tag}", null)
+        pinned
     }
 
     /** Newest apt-based bootstrap release in termux/termux-packages with an asset for [arch]. */
@@ -161,15 +183,33 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
             throw e
         }
         progress.update("Replacing the base system", null)
-        onReplaced()
-        RuntimePaths.deleteNoFollow(paths.prefix)
-        if (!paths.staging.renameTo(paths.prefix)) {
+        // Two renames instead of deleting the old system file by file first: a kill midway through
+        // that left neither system. The old one is set aside, the new one moved in, and the old one
+        // deleted afterwards, in the background.
+        val old = File(paths.filesDir, "$OLD_PREFIX${System.currentTimeMillis()}")
+        val hadPrefix = exists(paths.prefix)
+        if (hadPrefix && !paths.prefix.renameTo(old)) {
             RuntimePaths.deleteNoFollow(paths.staging)
-            error("Could not move staging dir into prefix")
+            error("Could not move the old base system aside")
         }
+        if (!paths.staging.renameTo(paths.prefix)) {
+            // Put the old one back: nothing replaced, still usable.
+            if (hadPrefix && old.renameTo(paths.prefix)) {
+                RuntimePaths.deleteNoFollow(paths.staging)
+                error("Could not move the new base system into place; the old one is unchanged")
+            }
+            onReplaced()
+            RuntimePaths.deleteNoFollow(paths.staging)
+            error("Could not move the new base system into place")
+        }
+        onReplaced()
+        if (hadPrefix) deleteInBackground(old)
         paths.home.mkdirs()
         paths.tmp.mkdirs()
     }
+
+    /** Whether [file] exists, a dangling symlink included. */
+    private fun exists(file: File): Boolean = file.exists() || runCatching { Os.lstat(file.path) }.isSuccess
 
     private suspend fun extractInto(zip: File, progress: Progress) {
         val stagingRoot = paths.staging.canonicalPath + File.separator
@@ -243,6 +283,55 @@ class BootstrapInstaller(private val context: Context, private val paths: Runtim
 
     companion object {
         private const val TAG = "BootstrapInstaller"
+
+        /** Old prefixes set aside by a reinstall, waiting to be deleted: `files/usr-old-<millis>`. */
+        internal const val OLD_PREFIX = "usr-old-"
+
+        /** Folders being deleted right now, so a second clean-up doesn't start on them. */
+        private val deleting = HashSet<String>()
+
+        /**
+         * Deletes, in the background, old prefixes a reinstall set aside and didn't finish deleting
+         * (the app was closed or killed). Safe to call any time, so also when System checks opens.
+         */
+        fun deleteOldPrefixes(paths: RuntimePaths) {
+            paths.filesDir.listFiles { f -> f.name.startsWith(OLD_PREFIX) }.orEmpty().forEach(::deleteInBackground)
+        }
+
+        /**
+         * Deletes [dir] on a background thread, making each folder writable first (packages can
+         * install read-only ones) and never following symlinks (the prefix links into home and
+         * shared storage).
+         */
+        internal fun deleteInBackground(dir: File) {
+            synchronized(deleting) { if (!deleting.add(dir.path)) return }
+            kotlin.concurrent.thread(name = "old-prefix-delete", isDaemon = true, priority = Thread.MIN_PRIORITY) {
+                try {
+                    RuntimePaths.deleteNoFollow(dir, makeWritable = true)
+                    Log.i(TAG, "Deleted ${dir.name}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Couldn't delete ${dir.name}", e)
+                } finally {
+                    synchronized(deleting) { deleting.remove(dir.path) }
+                }
+            }
+        }
+
+        /**
+         * The newest pinned release that has an archive for [arch], with its plain download link and
+         * pin: what's installed when GitHub's API can't be used. Null if none is pinned for [arch].
+         */
+        internal fun pinnedFallback(arch: String, pins: Map<String, Map<String, String>> = BOOTSTRAP_PINS): Release? {
+            val tag = pins.filter { arch in it.value }.keys.maxWithOrNull(compareBy({ releaseDate(it) }, { it })) ?: return null
+            return Release(tag, downloadUrl(tag, arch), size = 0, sha256 = pins.getValue(tag).getValue(arch))
+        }
+
+        /** "2026.11.15" from "bootstrap-2026.11.15-r1+apt.android-7", for ordering releases. */
+        private fun releaseDate(tag: String): String = Regex("""\d{4}\.\d{2}\.\d{2}""").find(tag)?.value.orEmpty()
+
+        /** The asset's link on github.com (not the API); `+` in the tag percent-encoded, as GitHub's own links have it. */
+        internal fun downloadUrl(tag: String, arch: String): String =
+            "https://github.com/termux/termux-packages/releases/download/${tag.replace("+", "%2B")}/bootstrap-$arch.zip"
 
         /**
          * Known bootstrap archives: release tag → arch → SHA-256, copied from the asset digests
