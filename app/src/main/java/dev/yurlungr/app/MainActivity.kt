@@ -405,6 +405,9 @@ class MainActivity : ComponentActivity() {
                 onInstallSetup = { pack ->
                     runInTerminal(context, nav, dev.yurlungr.app.runtime.setupScriptCommand(requireNotNull(pack.script)), pack.title)
                 },
+                onInstallTools = { items, packs ->
+                    runInTerminal(context, nav, dev.yurlungr.app.runtime.installToolsCommand(items, packs), "Install tools")
+                },
                 // Opened from Settings → back there; as the first-run screen → home.
                 onHome = { if (nav.isTopLevel) nav.reset(Route.NewChat) else nav.pop() },
                 onDevices = { nav.push(Route.Devices) },

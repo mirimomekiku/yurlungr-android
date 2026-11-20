@@ -18,6 +18,7 @@ object RuntimeAssets {
         "spike-test.sh" to File(paths.home, "spike-test.sh"),
         "agents-setup.sh" to File(paths.libexec, "agents-setup.sh"),
         "dev-tools-setup.sh" to File(paths.libexec, "dev-tools-setup.sh"),
+        "essentials-setup.sh" to File(paths.libexec, "essentials-setup.sh"),
         "agent-install.sh" to File(paths.libexec, "agent-install.sh"),
         "agent-key.sh" to File(paths.libexec, "agent-key.sh"),
         "project-setup.sh" to File(paths.libexec, "project-setup.sh"),

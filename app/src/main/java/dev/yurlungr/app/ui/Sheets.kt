@@ -45,6 +45,10 @@ fun AppSheet(
     /** False while work is running: the sheet can't be swiped or tapped away. */
     dismissable: Boolean = true,
     actions: (@Composable RowScope.() -> Unit)? = null,
+    /** Pinned under the title while [content] scrolls (tabs, a search field). */
+    header: (@Composable ColumnScope.() -> Unit)? = null,
+    /** Pass one to keep a separate scroll position per tab, or to scroll [content] from outside. */
+    scrollState: androidx.compose.foundation.ScrollState = rememberScrollState(),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     ModalBottomSheet(
@@ -72,8 +76,11 @@ fun AppSheet(
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
+            if (header != null) {
+                Column(Modifier.fillMaxWidth().padding(top = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp), content = header)
+            }
             Column(
-                Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(top = 16.dp),
+                Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(scrollState).padding(top = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 content = content,
             )

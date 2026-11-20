@@ -269,14 +269,21 @@ object DoctorChecks {
     /** The last run of each setup script that failed, from the status file the script writes on exit. */
     private fun setupRuns(paths: RuntimePaths): List<Check> = ToolSetup.entries.mapNotNull { setup ->
         val name = setup.script?.removeSuffix(".sh") ?: return@mapNotNull null
-        val status = SetupStatus.read(File(paths.setupStatusDir, "$name.status")) ?: return@mapNotNull null
-        if (status.exitCode == 0) return@mapNotNull null
+        setupRun(paths, name, "Last ${setup.title.lowercase()} setup", fixFor(setup))
+    } + listOfNotNull(
+        // Install tools is rerun from its own card, so no fix button here; the log shows what failed.
+        setupRun(paths, "essentials-setup", "Last Install tools run", fix = null),
+    )
+
+    private fun setupRun(paths: RuntimePaths, name: String, title: String, fix: Fix?): Check? {
+        val status = SetupStatus.read(File(paths.setupStatusDir, "$name.status")) ?: return null
+        if (status.exitCode == 0) return null
         val running = status.unfinished && SetupStatus.isAlive(status.pid)
-        Check(
-            "setup-$name", "Last ${setup.title.lowercase()} setup",
+        return Check(
+            "setup-$name", title,
             if (running) CheckStatus.Info else CheckStatus.Warn,
             SetupStatus.summary(status, running),
-            fix = if (running) null else fixFor(setup), required = false, log = status.log,
+            fix = if (running) null else fix, required = false, log = status.log,
         )
     }
 

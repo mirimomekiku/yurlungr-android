@@ -3,6 +3,9 @@
 package dev.yurlungr.app.setup
 
 import androidx.core.net.toUri
+import dev.yurlungr.app.runtime.Essential
+import dev.yurlungr.app.runtime.InstallStatus
+import dev.yurlungr.app.runtime.ToolPacks
 import dev.yurlungr.app.runtime.ToolSetup
 import dev.yurlungr.app.runtime.Toolchain
 import dev.yurlungr.app.ui.FlowBar
@@ -54,8 +57,21 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -87,7 +103,7 @@ import androidx.compose.ui.unit.sp
 private val AREAS = listOf(
     "Phone" to listOf("device", "storage"),
     "Linux runtime" to listOf("identity", "exec", "bootstrap", "shell", "apt", "termux-exec", "runtime-scripts", "runtime-notes", "checks"),
-    "Developer tools" to listOf("tools", "tool-git", "tool-gh", "tool-node", "tool-npm", "tool-rg", "setup-dev-tools-setup"),
+    "Developer tools" to listOf("tools", "tool-git", "tool-gh", "tool-node", "tool-npm", "tool-rg", "setup-dev-tools-setup", "setup-essentials-setup"),
     "Tools" to listOf(
         "agents", "tool-gemini", "tool-codex", "tool-codex-acp", "tool-claude", "tool-claude-agent-acp", "tool-agy", "setup-agents-setup",
         "tool-qwen", "tool-kimi", "tool-auggie", "tool-commandcode", "tool-copilot", "tool-goose", "tool-opencode",
@@ -126,9 +142,12 @@ fun SetupScreen(
     onDevices: () -> Unit,
     onDevEnvironment: () -> Unit = {},
     onUpdatePackages: () -> Unit = {},
+    /** Installs the chosen essentials and optional packs (and what they need) in a terminal. */
+    onInstallTools: (Set<Essential>, Set<ToolSetup>) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     var logPath by remember { mutableStateOf<String?>(null) }
+    var showInstallTools by remember { mutableStateOf(false) }
     var showPhantomHelp by remember { mutableStateOf(false) }
     var confirmReinstall by remember { mutableStateOf(false) }
     // Opening the screen runs the full checks, tools included (resumes elsewhere only run the quick ones).
@@ -224,6 +243,10 @@ fun SetupScreen(
                 }
             }
 
+            if (vm.bootstrapInstalled && vm.checks.isNotEmpty()) item(key = "install-tools") {
+                InstallToolsCard(vm.checks, enabled = !installing, onOpen = { showInstallTools = true })
+            }
+
             if (vm.checks.isEmpty()) items(4) { SkeletonCard(lines = 2) }
             for ((area, checks) in areas) {
                 if (checks.isEmpty()) continue
@@ -289,6 +312,17 @@ fun SetupScreen(
 
     logPath?.let { path -> LogSheet(path, onDismiss = { logPath = null }) }
 
+    if (showInstallTools) {
+        InstallToolsSheet(
+            vm.checks,
+            onDismiss = { showInstallTools = false },
+            onInstall = { items, packs ->
+                showInstallTools = false
+                onInstallTools(items, packs)
+            },
+        )
+    }
+
     if (confirmReinstall) {
         dev.yurlungr.app.ui.AppSheet(
             "Reinstall the base system?",
@@ -318,6 +352,393 @@ fun SetupScreen(
                 showPhantomHelp = false
             },
         )
+    }
+}
+
+/** The check ids that ran, passed and failed, for [InstallStatus.of], and what passing checks printed. */
+private class CheckSets(checks: List<Check>) {
+    private val byId = checks.associateBy { it.id }
+    val checked: Set<String> = byId.keys
+    val passing: Set<String> = checks.filter { it.status == CheckStatus.Pass }.mapTo(HashSet()) { it.id }
+    val failing: Set<String> = checks.filter { it.status == CheckStatus.Fail }.mapTo(HashSet()) { it.id }
+
+    fun of(item: Essential) = InstallStatus.of(item.checkIds, checked, passing, failing)
+
+    /** Packs without checks (Ubuntu, Flutter) go by their marker file: [markers] holds those that exist, null until read. */
+    fun of(pack: ToolSetup, markers: Set<ToolSetup>?): InstallStatus {
+        val ids = ToolPacks.checkIds(pack)
+        if (ids.isNotEmpty()) return InstallStatus.of(ids, checked, passing, failing)
+        return when {
+            markers == null -> InstallStatus.Checking
+            pack in markers -> InstallStatus.Installed
+            else -> InstallStatus.Missing
+        }
+    }
+
+    /** The version line of the first of [ids] that passes ("git version 2.47.1"). */
+    fun version(ids: List<String>): String? =
+        ids.firstNotNullOfOrNull { id -> byId[id]?.takeIf { it.status == CheckStatus.Pass }?.detail?.takeIf(String::isNotBlank) }
+
+    fun working(ids: List<String>) = ids.count { it in passing }
+}
+
+/** System checks' way into [InstallToolsSheet]: what's left to install. */
+@Composable
+private fun InstallToolsCard(checks: List<Check>, enabled: Boolean, onOpen: () -> Unit) {
+    val sets = remember(checks) { CheckSets(checks) }
+    val states = Essential.entries.associateWith(sets::of)
+    val toInstall = Essential.entries.filter { states[it] != InstallStatus.Installed && states[it] != InstallStatus.Checking }
+    val packs = ToolPacks.offered.count { ToolPacks.checkIds(it).isNotEmpty() && sets.of(it, null) == InstallStatus.Installed }
+    val packLine = "$packs of ${ToolPacks.offered.size} packs installed"
+    val subtitle = when {
+        states.values.any { it == InstallStatus.Checking } -> "Essentials and optional packs in one place. Checking what's installed…"
+        toInstall.isEmpty() -> "Essentials ready · $packLine"
+        toInstall.size <= 2 -> "${toInstall.joinToString(" and ") { it.title }} to install · $packLine"
+        else -> "${toInstall.size} essentials to install · $packLine"
+    }
+    Group {
+        GroupRow(
+            "Install tools",
+            subtitle = subtitle,
+            icon = Ph.DownloadSimple,
+            tile = if (toInstall.isEmpty()) AppColors.tiles.sky else AppColors.tiles.lime,
+            onClick = if (enabled) onOpen else null,
+        )
+    }
+}
+
+private enum class ToolsTab(val label: String) { Essentials("Essentials"), Packs("Optional packs") }
+
+private enum class PackFilter(val label: String) { All("All"), Missing("Not installed"), Installed("Installed") }
+
+/** Where each essential is listed. */
+private fun essentialSection(item: Essential) = when (item) {
+    Essential.Git, Essential.GitHubCli, Essential.Node, Essential.Ripgrep -> "Developer tools"
+    Essential.Agents -> "Coding agents"
+    Essential.Python, Essential.Pip, Essential.Uv -> "Python"
+    Essential.Sqlite -> "Databases"
+}
+
+/** MB each choice's setup asks to have free (what the scripts check before starting). */
+private fun neededMb(essentials: List<Essential>, packs: List<ToolSetup>): Int =
+    packs.sumOf(ToolPacks::spaceMb) +
+        (if (essentials.any { it != Essential.Agents }) 600 else 0) +
+        (if (Essential.Agents in essentials) 1500 else 0)
+
+/**
+ * Pick essentials and optional packs to install, on two tabs with the tabs, search and filters pinned and
+ * a footer that says what the choice needs. Essentials that aren't installed start selected, so
+ * installing them is open → Install; packs are opt-in. What a selected item needs (Python for pip, the
+ * developer tools for the agents, Ubuntu for Flutter) is selected with it and locked, with the reason.
+ */
+@Composable
+private fun InstallToolsSheet(checks: List<Check>, onDismiss: () -> Unit, onInstall: (Set<Essential>, Set<ToolSetup>) -> Unit) {
+    val context = LocalContext.current
+    val colors = MaterialTheme.colorScheme
+    val sets = remember(checks) { CheckSets(checks) }
+    val markers by androidx.compose.runtime.produceState<Set<ToolSetup>?>(null) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val prefix = dev.yurlungr.app.runtime.RuntimePaths(context).prefix
+            ToolPacks.offered.filter { ToolPacks.checkIds(it).isEmpty() && it.marker != null && java.io.File(prefix, it.marker).exists() }.toSet()
+        }
+    }
+    val freeBytes by androidx.compose.runtime.produceState<Long?>(null) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { android.os.StatFs(dev.yurlungr.app.runtime.RuntimePaths(context).prefix.path).availableBytes }.getOrNull()
+        }
+    }
+    // Known to be missing or broken; not those still being checked (that would tick installed ones).
+    val missingEssentials = Essential.entries.filter { sets.of(it) in setOf(InstallStatus.Missing, InstallStatus.Partial, InstallStatus.Broken) }
+    val selected = remember { mutableStateListOf<Essential>() }
+    // The pre-selection follows the checks as they finish, until the user changes it.
+    var touched by remember { mutableStateOf(false) }
+    LaunchedEffect(missingEssentials) {
+        if (!touched) {
+            selected.clear()
+            selected.addAll(missingEssentials)
+        }
+    }
+    val selectedPacks = remember { mutableStateListOf<ToolSetup>() }
+    var tab by remember { mutableStateOf(if (missingEssentials.isEmpty()) ToolsTab.Packs else ToolsTab.Essentials) }
+    var query by remember { mutableStateOf("") }
+    var filter by remember { mutableStateOf(PackFilter.All) }
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    // Each tab keeps its own place; new search results or a new filter start from the top.
+    val scrolls = remember { ToolsTab.entries.associateWith { androidx.compose.foundation.ScrollState(0) } }
+    LaunchedEffect(query, filter) { scrolls.getValue(ToolsTab.Packs).scrollTo(0) }
+
+    val essentials = Essential.closure(selected)
+    val packs = ToolPacks.closure(selectedPacks)
+    val count = essentials.size + packs.size
+    val needMb = neededMb(essentials, packs)
+    val freeMb = freeBytes?.let { (it / 1_000_000).toInt() }
+    val tight = freeMb != null && needMb > freeMb
+    val packStatus = ToolPacks.offered.associateWith { sets.of(it, markers) }
+    fun matchesFilter(p: ToolSetup) = when (filter) {
+        PackFilter.All -> true
+        PackFilter.Installed -> packStatus[p] == InstallStatus.Installed
+        PackFilter.Missing -> packStatus[p] != InstallStatus.Installed
+    }
+    val q = query.trim()
+    val shownPacks = ToolPacks.offered.filter {
+        matchesFilter(it) && (q.isEmpty() || it.title.contains(q, ignoreCase = true) || ToolPacks.blurb(it).contains(q, ignoreCase = true))
+    }
+
+    dev.yurlungr.app.ui.AppSheet(
+        "Install tools",
+        onDismiss = onDismiss,
+        icon = Ph.DownloadSimple,
+        tile = AppColors.tiles.lime,
+        scrollState = scrolls.getValue(tab),
+        header = {
+            ToolsTabs(tab, essentials.size, packs.size) { tab = it }
+            if (tab == ToolsTab.Packs) {
+                OutlinedTextField(
+                    query, { query = it },
+                    placeholder = { Text("Search packs") },
+                    leadingIcon = { PhIcon(Ph.MagnifyingGlass, null, size = 18.dp) },
+                    trailingIcon = if (query.isEmpty()) null else {
+                        { IconButton(onClick = { query = "" }) { PhIcon(Ph.X, "Clear search", size = 16.dp) } }
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { keyboard?.hide() }),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (f in PackFilter.entries) {
+                        val n = ToolPacks.offered.count { p ->
+                            when (f) {
+                                PackFilter.All -> true
+                                PackFilter.Installed -> packStatus[p] == InstallStatus.Installed
+                                PackFilter.Missing -> packStatus[p] != InstallStatus.Installed
+                            }
+                        }
+                        dev.yurlungr.app.ui.Chip(
+                            "${f.label} $n",
+                            onClick = { filter = f },
+                            selected = filter == f,
+                            modifier = Modifier.semantics { this.selected = filter == f },
+                        )
+                    }
+                }
+            }
+        },
+        actions = {
+            Column(Modifier.weight(1f).semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite }) {
+                Text(if (count == 0) "Nothing selected" else "$count selected", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    when {
+                        count == 0 -> "Tick what to install"
+                        freeMb == null -> "Needs about ${formatMb(needMb)} free"
+                        tight -> "Needs ${formatMb(needMb)}, only ${formatMb(freeMb)} free"
+                        else -> "Needs ${formatMb(needMb)} · ${formatMb(freeMb)} free"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (tight) colors.error else colors.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (count > 0) TextButton(onClick = { touched = true; selected.clear(); selectedPacks.clear() }) { Text("Clear") }
+            Button(
+                onClick = { onInstall(essentials.toSet(), packs.toSet()) },
+                enabled = count > 0,
+                modifier = Modifier.heightIn(min = 52.dp),
+            ) { Text("Install") }
+        },
+    ) {
+        when (tab) {
+            ToolsTab.Essentials -> {
+                val unselectedMissing = missingEssentials.filter { it !in essentials }
+                if (unselectedMissing.isNotEmpty()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "${Essential.entries.count { sets.of(it) == InstallStatus.Installed }} of ${Essential.entries.size} installed",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colors.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { touched = true; selected.addAll(unselectedMissing) }) { Text("Select missing (${unselectedMissing.size})") }
+                    }
+                }
+                for ((section, items) in Essential.entries.groupBy(::essentialSection)) {
+                    ToolSection(section) {
+                        for (item in items) {
+                            Separator()
+                            val status = sets.of(item)
+                            EssentialOrPackRow(
+                                title = item.title,
+                                detail = (if (status == InstallStatus.Installed) sets.version(item.checkIds) else null) ?: item.blurb,
+                                status = status,
+                                partNote = null,
+                                size = if (item == Essential.Agents) "1.5 GB" else null,
+                                on = item in essentials,
+                                lockedBy = Essential.neededBy(item, selected).map { it.title },
+                                onToggle = { touched = true; if (item in selected) selected.remove(item) else selected.add(item) },
+                            )
+                        }
+                    }
+                }
+                if (Essential.Agents in essentials) {
+                    Text(
+                        "Sign in to the agents from Agents once they're installed.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                    )
+                }
+            }
+            ToolsTab.Packs -> {
+                if (shownPacks.isEmpty()) {
+                    Column(Modifier.fillMaxWidth().padding(vertical = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            if (q.isEmpty()) "No ${filter.label.lowercase()} packs." else "No pack matches “$q”.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colors.onSurfaceVariant,
+                        )
+                        TextButton(onClick = { query = ""; filter = PackFilter.All }) { Text("Show all packs") }
+                    }
+                } else {
+                    // Searching flattens the categories: the matches are what matter.
+                    val groups = if (q.isNotEmpty()) listOf("${shownPacks.size} ${if (shownPacks.size == 1) "match" else "matches"}" to shownPacks)
+                    else shownPacks.groupBy { ToolPacks.category(it) }.entries.sortedBy { it.key?.ordinal ?: Int.MAX_VALUE }
+                        .map { (it.key?.title ?: "Other") to it.value }
+                    for ((title, items) in groups) {
+                        ToolSection(title) {
+                            for (pack in items) {
+                                Separator()
+                                val ids = ToolPacks.checkIds(pack)
+                                EssentialOrPackRow(
+                                    title = pack.title,
+                                    detail = ToolPacks.blurb(pack),
+                                    status = packStatus.getValue(pack),
+                                    partNote = if (ids.size > 1) "${sets.working(ids)} of ${ids.size} tools work" else null,
+                                    size = formatMb(ToolPacks.spaceMb(pack)),
+                                    on = pack in packs,
+                                    lockedBy = ToolPacks.neededBy(pack, selectedPacks).map { it.title },
+                                    onToggle = { if (pack in selectedPacks) selectedPacks.remove(pack) else selectedPacks.add(pack) },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Essentials | Optional packs, as the app's segmented control; each tab counts what's selected on it. */
+@Composable
+private fun ToolsTabs(selected: ToolsTab, essentials: Int, packs: Int, onSelect: (ToolsTab) -> Unit) {
+    val dark = androidx.compose.foundation.isSystemInDarkTheme()
+    val colors = MaterialTheme.colorScheme
+    val track = if (dark) colors.surfaceContainerHigh else colors.surfaceContainerHighest
+    val thumb = if (dark) colors.primary else colors.surfaceContainer
+    val onThumb = if (dark) colors.onPrimary else colors.onSurface
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(track)
+            .padding(4.dp)
+            .selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        for (t in ToolsTab.entries) {
+            val on = t == selected
+            val n = if (t == ToolsTab.Essentials) essentials else packs
+            Row(
+                Modifier
+                    .weight(1f)
+                    .height(40.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (on) thumb else Color.Transparent)
+                    .selectable(selected = on, role = Role.Tab, onClick = { onSelect(t) })
+                    .semantics { if (n > 0) stateDescription = "$n selected" },
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(t.label, style = MaterialTheme.typography.labelLarge, color = if (on) onThumb else colors.onSurfaceVariant, maxLines = 1)
+                if (n > 0) {
+                    Spacer(Modifier.width(6.dp))
+                    val tile = AppColors.tiles.lime
+                    Text(
+                        "$n",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = tile.on,
+                        modifier = Modifier.clip(CircleShape).background(tile.fill).padding(horizontal = 7.dp, vertical = 1.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** A heading and its rows. */
+@Composable
+private fun ToolSection(title: String, rows: @Composable GroupScope.() -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        SectionLabel(title, Modifier.padding(horizontal = 4.dp).semantics { heading() })
+        Group(content = rows)
+    }
+}
+
+private fun formatMb(mb: Int) = if (mb >= 1000) "%.1f GB".format(java.util.Locale.ROOT, mb / 1000.0) else "$mb MB"
+
+/**
+ * One essential or pack. The whole row toggles it (one target for touch and screen readers). Not
+ * installed is the quiet default; installed shows a check, and a coloured line appears only when there's
+ * something to know: it's needed by another pick, needs repair, is partly installed, or will be redone.
+ */
+@Composable
+private fun GroupScope.EssentialOrPackRow(
+    title: String,
+    detail: String,
+    status: InstallStatus,
+    /** "2 of 4 tools work", shown when partly installed. */
+    partNote: String?,
+    size: String?,
+    on: Boolean,
+    lockedBy: List<String>,
+    onToggle: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val tones = AppColors.status
+    val locked = lockedBy.isNotEmpty()
+    val note: Pair<String, Color>? = when {
+        locked -> "Needed by ${lockedBy.joinToString()}" to colors.primary
+        status == InstallStatus.Checking -> "Checking…" to colors.onSurfaceVariant
+        status == InstallStatus.Broken -> "Needs repair" to colors.error
+        status == InstallStatus.Partial -> "Partly installed" + (partNote?.let { ": $it" } ?: "") to tones.warning
+        on && status == InstallStatus.Installed -> "Will be updated or repaired" to colors.onSurfaceVariant
+        else -> null
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 60.dp)
+            .toggleable(value = on, enabled = !locked, role = Role.Checkbox, onValueChange = { onToggle() })
+            .padding(start = 4.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = on, onCheckedChange = null, enabled = !locked, modifier = Modifier.padding(horizontal = 12.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                if (status == InstallStatus.Installed) {
+                    Spacer(Modifier.width(6.dp))
+                    PhIcon(Ph.CheckCircle, "Installed", size = 15.dp, tint = tones.success)
+                }
+            }
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            note?.let { (text, color) -> Text(text, style = MaterialTheme.typography.labelMedium, color = color) }
+        }
+        if (size != null) {
+            Spacer(Modifier.width(10.dp))
+            Text(size, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant, maxLines = 1)
+        }
     }
 }
 

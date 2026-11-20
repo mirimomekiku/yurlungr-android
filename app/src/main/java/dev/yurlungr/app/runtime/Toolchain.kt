@@ -386,6 +386,8 @@ object Toolchain {
         appendLine("declare -gA YURLUNGR_ONLY_IF=(")
         tools.filter { it.onlyIf != null }.forEach { appendLine("  [${shellQuote(it.id)}]=${shellQuote(it.onlyIf!!)}") }
         appendLine(")")
+        // System checks → Install essentials (essentials-setup.sh).
+        append(Essential.shellManifest())
     }
 
     private fun shellQuote(s: String) = "'" + s.replace("'", "'\\''") + "'"
