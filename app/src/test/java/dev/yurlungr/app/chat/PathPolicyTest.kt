@@ -103,7 +103,9 @@ class PathPolicyTest {
         val rules = listOf(ApprovalRule(p, "edit"), ApprovalRule(p, "read"), ApprovalRule(p, "search"))
         assertFalse(ApprovalRules.allows(rules, p, "edit", emptyList(), policy))
         assertFalse(ApprovalRules.allows(rules, p, "read", emptyList(), policy))
-        assertTrue(ApprovalRules.allows(rules, p, "search", emptyList(), policy))
+        // A search that names no folder could search anywhere: it asks.
+        assertFalse(ApprovalRules.allows(rules, p, "search", emptyList(), policy))
+        assertTrue(ApprovalRules.allows(rules, p, "search", listOf(p), policy))
     }
 
     @Test
