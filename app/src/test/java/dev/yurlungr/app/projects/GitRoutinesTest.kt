@@ -41,12 +41,16 @@ class GitRoutinesTest {
 
     @Test fun `long conflict lists are capped`() {
         val files = (1..60).map { "f$it.txt" }
-        val prompt = GitRoutines.fixConflictsPrompt(files, mergeInProgress = true)
+        val prompt = GitRoutines.fixConflictsPrompt(files, GitOperation.Merge)
         assertTrue(prompt.contains("- f40.txt"))
         assertFalse(prompt.contains("- f41.txt"))
         assertTrue(prompt.contains("…and 20 more"))
         assertTrue(prompt.contains("git commit --no-edit"))
-        assertTrue(GitRoutines.fixConflictsPrompt(files, mergeInProgress = false).contains("git stash drop"))
+        // Only the app's own re-applied stash is ever dropped, and by its commit.
+        val sha = "a".repeat(40)
+        val fromStash = GitRoutines.fixConflictsPrompt(files, null, TrackedStash(sha, "Yurlungr: before getting the latest changes", applied = true))
+        assertTrue(fromStash.contains("git stash drop") && fromStash.contains(sha))
+        assertFalse(GitRoutines.fixConflictsPrompt(files, null).contains("`git stash drop"))
     }
 
     @Test fun `commit and review prompts never push or edit`() {
