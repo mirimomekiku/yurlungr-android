@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -86,8 +87,14 @@ fun DatabasesScreen(project: File, onBack: () -> Unit, onSystemChecks: () -> Uni
     var installed by remember { mutableStateOf<Map<DbKind, Boolean>>(emptyMap()) }
     var remembered by remember { mutableStateOf<DbProjectConfig?>(null) }
     var message by remember { mutableStateOf<Pair<String, Boolean>?>(null) } // text, isError
-    var envExposed by remember { mutableStateOf(false) }
+    // Whether git would commit .env (Tracked: it already is); asked once on open and after each write.
+    var envExposure by remember { mutableStateOf(GitExposure.Unknown) }
+    // "Add to .env" for a .env that's committed: waits for the user to choose.
+    var confirmTracked by remember { mutableStateOf<Pair<DbKind, DbServer>?>(null) }
     var reload by remember { mutableIntStateOf(0) }
+    LaunchedEffect(project) {
+        if (withContext(Dispatchers.IO) { File(project, ".env").exists() }) envExposure = EnvStore.exposure(paths, project, ".env")
+    }
     val revealed = remember { mutableStateMapOf<DbKind, String>() } // kind → full URL while shown
     val database = remember(project) { ProjectDatabases.databaseName(project) }
     val keys = remember(project) { DbKind.entries.associateWith { ProjectDatabases.key(project, it) } }
@@ -113,6 +120,44 @@ fun DatabasesScreen(project: File, onBack: () -> Unit, onSystemChecks: () -> Uni
         }
     }
 
+    /** Writes [kind]'s connection string (password included) to .env. */
+    suspend fun writeEnv(kind: DbKind, server: DbServer) {
+        val result = withContext(Dispatchers.IO) {
+            runCatching { EnvStore.upsert(File(project, ".env"), kind.envKey, ProjectDatabases.url(paths, server)) }
+        }
+        result.onSuccess { replaced ->
+            message = (if (replaced) "Updated ${kind.envKey} in .env" else "Added ${kind.envKey} to .env") to false
+            envExposure = EnvStore.exposure(paths, project, ".env")
+        }.onFailure { message = "Couldn't write .env: ${it.message}" to true }
+    }
+
+    confirmTracked?.let { (kind, server) ->
+        AlertDialog(
+            onDismissRequest = { confirmTracked = null },
+            title = { Text(".env is committed") },
+            text = {
+                Text("Git already tracks .env, so the database password would go into your next commit and to anyone who can see the repository. " +
+                    "Stop tracking it first (the file stays here and is added to .gitignore), or write it anyway?")
+            },
+            confirmButton = {
+                Button(onClick = {
+                    confirmTracked = null
+                    scope.launch {
+                        EnvStore.untrack(paths, project, ".env")
+                            .onSuccess { writeEnv(kind, server) }
+                            .onFailure { message = (it.message ?: "Couldn't untrack .env") to true }
+                    }
+                }) { Text("Untrack and add") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { confirmTracked = null }) { Text("Cancel") }
+                    TextButton(onClick = { confirmTracked = null; scope.launch { writeEnv(kind, server) } }) { Text("Add anyway", color = colors.error) }
+                }
+            },
+        )
+    }
+
     Column(Modifier.fillMaxSize().background(colors.background).systemBarsPadding()) {
         ScreenHeader("Databases", onBack) {
             IconButton(onClick = { reload++ }) { PhIcon(Ph.ArrowClockwise, "Refresh", size = 20.dp) }
@@ -124,14 +169,24 @@ fun DatabasesScreen(project: File, onBack: () -> Unit, onSystemChecks: () -> Uni
                         modifier = Modifier.padding(horizontal = 6.dp))
                 }
             }
-            if (envExposed) item {
+            if (envExposure == GitExposure.NotIgnored) item {
                 WarningBanner(".env isn't ignored by git, so the password could be committed.") {
                     TextButton(onClick = {
                         scope.launch {
                             withContext(Dispatchers.IO) { runCatching { EnvStore.ignore(project, ".env") } }
-                            envExposed = EnvStore.exposure(paths, project, ".env") == GitExposure.NotIgnored
+                            envExposure = EnvStore.exposure(paths, project, ".env")
                         }
                     }) { Text("Ignore it") }
+                }
+            }
+            if (envExposure == GitExposure.Tracked) item {
+                WarningBanner(".env is already committed, so a password written to it goes into the next commit. Stop tracking it (the file stays here).") {
+                    TextButton(onClick = {
+                        scope.launch {
+                            EnvStore.untrack(paths, project, ".env").onFailure { message = (it.message ?: "Couldn't untrack .env") to true }
+                            envExposure = EnvStore.exposure(paths, project, ".env")
+                        }
+                    }) { Text("Untrack") }
                 }
             }
             for (kind in DbKind.entries) {
@@ -187,13 +242,10 @@ fun DatabasesScreen(project: File, onBack: () -> Unit, onSystemChecks: () -> Uni
                             )
                             GroupRow("Add to .env", subtitle = "Sets ${kind.envKey}; the rest of .env stays as it is", icon = Ph.LockSimple, onClick = {
                                 scope.launch {
-                                    val result = withContext(Dispatchers.IO) {
-                                        runCatching { EnvStore.upsert(File(project, ".env"), kind.envKey, ProjectDatabases.url(paths, server)) }
-                                    }
-                                    result.onSuccess { replaced ->
-                                        message = (if (replaced) "Updated ${kind.envKey} in .env" else "Added ${kind.envKey} to .env") to false
-                                        envExposed = EnvStore.exposure(paths, project, ".env") == GitExposure.NotIgnored
-                                    }.onFailure { message = "Couldn't write .env: ${it.message}" to true }
+                                    // Asked fresh: a commit since the screen opened may have added .env.
+                                    val exposure = EnvStore.exposure(paths, project, ".env").also { envExposure = it }
+                                    if (exposure == GitExposure.Tracked) confirmTracked = kind to server
+                                    else writeEnv(kind, server)
                                 }
                             })
                         }

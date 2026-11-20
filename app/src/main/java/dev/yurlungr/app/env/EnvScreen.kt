@@ -100,6 +100,18 @@ object EnvStore {
         if (EnvGitignore.ignores(ignore, name)) GitExposure.Ignored else GitExposure.NotIgnored
     }
 
+    /**
+     * Stops git tracking [name] (the file stays) and, unless something already ignores it, adds it to
+     * `.gitignore` so the next `git add .` doesn't track it again.
+     */
+    suspend fun untrack(paths: RuntimePaths, dir: File, name: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val git = File(paths.bin, "git").path
+        val r = CommandRunner.run(paths, listOf(git, "rm", "--cached", "--quiet", "--", name), cwd = dir, timeoutMs = 30_000)
+        if (!r.ok) return@withContext Result.failure(IllegalStateException(r.describe("git rm --cached")))
+        if (exposure(paths, dir, name) == GitExposure.NotIgnored) runCatching { ignore(dir, name) }
+        Result.success(Unit)
+    }
+
     /** Adds `/name` to the project's `.gitignore`. */
     fun ignore(dir: File, name: String) {
         val file = File(dir, ".gitignore")
@@ -203,12 +215,7 @@ fun EnvScreen(project: File, onBack: () -> Unit) {
                     WarningBanner("$name is already committed. Stop tracking it (the file stays here).") {
                         TextButton(onClick = {
                             scope.launch {
-                                val git = File(paths.bin, "git").path
-                                val r = CommandRunner.run(paths, listOf(git, "rm", "--cached", "--quiet", "--", name), cwd = project, timeoutMs = 30_000)
-                                if (!r.ok) error = r.describe("git rm --cached")
-                                else if (EnvStore.exposure(paths, project, name) == GitExposure.NotIgnored) withContext(Dispatchers.IO) {
-                                    runCatching { EnvStore.ignore(project, name) }
-                                }
+                                EnvStore.untrack(paths, project, name).onFailure { error = it.message }
                                 exposure = EnvStore.exposure(paths, project, name)
                             }
                         }) { Text("Untrack") }
