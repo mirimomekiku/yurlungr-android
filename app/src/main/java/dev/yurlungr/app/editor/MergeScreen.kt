@@ -51,56 +51,117 @@ import java.io.File
 
 /** A file with git conflict markers, as plain text and conflicts in order. */
 sealed interface MergePart {
+    /** Text outside conflicts, exactly as in the file (line endings included). */
     data class Text(val text: String) : MergePart
-    data class Conflict(val ours: String, val base: String?, val theirs: String, val oursLabel: String, val theirsLabel: String) : MergePart
+
+    /**
+     * One conflict. [ours], [base] and [theirs] are for showing and editing: lines joined with "\n", no
+     * final newline. The `…Raw` forms and [raw] are the file's own bytes, so what's picked is written back
+     * with the line endings it had.
+     */
+    data class Conflict(
+        val ours: String, val base: String?, val theirs: String, val oursLabel: String, val theirsLabel: String,
+        /** The whole conflict as in the file, markers included: written back while it's unresolved. */
+        val raw: String = "",
+        val oursRaw: String = if (ours.isEmpty()) "" else "$ours\n",
+        val theirsRaw: String = if (theirs.isEmpty()) "" else "$theirs\n",
+        /** The ending of the conflict's first marker line: an edited resolution's lines get it. */
+        val eol: String = "\n",
+        /** False when the closing marker was the file's last line, without a newline. */
+        val endsWithNewline: Boolean = true,
+    ) : MergePart
 }
 
 object Merge {
-    fun hasConflicts(text: String) = Regex("(?m)^<{7}( |$)").containsMatchIn(text) && Regex("(?m)^>{7}( |$)").containsMatchIn(text)
+    /** A line without its ending, and the ending ("\n", "\r\n", or "" for a last line without one). */
+    internal data class Line(val text: String, val eol: String) { val raw get() = text + eol }
+
+    internal fun lines(text: String): List<Line> {
+        val out = ArrayList<Line>()
+        var start = 0
+        while (start < text.length) {
+            val nl = text.indexOf('\n', start)
+            if (nl < 0) { out += Line(text.substring(start), ""); break }
+            val crlf = nl > start && text[nl - 1] == '\r'
+            out += Line(text.substring(start, if (crlf) nl - 1 else nl), if (crlf) "\r\n" else "\n")
+            start = nl + 1
+        }
+        return out
+    }
+
+    /**
+     * Git's marker: exactly seven [c] followed by a space (and a label) or the end of the line. Not
+     * `========` (a Markdown heading underline) or `>>>>>>>>` (deeply quoted mail).
+     */
+    internal fun isMarker(line: String, c: Char): Boolean =
+        line.length >= 7 && (0 until 7).all { line[it] == c } && (line.length == 7 || line[7] == ' ')
+
+    fun hasConflicts(text: String): Boolean {
+        val all = lines(text)
+        return all.any { isMarker(it.text, '<') } && all.any { isMarker(it.text, '>') }
+    }
+
+    /** Ours then theirs, as the "Both" resolution. */
+    fun both(c: MergePart.Conflict): String = when {
+        c.ours.isEmpty() -> c.theirs
+        c.theirs.isEmpty() -> c.ours
+        else -> c.ours + "\n" + c.theirs
+    }
 
     /** Splits [text] at `<<<<<<<` / `|||||||` / `=======` / `>>>>>>>` markers (diff3 bases included). */
     fun parse(text: String): List<MergePart> {
         val out = ArrayList<MergePart>()
         val plain = StringBuilder()
-        val lines = text.split('\n')
+        val lines = lines(text)
         var i = 0
         while (i < lines.size) {
             val l = lines[i]
-            if (l.startsWith("<<<<<<<")) {
-                val start = i
-                val ours = ArrayList<String>(); val base = ArrayList<String>(); val theirs = ArrayList<String>()
+            if (isMarker(l.text, '<')) {
+                val ours = ArrayList<Line>(); val base = ArrayList<Line>(); val theirs = ArrayList<Line>()
                 var section = 0 // 0 ours, 1 base, 2 theirs
                 var hasBase = false
                 var end = -1
                 var j = i + 1
                 while (j < lines.size) {
-                    val m = lines[j]
+                    val m = lines[j].text
                     when {
-                        m.startsWith("|||||||") && section == 0 -> { section = 1; hasBase = true }
-                        m.startsWith("=======") && section != 2 -> section = 2
-                        m.startsWith(">>>>>>>") && section == 2 -> { end = j; break }
-                        else -> (when (section) { 0 -> ours; 1 -> base; else -> theirs }).add(m)
+                        // Another opening marker first: this one isn't a conflict git wrote; leave it as text.
+                        isMarker(m, '<') && section == 0 -> break
+                        isMarker(m, '|') && section == 0 -> { section = 1; hasBase = true }
+                        isMarker(m, '=') && section != 2 -> section = 2
+                        isMarker(m, '>') && section == 2 -> { end = j; break }
+                        else -> (when (section) { 0 -> ours; 1 -> base; else -> theirs }).add(lines[j])
                     }
                     j++
                 }
-                if (end < 0) { plain.append(l).append('\n'); i++; continue } // unterminated: leave as text
+                if (end < 0) { plain.append(l.raw); i++; continue } // unterminated: leave as text
                 if (plain.isNotEmpty()) { out += MergePart.Text(plain.toString()); plain.clear() }
-                out += MergePart.Conflict(ours.joinToString("\n"), if (hasBase) base.joinToString("\n") else null, theirs.joinToString("\n"),
-                    lines[start].removePrefix("<<<<<<<").trim().ifEmpty { "ours" }, lines[end].removePrefix(">>>>>>>").trim().ifEmpty { "theirs" })
+                fun shown(side: List<Line>) = side.joinToString("\n") { it.text }
+                fun raw(side: List<Line>) = side.joinToString("") { it.raw }
+                out += MergePart.Conflict(
+                    ours = shown(ours), base = if (hasBase) shown(base) else null, theirs = shown(theirs),
+                    oursLabel = l.text.substring(7).trim().ifEmpty { "ours" },
+                    theirsLabel = lines[end].text.substring(7).trim().ifEmpty { "theirs" },
+                    raw = (i..end).joinToString("") { lines[it].raw },
+                    oursRaw = raw(ours), theirsRaw = raw(theirs),
+                    eol = l.eol.ifEmpty { "\n" },
+                    endsWithNewline = lines[end].eol.isNotEmpty(),
+                )
                 i = end + 1
-                // The conflict's last line had its own newline (unless it ended the file).
-                if (i < lines.size) plain.append("")
                 continue
             }
-            plain.append(l)
-            if (i < lines.lastIndex) plain.append('\n')
+            plain.append(l.raw)
             i++
         }
         if (plain.isNotEmpty()) out += MergePart.Text(plain.toString())
         return out
     }
 
-    /** The file with each conflict replaced by its resolution (null keeps the markers). */
+    /**
+     * The file with each conflict replaced by its resolution (null keeps the conflict as it was). Ours,
+     * theirs and both are written from the file's own lines; an edited resolution uses the conflict's
+     * line ending. A conflict that ended the file without a newline still does.
+     */
     fun render(parts: List<MergePart>, resolutions: List<String?>): String {
         val sb = StringBuilder()
         var c = 0
@@ -108,17 +169,33 @@ object Merge {
             is MergePart.Text -> sb.append(p.text)
             is MergePart.Conflict -> {
                 val r = resolutions.getOrNull(c++)
-                if (r != null) sb.append(r).append(if (r.isEmpty()) "" else "\n")
-                else {
-                    sb.append("<<<<<<< ${p.oursLabel}\n").append(p.ours).append('\n')
-                    p.base?.let { sb.append("|||||||\n").append(it).append('\n') }
-                    sb.append("=======\n").append(p.theirs).append('\n').append(">>>>>>> ${p.theirsLabel}\n")
+                if (r == null) {
+                    sb.append(p.raw.ifEmpty { markers(p) })
+                    continue
                 }
+                var out = when (r) {
+                    p.ours -> p.oursRaw
+                    p.theirs -> p.theirsRaw
+                    both(p) -> p.oursRaw + p.theirsRaw
+                    "" -> ""
+                    else -> r.split('\n').joinToString(p.eol) + p.eol
+                }
+                if (!p.endsWithNewline) out = out.removeSuffix("\n").removeSuffix("\r")
+                sb.append(out)
             }
         }
         return sb.toString()
     }
+
+    /** Markers for a conflict made without its original text (not from [parse]). */
+    private fun markers(p: MergePart.Conflict): String = buildString {
+        append("<<<<<<< ${p.oursLabel}\n").append(p.oursRaw)
+        p.base?.let { append("|||||||\n").append(it).append(if (it.isEmpty()) "" else "\n") }
+        append("=======\n").append(p.theirsRaw).append(">>>>>>> ${p.theirsLabel}\n")
+    }
 }
+
+private const val MAX_MERGE_BYTES = 4L * 1024 * 1024
 
 /** Resolve a conflicted file conflict by conflict: ours, theirs, both, or your own edit. */
 @Composable
@@ -128,8 +205,6 @@ fun MergeScreen(file: File, onBack: () -> Unit, onOpenEditor: () -> Unit) {
     var parts by remember { mutableStateOf<List<MergePart>?>(null) }
     val resolutions = remember { mutableStateListOf<String?>() }
     var editing by remember { mutableStateOf<Int?>(null) }
-    // The file's line endings, written back as they were (not every line rewritten to LF).
-    var crlf by remember { mutableStateOf(false) }
     // Resolutions picked since the last save; Back asks before dropping them.
     var unsaved by remember { mutableStateOf(false) }
     var confirmBack by remember { mutableStateOf(false) }
@@ -139,11 +214,21 @@ fun MergeScreen(file: File, onBack: () -> Unit, onOpenEditor: () -> Unit) {
     var stamp by remember { mutableStateOf<DiskStamp?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(file) {
-        val read = withContext(Dispatchers.IO) { runCatching { DiskStamp.of(file) to file.readText() } }
-        val (loadedStamp, text) = read.getOrElse { loadError = "Couldn't read ${file.name}: ${it.message}"; return@LaunchedEffect }
+        val read = withContext(Dispatchers.IO) {
+            runCatching {
+                check(file.length() <= MAX_MERGE_BYTES) { "${file.name} is too large to resolve here; use the terminal." }
+                DiskStamp.of(file) to file.readBytes()
+            }
+        }
+        val (loadedStamp, bytes) = read.getOrElse { loadError = it.message ?: "Couldn't read ${file.name}"; return@LaunchedEffect }
+        // Strict, like the editor: a lenient decode would write U+FFFD over every non-UTF-8 byte on save.
+        val text = FileSave.decodeUtf8(bytes) ?: run {
+            loadError = "${file.name} isn't UTF-8 text, so resolving it here could damage it. Resolve it in the terminal instead."
+            return@LaunchedEffect
+        }
         stamp = loadedStamp
-        crlf = text.contains("\r\n")
-        val p = Merge.parse(text.replace("\r\n", "\n"))
+        // Line endings are kept per line (Merge keeps each line's own), so nothing is converted here.
+        val p = Merge.parse(text)
         parts = p
         resolutions.clear(); repeat(p.count { it is MergePart.Conflict }) { resolutions += null }
     }
@@ -164,8 +249,7 @@ fun MergeScreen(file: File, onBack: () -> Unit, onOpenEditor: () -> Unit) {
         val ok = withContext(Dispatchers.IO) {
             runCatching {
                 check(DiskStamp.of(file) == stamp) { "${file.name} changed since it was opened. Reopen it to resolve the latest version." }
-                val rendered = Merge.render(p, resolutions)
-                dev.yurlungr.app.editor.FileSave.writeAtomically(file, if (crlf) rendered.replace("\n", "\r\n") else rendered)
+                FileSave.writeAtomically(file, Merge.render(p, resolutions))
                 stamp = DiskStamp.of(file)
                 if (markResolved) {
                     val paths = RuntimePaths(context)
@@ -199,7 +283,7 @@ fun MergeScreen(file: File, onBack: () -> Unit, onOpenEditor: () -> Unit) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         OutlinedButton(onClick = { resolutions[i] = c.ours; unsaved = true }) { Text("Use ours") }
                         OutlinedButton(onClick = { resolutions[i] = c.theirs; unsaved = true }) { Text("Use theirs") }
-                        OutlinedButton(onClick = { resolutions[i] = c.ours + "\n" + c.theirs; unsaved = true }) { Text("Both") }
+                        OutlinedButton(onClick = { resolutions[i] = Merge.both(c); unsaved = true }) { Text("Both") }
                         TextButton(onClick = { if (resolutions[i] == null) { resolutions[i] = c.ours; unsaved = true }; editing = i }) { Text("Edit") }
                     }
                     resolutions[i]?.let { r ->

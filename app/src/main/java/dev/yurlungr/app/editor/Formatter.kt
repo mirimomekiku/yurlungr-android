@@ -8,12 +8,21 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * Formats with Prettier inside the runtime (`npx prettier`, pinned). Runs in the file's folder
- * with `--stdin-filepath`, so the project's own .prettierrc / .editorconfig apply. The first
- * run downloads Prettier into npm's cache (~8 MB).
+ * Formats with Prettier inside the runtime (`npx prettier`, pinned). In a trusted project it runs in
+ * the file's folder with `--stdin-filepath`, so the project's own .prettierrc / .editorconfig apply.
+ * A Prettier config can load plugins (code) and `npx` there prefers the project's own `prettier`, so in
+ * an untrusted project it runs from an app folder with `--no-config` instead: Prettier's defaults, no
+ * plugins. The first run downloads Prettier into npm's cache (~8 MB).
  */
 object Formatter {
     private const val PRETTIER = "prettier@3.3.3"
+
+    /** The shell command; [trusted] decides whether the project's config (and so its plugins) may load. */
+    internal fun command(file: File, input: File, output: File, trusted: Boolean): String {
+        val safety = if (trusted) "" else " --no-config --no-editorconfig"
+        return "npx --yes $PRETTIER$safety --stdin-filepath ${shellQuote(file.path)} " +
+            "< ${shellQuote(input.path)} > ${shellQuote(output.path)}"
+    }
 
     sealed interface Result {
         data class Formatted(val text: String) : Result
@@ -29,13 +38,13 @@ object Formatter {
     internal fun normalize(output: String): String = output.replace("\r\n", "\n")
 
     /** Never throws: any failure (no Node, unwritable cache, broken shell) is a [Result.Failed]. */
-    suspend fun prettier(paths: RuntimePaths, file: File, text: String): Result = try {
-        runPrettier(paths, file, text)
+    suspend fun prettier(paths: RuntimePaths, file: File, text: String, trusted: Boolean = true): Result = try {
+        runPrettier(paths, file, text, trusted)
     } catch (e: java.io.IOException) {
         Result.Failed("Couldn't run Prettier: ${e.message ?: e}")
     }
 
-    private suspend fun runPrettier(paths: RuntimePaths, file: File, text: String): Result = withContext(Dispatchers.IO) {
+    private suspend fun runPrettier(paths: RuntimePaths, file: File, text: String, trusted: Boolean): Result = withContext(Dispatchers.IO) {
         if (!File(paths.bin, "npx").exists()) {
             return@withContext Result.Failed("Node.js isn't installed. Install the agents (they bring Node), or run: pkg install nodejs-lts")
         }
@@ -45,12 +54,11 @@ object Formatter {
         val output = File(tmp, input.name.replace("in-", "out-"))
         input.writeText(text)
         output.delete()
-        val script = "npx --yes $PRETTIER --stdin-filepath ${shellQuote(file.path)} " +
-            "< ${shellQuote(input.path)} > ${shellQuote(output.path)}"
         val r = CommandRunner.run(
             paths,
-            listOf(paths.bash.path, "-c", script),
-            cwd = file.parentFile ?: paths.home,
+            listOf(paths.bash.path, "-c", command(file, input, output, trusted)),
+            // Untrusted: not the project's folder, so neither its node_modules/.bin/prettier nor its .npmrc is used.
+            cwd = if (trusted) file.parentFile ?: paths.home else tmp,
             timeoutMs = 180_000,
             extraEnv = mapOf("NO_UPDATE_NOTIFIER" to "1", "npm_config_update_notifier" to "false"),
         )

@@ -86,7 +86,9 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.repeatOnLifecycle
 import dev.yurlungr.app.projects.Git
+import dev.yurlungr.app.projects.ProjectTrust
 import dev.yurlungr.app.projects.humanSize
 import dev.yurlungr.app.runtime.RuntimePaths
 import dev.yurlungr.app.ui.NavButton
@@ -223,6 +225,12 @@ private fun Editor(
     var diskStamp by remember { mutableStateOf(kept?.stamp ?: initial.stamp) }
     // Save found the file changed on disk; holds what to do after a successful save.
     var conflict by remember { mutableStateOf<(() -> Unit)?>(null) }
+    // The file changed on disk while there were unsaved edits: the stamp it has now, until the user picks.
+    var changedOnDisk by remember { mutableStateOf<DiskStamp?>(null) }
+    // A change the user chose to keep their version over: not asked about again (Save still asks before overwriting it).
+    var keptOver by remember { mutableStateOf<DiskStamp?>(null) }
+    // The disk version against the buffer, while that diff is open.
+    var diskDiff by remember { mutableStateOf<String?>(null) }
     val history = remember { EditHistory() }
     val indentUnit = remember { detectIndent(initial.text, lang) }
     var readOnly by remember { mutableStateOf(false) }
@@ -241,7 +249,16 @@ private fun Editor(
     // A server that crashes is restarted (a few times), with a note in the bar while it's down.
     var lspNote by remember { mutableStateOf<String?>(null) }
     var lspStart by remember { mutableIntStateOf(0) }
+    // The untrusted project this file is in, when its language server could start: servers run project code
+    // (rust-analyzer runs build.rs, others load project plugins), so they wait until the project is trusted.
+    var untrustedRoot by remember { mutableStateOf<File?>(null) }
+    var confirmTrust by remember { mutableStateOf(false) }
     LaunchedEffect(file, lspStart) {
+        val blocked = withContext(Dispatchers.IO) {
+            ProjectTrust.untrustedRoot(context, file.parentFile ?: file)?.takeIf { LspServers.forFile(paths, file) != null }
+        }
+        untrustedRoot = blocked
+        if (blocked != null) return@LaunchedEffect
         val c = LspManager.acquire(context, file) ?: run {
             if (lspStart > 0) lspNote = "Language server didn't restart · tap to retry"
             return@LaunchedEffect
@@ -343,6 +360,7 @@ private fun Editor(
             SaveOutcome.Saved -> {
                 saved = text
                 diskStamp = written
+                changedOnDisk = null
                 mixedEol = false
                 history.breakGroup()
                 Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
@@ -360,36 +378,75 @@ private fun Editor(
         scope.launch { try { saveNow(then, overwrite) } finally { saving = false } }
     }
 
-    /** Replaces the buffer with what's on disk now (the user's unsaved edits are dropped). */
-    fun reloadFromDisk() = scope.launch {
+    /**
+     * Replaces the buffer with what's on disk now. The replaced text stays in undo history, so Undo
+     * brings unsaved edits back. [quiet]: an automatic reload of a clean buffer (no toast).
+     */
+    fun reloadFromDisk(quiet: Boolean = false) = scope.launch {
         when (val fresh = withContext(Dispatchers.IO) { readForEdit(file) }) {
             is Load.Ready -> {
-                set(TextFieldValue(fresh.text, TextRange(value.selection.start.coerceAtMost(fresh.text.length))))
+                if (fresh.text != value.text) {
+                    val sel = value.selection
+                    set(TextFieldValue(fresh.text, TextRange(sel.start.coerceAtMost(fresh.text.length), sel.end.coerceAtMost(fresh.text.length))))
+                }
                 saved = fresh.text
                 crlf = fresh.crlf
                 mixedEol = fresh.mixedEol
                 diskStamp = fresh.stamp
+                changedOnDisk = null
+                keptOver = null
                 history.breakGroup()
-                Toast.makeText(context, "Reloaded ${file.name}", Toast.LENGTH_SHORT).show()
+                if (!quiet) Toast.makeText(context, "Reloaded ${file.name}", Toast.LENGTH_SHORT).show()
             }
             is Load.Unavailable -> Toast.makeText(context, "Can't reload: ${fresh.reason}", Toast.LENGTH_LONG).show()
             Load.Loading -> Unit
         }
     }
 
+    // Agents and git change files while they're open here. A clean buffer follows the disk silently; one
+    // with unsaved edits gets a banner instead, so neither version is lost. Checked on resume and every
+    // two seconds while the editor is on screen (a stat, no read).
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(lifecycle, file) {
+        lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+            while (true) {
+                val now = withContext(Dispatchers.IO) { DiskStamp.of(file) }
+                if (!saving && !formatting && now != diskStamp && now != keptOver && now != changedOnDisk) {
+                    // A clean buffer reloads, unless the file is gone (that would empty it): then ask.
+                    if (value.text == saved && now.exists) reloadFromDisk(quiet = true).join()
+                    else changedOnDisk = now
+                }
+                delay(2_000)
+            }
+        }
+    }
+
     fun format() {
         if (formatting) return
         formatting = true
+        // What's formatted: the result only applies to exactly this text.
+        val before = value.text
         scope.launch {
-            when (val r = Formatter.prettier(paths, file, value.text)) {
-                is Formatter.Result.Formatted -> if (r.text != value.text) {
-                    val caret = value.selection.start.coerceAtMost(r.text.length)
-                    set(TextFieldValue(r.text, TextRange(caret)))
-                    Toast.makeText(context, "Formatted with Prettier", Toast.LENGTH_SHORT).show()
-                } else Toast.makeText(context, "Already formatted", Toast.LENGTH_SHORT).show()
-                is Formatter.Result.Failed -> Toast.makeText(context, r.message, Toast.LENGTH_LONG).show()
-            }
-            formatting = false
+            try {
+                val trusted = withContext(Dispatchers.IO) { ProjectTrust.isTrusted(context, file.parentFile ?: file) }
+                when (val r = Formatter.prettier(paths, file, before, trusted)) {
+                    is Formatter.Result.Formatted -> when {
+                        // Edited meanwhile (or reloaded from disk): applying would throw those edits away.
+                        value.text != before -> Toast.makeText(context, "File changed while formatting — not applied", Toast.LENGTH_LONG).show()
+                        r.text == before -> Toast.makeText(context, "Already formatted", Toast.LENGTH_SHORT).show()
+                        else -> {
+                            val caret = value.selection.start.coerceAtMost(r.text.length)
+                            set(TextFieldValue(r.text, TextRange(caret)))
+                            Toast.makeText(
+                                context,
+                                if (trusted) "Formatted with Prettier" else "Formatted with Prettier's defaults (the project's config and plugins only load once it's trusted)",
+                                if (trusted) Toast.LENGTH_SHORT else Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    }
+                    is Formatter.Result.Failed -> Toast.makeText(context, r.message, Toast.LENGTH_LONG).show()
+                }
+            } finally { formatting = false }
         }
     }
 
@@ -609,6 +666,71 @@ private fun Editor(
             }
         }
 
+        changedOnDisk?.let { now ->
+            Row(
+                Modifier.fillMaxWidth().background(Mono.Bar).padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PhIcon(Ph.Warning, null, size = 14.dp, tint = Mono.Modified)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (now.exists) "Changed on disk" else "Deleted on disk · Save recreates it",
+                    color = Mono.Fg, fontSize = 12.5.sp, modifier = Modifier.weight(1f), maxLines = 2,
+                )
+                if (now.exists) {
+                    TextButton(onClick = {
+                        reloadFromDisk()
+                        Toast.makeText(context, "Reloaded. Undo brings your edits back.", Toast.LENGTH_LONG).show()
+                    }) { Text("Reload", fontSize = 12.5.sp) }
+                    TextButton(onClick = {
+                        val mine = value.text
+                        scope.launch {
+                            val disk = withContext(Dispatchers.IO) { (readForEdit(file) as? Load.Ready)?.text }
+                            val diff = disk?.let { withContext(Dispatchers.Default) { TextDiff.unified(it, mine) } }
+                            when {
+                                diff == null -> Toast.makeText(context, "Couldn't read the version on disk", Toast.LENGTH_SHORT).show()
+                                diff.isEmpty() -> Toast.makeText(context, "Same as on disk", Toast.LENGTH_SHORT).show()
+                                else -> diskDiff = diff
+                            }
+                        }
+                    }) { Text("Diff", fontSize = 12.5.sp) }
+                }
+                // Keeps the edits; Save still asks before writing over the disk version.
+                TextButton(onClick = { keptOver = now; changedOnDisk = null }) { Text("Keep mine", fontSize = 12.5.sp) }
+            }
+        }
+        untrustedRoot?.let { root ->
+            Row(
+                Modifier.fillMaxWidth().background(Mono.Bar).padding(start = 12.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PhIcon(Ph.LockSimple, null, size = 13.dp, tint = Mono.Dim)
+                Spacer(Modifier.width(8.dp))
+                Text("Language features are off for untrusted projects", color = Mono.Dim, fontSize = 11.5.sp, modifier = Modifier.weight(1f))
+                TextButton(onClick = { confirmTrust = true }) { Text("Trust project", fontSize = 12.sp) }
+            }
+            if (confirmTrust) AlertDialog(
+                onDismissRequest = { confirmTrust = false },
+                title = { Text("Trust ${root.name}?") },
+                text = {
+                    Text(
+                        "Trusted projects run their own code without asking: language servers (rust-analyzer runs build.rs), " +
+                            "the project's Prettier config and plugins, install scripts and dev servers. Only trust code you'd run on your own computer.",
+                    )
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        confirmTrust = false
+                        scope.launch {
+                            withContext(Dispatchers.IO) { ProjectTrust.trust(context, root) }
+                            untrustedRoot = null
+                            lspStart++ // starts the language server now
+                        }
+                    }) { Text("Trust") }
+                },
+                dismissButton = { TextButton(onClick = { confirmTrust = false }) { Text("Cancel") } },
+            )
+        }
         if (OpenFiles.tabs.size > 1) {
             androidx.compose.foundation.lazy.LazyRow(
                 Modifier.fillMaxWidth().background(Mono.Bg).padding(horizontal = 8.dp, vertical = 4.dp),
@@ -743,7 +865,8 @@ private fun Editor(
                         BasicTextField(
                             value = value,
                             onValueChange = { new ->
-                                if (readOnly && new.text != value.text) return@BasicTextField
+                                // Formatting replaces the whole text when it's done: typing meanwhile would be lost.
+                                if ((readOnly || formatting) && new.text != value.text) return@BasicTextField
                                 if (new.text == value.text) {
                                     value = new // selection/composition only
                                 } else {
@@ -753,7 +876,7 @@ private fun Editor(
                                     set(smart, boundary)
                                 }
                             },
-                            readOnly = readOnly,
+                            readOnly = readOnly || formatting,
                             textStyle = textStyle,
                             cursorBrush = SolidColor(Mono.Accent),
                             visualTransformation = transformation,
@@ -766,7 +889,7 @@ private fun Editor(
             }
         }
 
-        if (WindowInsets.isImeVisible && !readOnly) {
+        if (WindowInsets.isImeVisible && !readOnly && !formatting) {
             SymbolBar(onComplete = if (lsp != null) ({ complete() }) else null, onInsert = { s ->
                 val sel = value.selection
                 val text = value.text.replaceRange(sel.min, sel.max, if (s == "⇥") indentUnit else s)
@@ -806,6 +929,10 @@ private fun Editor(
             readOnly = readOnly,
             highlightOff = value.text.length > MAX_HIGHLIGHT_CHARS,
         )
+    }
+
+    diskDiff?.let { diff ->
+        dev.yurlungr.app.projects.DiffFullScreen(file.path, "On disk → your unsaved version", diff, onDismiss = { diskDiff = null })
     }
 
     conflict?.let { then ->

@@ -343,6 +343,8 @@ object LspManager {
         try {
             return withContext(Dispatchers.IO) {
                 val paths = RuntimePaths(context)
+                // A language server runs the project's code (build scripts, plugins): never for an untrusted project.
+                if (!dev.yurlungr.app.projects.ProjectTrust.isTrusted(context, file.parentFile ?: file)) return@withContext null
                 val server = LspServers.forFile(paths, file) ?: return@withContext null
                 val root = EditorTools.rootOf(file)
                 val key = root.path + "|" + server.name
