@@ -10,7 +10,7 @@ object ApkStaging {
     /** Folder under files/ that FileProvider shares (res/xml/file_paths.xml): staged APKs only. */
     const val APK_OUT = "apk-out"
     /** Staged APKs older than this are deleted (the installer has long since read them). */
-    private const val STAGED_TTL_MS = 60 * 60_000L
+    internal const val STAGED_TTL_MS = 60 * 60_000L
 
     /** [apk] resolved, if it's an existing .apk file inside [filesDir]; else null. */
     fun installSource(filesDir: File, apk: File): File? {

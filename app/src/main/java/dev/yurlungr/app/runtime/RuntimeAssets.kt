@@ -23,6 +23,7 @@ object RuntimeAssets {
         "agent-key.sh" to File(paths.libexec, "agent-key.sh"),
         "project-setup.sh" to File(paths.libexec, "project-setup.sh"),
         "pack-remove.sh" to File(paths.libexec, "pack-remove.sh"),
+        "restore-packages.sh" to File(paths.libexec, "restore-packages.sh"),
         "self-test.sh" to File(paths.libexec, "self-test.sh"),
         "android-sdk-setup.sh" to File(paths.libexec, "android-sdk-setup.sh"),
         "motd.sh" to File(paths.libexec, "motd.sh"),
@@ -131,12 +132,32 @@ object RuntimeAssets {
 
     // Android's `am` refuses calls from app UIDs, so shims hand requests to the app through
     // a watched directory (write a temp file, then rename: the app only sees complete files).
+    // Files go by path; the app checks it (inside home, not hidden, not too big) and hands an app a copy.
     private fun openShim(paths: RuntimePaths) = """
         |#!${paths.bin}/sh
-        |# Opens an http(s) URL in the Android browser via the Yurlungr app.
-        |if [ $# -lt 1 ]; then echo "usage: ${'$'}{0##*/} <url>" >&2; exit 64; fi
-        |${submit(paths, "\"\$1\"", "open")}
-        |echo "Opening in browser: ${'$'}1" >&2
+        |# Opens an http(s) URL in the Android browser, or a file from your home folder in an Android
+        |# app of your choice (it gets a copy), via the Yurlungr app. termux-open's options are ignored.
+        |target=
+        |while [ ${'$'}# -gt 0 ]; do
+        |  case "${'$'}1" in
+        |    --content-type|--chooser-title) [ ${'$'}# -gt 1 ] && shift ;;
+        |    --*) ;;
+        |    *) target=${'$'}1 ;;
+        |  esac
+        |  shift
+        |done
+        |if [ -z "${'$'}target" ]; then echo "usage: ${'$'}{0##*/} <url or file>" >&2; exit 64; fi
+        |case "${'$'}target" in
+        |  [Hh][Tt][Tt][Pp]://*|[Hh][Tt][Tt][Pp][Ss]://*)
+        |${submit(paths, "\"\$target\"", "open")}
+        |    echo "Opening in browser: ${'$'}target" >&2
+        |    exit 0 ;;
+        |  file://*) target=${'$'}{target#file://} ;;
+        |  *://*|mailto:*|tel:*|intent:*) echo "Only http(s) links and files can be opened: ${'$'}target" >&2; exit 65 ;;
+        |esac
+        |f=${'$'}(realpath "${'$'}target" 2>/dev/null) && [ -f "${'$'}f" ] || { echo "no such file: ${'$'}target" >&2; exit 66; }
+        |${submit(paths, "\"\$f\"", "file")}
+        |echo "Opening ${'$'}f on the phone: choose an app on screen." >&2
         |""".trimMargin()
 
     private fun installShim(paths: RuntimePaths) = """
@@ -147,7 +168,7 @@ object RuntimeAssets {
         |case "${'$'}apk" in *.apk) ;; *) echo "not an .apk: ${'$'}apk" >&2; exit 65 ;; esac
         |[ -f "${'$'}apk" ] || { echo "no such file: ${'$'}apk" >&2; exit 66; }
         |${submit(paths, "\"\$apk\"", "install")}
-        |echo "Install prompt shown for ${'$'}apk — confirm it on screen." >&2
+        |echo "Install prompt sent for ${'$'}apk: confirm it on screen (a notification, if Yurlungr is in the background)." >&2
         |""".trimMargin()
 
     private fun notifyShim(paths: RuntimePaths) = """
@@ -188,7 +209,8 @@ object RuntimeAssets {
         |  load AGP 8. To add a wrapper, run `gradle wrapper --gradle-version 8.14` in an empty dir containing
         |  only an empty settings.gradle, then copy gradlew + gradle/ in. NDK/CMake native code is not supported.
         |- Install an APK on this phone with `yurlungr-install path/to/app.apk` (the user confirms on screen).
-        |- Open a URL in the phone's browser with `xdg-open <url>`.
+        |- Open a URL in the phone's browser with `xdg-open <url>`; `xdg-open <file>` shows a file from the home
+        |  folder (a PDF, an image, a page) in an app the user picks.
         |- Tell the user something finished with `yurlungr-notify "Title" "details"` (a phone notification).
         |- GitHub: use `git` and `gh`. The user signs in from the app's Projects screen (gh auth + git credential
         |  helper), so pushes work once they have. Don't ask for tokens or passwords.

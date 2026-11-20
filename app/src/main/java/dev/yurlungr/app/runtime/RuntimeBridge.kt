@@ -90,8 +90,9 @@ object RuntimeBridge {
         }
         main.post {
             when (kind) {
-                "open" -> open(context, value)
+                "open" -> openFromRuntime(context, value)
                 "install" -> install(context, File(value))
+                "file" -> openFile(context, File(value))
                 "notify" -> TaskNotifications.notifyFromRuntime(context, value)
                 "done" -> TaskNotifications.commandDone(context, value)
             }
@@ -123,11 +124,19 @@ object RuntimeBridge {
             main.post {
                 try {
                     val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", staged)
-                    context.startActivity(
-                        Intent(Intent.ACTION_VIEW)
-                            .setDataAndType(uri, "application/vnd.android.package-archive")
-                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK),
-                    )
+                    val view = Intent(Intent.ACTION_VIEW)
+                        .setDataAndType(uri, "application/vnd.android.package-archive")
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                    if (inForeground()) {
+                        context.startActivity(view)
+                    } else {
+                        // Android blocks activity starts from the background: the prompt waits in a notification.
+                        TaskNotifications.prompt(
+                            context, TaskNotifications.Prompt.Install,
+                            "Install ${source.name}?", "Tap to open Android's installer. Asked for from the terminal or an agent.",
+                            view, timeoutMs = ApkStaging.STAGED_TTL_MS,
+                        )
+                    }
                 } catch (e: Exception) {
                     Log.w(TAG, "Couldn't open installer for $apk", e)
                     Toast.makeText(context, "Couldn't open the installer: ${e.message}", Toast.LENGTH_LONG).show()
@@ -136,10 +145,81 @@ object RuntimeBridge {
         }
     }
 
-    private val KINDS = setOf("open", "install", "notify", "done")
+    private val KINDS = setOf("open", "install", "notify", "done", "file")
     private const val RATE_MAX = 10
     private const val RATE_WINDOW_MS = 10_000L
     private val limiter = InboxRateLimiter(RATE_MAX, RATE_WINDOW_MS)
+
+    /** The app is on screen; from the background Android silently drops activity starts. */
+    private fun inForeground() = dev.yurlungr.app.chat.ChatSessions.appVisible
+
+    /**
+     * A link from `xdg-open` and friends: opened now while the app is on screen, otherwise offered
+     * as a notification (an agent's sign-in page must not vanish because the user switched apps).
+     */
+    private fun openFromRuntime(context: Context, url: String) {
+        val uri = url.toUri()
+        if (uri.scheme?.lowercase() !in setOf("http", "https")) {
+            Log.w(TAG, "Ignoring non-http(s) URL: $url")
+            return
+        }
+        if (inForeground()) return open(context, url)
+        lastUrl = url
+        TaskNotifications.prompt(
+            context, TaskNotifications.Prompt.Open,
+            "Open ${uri.host ?: "link"}", url.take(300),
+            Intent(Intent.ACTION_VIEW, uri),
+        )
+    }
+
+    /**
+     * A local file from `xdg-open` / `termux-open`: a copy goes to an app the user picks (see
+     * [FileOpenStaging] for which files qualify), or into a notification while the app is in the
+     * background.
+     */
+    fun openFile(context: Context, file: File) {
+        val paths = RuntimePaths(context)
+        val source = FileOpenStaging.openSource(paths.home, file)
+        if (source == null) {
+            Log.w(TAG, "Refusing to open $file")
+            if (inForeground()) {
+                Toast.makeText(context, "Only files in your home folder (not hidden ones, up to 100 MB) can be opened", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+        // FileProvider resolves against Context.getFilesDir() (/data/user/0/...), not /data/data/.
+        val outDir = File(context.filesDir, FileOpenStaging.SHARE_OUT)
+        thread(name = "file-stage", isDaemon = true) {
+            val staged = try {
+                FileOpenStaging.stage(source, outDir, System.currentTimeMillis())
+            } catch (e: Exception) {
+                Log.w(TAG, "Couldn't stage $file to open", e)
+                main.post { if (inForeground()) Toast.makeText(context, "Couldn't open ${source.name}: ${e.message}", Toast.LENGTH_LONG).show() }
+                return@thread
+            }
+            val mime = FileOpenStaging.mimeType(source.name) { android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(it) }
+            main.post {
+                try {
+                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", staged)
+                    val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    // A chooser: the runtime picks the file, the user picks the app it goes to.
+                    val chooser = Intent.createChooser(view, "Open ${source.name}")
+                    if (inForeground()) {
+                        context.startActivity(chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    } else {
+                        TaskNotifications.prompt(
+                            context, TaskNotifications.Prompt.File,
+                            "Open ${source.name}", "Tap to choose an app for it. Asked for from the terminal or an agent.",
+                            chooser, timeoutMs = FileOpenStaging.TTL_MS,
+                        )
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Couldn't open $file", e)
+                    if (inForeground()) Toast.makeText(context, "Couldn't open ${source.name}: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
 
     fun open(context: Context, url: String) {
         val uri = url.toUri()
