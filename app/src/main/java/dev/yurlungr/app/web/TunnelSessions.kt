@@ -43,9 +43,26 @@ internal object TunnelLinks {
     private val random = java.security.SecureRandom()
 
     /** 24 random bytes, URL-safe: what the supervisor accepts (16–128 of A–Z a–z 0–9 _ -). */
-    fun newKey(): String {
-        val bytes = ByteArray(24).also(random::nextBytes)
-        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+    fun newKey(): String = urlSafe(ByteArray(24).also(random::nextBytes))
+
+    private const val URL_SAFE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+    /**
+     * Unpadded URL-safe base64. Written out because java.util.Base64 needs API 26 (minSdk is 24) and
+     * android.util.Base64 is a stub in JVM unit tests.
+     */
+    internal fun urlSafe(bytes: ByteArray): String = buildString {
+        var i = 0
+        while (i < bytes.size) {
+            val b0 = bytes[i].toInt() and 0xFF
+            val b1 = if (i + 1 < bytes.size) bytes[i + 1].toInt() and 0xFF else 0
+            val b2 = if (i + 2 < bytes.size) bytes[i + 2].toInt() and 0xFF else 0
+            append(URL_SAFE[b0 shr 2])
+            append(URL_SAFE[((b0 and 3) shl 4) or (b1 shr 4)])
+            if (i + 1 < bytes.size) append(URL_SAFE[((b1 and 15) shl 2) or (b2 shr 6)])
+            if (i + 2 < bytes.size) append(URL_SAFE[b2 and 63])
+            i += 3
+        }
     }
 
     fun withKey(url: String, key: String?): String = if (key == null) url else url.trimEnd('/') + "/?key=" + key

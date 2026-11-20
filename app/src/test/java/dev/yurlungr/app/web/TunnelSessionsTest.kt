@@ -46,6 +46,15 @@ class TunnelSessionsTest {
         assertTrue(a != b)
     }
 
+    @Test fun `the key encoder matches unpadded URL-safe base64 for every length`() {
+        val random = java.util.Random(7)
+        for (n in 0..40) {
+            val bytes = ByteArray(n).also(random::nextBytes)
+            assertEquals("length $n", java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes), TunnelLinks.urlSafe(bytes))
+        }
+        assertEquals(32, TunnelLinks.newKey().length)
+    }
+
     @Test fun `the shared link carries the key, and a link without one is left alone`() {
         assertEquals("https://calm-river.trycloudflare.com/?key=abc", TunnelLinks.withKey("https://calm-river.trycloudflare.com", "abc"))
         assertEquals("https://calm-river.trycloudflare.com/?key=abc", TunnelLinks.withKey("https://calm-river.trycloudflare.com/", "abc"))
