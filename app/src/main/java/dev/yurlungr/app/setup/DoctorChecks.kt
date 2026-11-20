@@ -62,7 +62,11 @@ object DoctorChecks {
     private const val PREFS = "doctor"
     private const val KEY_PHANTOM_DONE = "phantom_fix_done"
 
-    suspend fun runAll(context: Context): List<Check> {
+    /**
+     * The quick checks. [deep] false (a refresh on returning to the app) skips what's costly to run
+     * again: the package update count is then only shown when still known from an earlier count.
+     */
+    suspend fun runAll(context: Context, deep: Boolean = true): List<Check> {
         val paths = RuntimePaths(context)
         return buildList {
             add(device())
@@ -81,7 +85,7 @@ object DoctorChecks {
                 add(agents(paths))
                 add(androidSdk(paths))
                 jdk(paths)?.let(::add)
-                updates(paths)?.let(::add)
+                updates(paths, deep)?.let(::add)
                 addAll(setupRuns(paths))
             }
             add(notifications(context))
@@ -193,7 +197,7 @@ object DoctorChecks {
     }
 
     private const val REINSTALL_NOTE =
-        "Reinstalling the base system keeps your home folder and projects; installed packages and agents need setting up again."
+        "Reinstalling the base system keeps your home folder and projects; installed packages and agents are removed, and offered for reinstalling afterwards."
 
     private fun termuxExec(paths: RuntimePaths): Check {
         val lib = RuntimeEnv.termuxExecLib(paths)
@@ -309,26 +313,26 @@ object DoctorChecks {
 
     private fun phantomProcesses(context: Context): Check {
         val sdk = Build.VERSION.SDK_INT
-        if (sdk < 31) return Check("phantom", "Phantom process killer", CheckStatus.Pass, "Not present before Android 12")
+        if (sdk < 31) return Check("phantom", dev.yurlungr.app.runtime.PhantomHint.CHECK_TITLE, CheckStatus.Pass, "Not present before Android 12")
 
         // Android 12L+ exposes this as a global setting ("Disable child process restrictions").
         val monitor = runCatching {
             Settings.Global.getString(context.contentResolver, "settings_enable_monitor_phantom_procs")
         }.getOrNull()
         if (monitor == "false") {
-            return Check("phantom", "Phantom process killer", CheckStatus.Pass, "Disabled (child process restrictions off)")
+            return Check("phantom", dev.yurlungr.app.runtime.PhantomHint.CHECK_TITLE, CheckStatus.Pass, "Disabled (child process restrictions off)")
         }
         val markedDone = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_PHANTOM_DONE, false)
         if (markedDone) {
             return Check(
-                "phantom", "Phantom process killer", CheckStatus.Pass,
+                "phantom", dev.yurlungr.app.runtime.PhantomHint.CHECK_TITLE, CheckStatus.Pass,
                 "Marked as fixed by you (Android 12 doesn't let apps verify this)",
                 fix = Fix.PhantomProcesses,
             )
         }
         return Check(
-            "phantom", "Phantom process killer", CheckStatus.Warn,
-            "Android may kill processes beyond 32 (signal 9) during npm/Gradle/agent runs. One-time fix needed.",
+            "phantom", dev.yurlungr.app.runtime.PhantomHint.CHECK_TITLE, CheckStatus.Warn,
+            "Android may kill processes beyond 32 during npm, Gradle and agent runs (they stop with signal 9, exit 137). One-time fix needed.",
             fix = Fix.PhantomProcesses,
             required = false,
         )
@@ -377,10 +381,12 @@ object DoctorChecks {
             )
         }
 
-    /** Package updates known from the lists already on the phone (no download), when there are any. */
-    private suspend fun updates(paths: RuntimePaths): Check? {
-        val n = CommandRunner.shell(paths, dev.yurlungr.app.runtime.Storage.UPGRADABLE_SCRIPT, timeoutMs = 30_000)
-            .output.trim().lines().lastOrNull()?.trim()?.toIntOrNull() ?: return null
+    /**
+     * Package updates known from the lists already on the phone (no download), when there are any.
+     * Counted again only when [count] and the remembered count is stale ([dev.yurlungr.app.runtime.UpgradableCount]).
+     */
+    private suspend fun updates(paths: RuntimePaths, count: Boolean): Check? {
+        val n = dev.yurlungr.app.runtime.UpgradableCount.get(paths, allowRun = count) ?: return null
         if (n <= 0) return null
         return Check(
             "updates", "Package updates", CheckStatus.Info,

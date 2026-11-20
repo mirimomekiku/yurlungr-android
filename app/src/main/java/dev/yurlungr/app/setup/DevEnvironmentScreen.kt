@@ -116,8 +116,7 @@ fun DevEnvironmentScreen(
         val caches = dev.yurlungr.app.runtime.Storage.caches(paths)
         val du = CommandRunner.shell(paths, dev.yurlungr.app.runtime.Storage.duScript(caches.flatMap { it.paths }), timeoutMs = 120_000)
         val sizes = dev.yurlungr.app.runtime.Storage.parseDu(du.output)
-        val updates = CommandRunner.shell(paths, dev.yurlungr.app.runtime.Storage.UPGRADABLE_SCRIPT, timeoutMs = 30_000)
-            .output.trim().lines().lastOrNull()?.trim()?.toIntOrNull()
+        val updates = dev.yurlungr.app.runtime.UpgradableCount.get(paths, allowRun = true)
         disk = DiskState(caches.map { c -> c to c.paths.sumOf { sizes[it.path] ?: 0L } }.filter { it.second > 0 }, updates)
     }
     LaunchedEffect(refreshTick, reload) {

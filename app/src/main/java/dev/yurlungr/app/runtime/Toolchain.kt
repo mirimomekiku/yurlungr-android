@@ -321,12 +321,19 @@ object Toolchain {
     /**
      * One script that probes [tools], [PROBE_PARALLEL] at a time, and prints
      * `id<TAB>exit<TAB>first line` per tool. 127 = not installed, 124 = timed out.
+     *
+     * A rolling pool: a new probe starts as soon as any running one ends (`wait -n`), rather than
+     * in batches that each wait for their slowest member (one JVM tool held up three quick ones).
+     * Never more than [PROBE_PARALLEL] at once, for the same process limit as before.
      */
     fun probeScript(tools: List<Tool>): String = buildString {
         // Recreate the temp folder if it was deleted rather than failing every tool.
         appendLine("t=\"\${TMPDIR:-\$PREFIX/tmp}\"; mkdir -p \"\$t\" 2>/dev/null")
         appendLine("d=\$(mktemp -d \"\$t/probe.XXXXXX\") || exit 70")
+        // n: probes running. wait -n returns as one ends (bash 4.3+; Termux has 5.x).
+        appendLine("n=0")
         for ((i, tool) in tools.withIndex()) {
+            if (i >= PROBE_PARALLEL) appendLine("if [ \$n -ge $PROBE_PARALLEL ]; then wait -n; n=\$((n - 1)); fi")
             // Each probe in its own subshell. -k: a tool that ignores SIGTERM is killed, so `wait` can't hang.
             // pipefail: "gh --version | sed -n 1p" must fail when gh is missing, not report sed's 0.
             append("( out=\$(timeout -k 5 ").append(tool.timeoutS).append(" bash -o pipefail -c ").append(shellQuote(tool.probe))
@@ -335,7 +342,7 @@ object Toolchain {
             // means the tool isn't there: report 127, so an optional pack reads "Not installed", not "Fails".
             append("[ \$s -ne 0 ] && [ \$s -ne 124 ] && { [ -z \"\$(printf '%s' \"\$out\" | tr -d '[:space:]')\" ] || printf '%s' \"\$out\" | grep -q 'command not found'; } && s=127; ")
             append("printf '%s\\t%s\\t%s\\n' ").append(shellQuote(tool.id)).append(" \"\$s\" \"\$(printf '%s' \"\$out\" | grep -m1 . | tr '\\t' ' ')\" > \"\$d/").append(i).append("\" ) &\n")
-            if ((i + 1) % PROBE_PARALLEL == 0) appendLine("wait")
+            appendLine("n=\$((n + 1))")
         }
         appendLine("wait")
         appendLine("cat \"\$d\"/* 2>/dev/null; rm -rf \"\$d\"")
