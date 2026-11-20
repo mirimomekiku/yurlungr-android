@@ -256,6 +256,10 @@ private fun PrRow(pr: PrSummary, onClick: () -> Unit) {
 
 private enum class PrSheet { Review, Comment, Merge, CheckoutWarning }
 
+/** Checking out a pull request brings someone else's code onto the phone: said while it runs. */
+private const val CHECKOUT_LABEL = "Checking out #%d: someone else's code, with its git hooks switched off"
+private const val HOOKS_NOTE = "Its git hooks don't run on checkout: it's someone else's code. Builds, scripts and agents you start on it still run its code."
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PrDetailView(dir: File, number: Int, git: Git, prs: GhPullRequests, onBack: () -> Unit) {
@@ -341,7 +345,7 @@ private fun PrDetailView(dir: File, number: Int, git: Git, prs: GhPullRequests, 
                                     val s = git.status(dir)
                                     uncommitted = s.changes.size
                                     if (uncommitted > 0) sheet = PrSheet.CheckoutWarning
-                                    else act("Checking out #$number", "Checked out #$number (${pr.headRef}).") { prs.checkout(dir, number) }
+                                    else act(CHECKOUT_LABEL.format(number), "Checked out #$number (${pr.headRef}). $HOOKS_NOTE") { prs.checkout(dir, number) }
                                 }
                             }, enabled = idle) { Text("Check out") }
                             FilledTonalButton(onClick = { sheet = PrSheet.Merge }, enabled = idle) { Text("Merge…") }
@@ -388,7 +392,7 @@ private fun PrDetailView(dir: File, number: Int, git: Git, prs: GhPullRequests, 
         }
         PrSheet.Merge -> if (current != null) MergeSheet(current, onDismiss = { sheet = null }) { method ->
             sheet = null
-            act("Merging #$number", "Merged #$number.") { prs.merge(dir, number, method) }
+            act("Merging #$number", "Merged #$number.") { prs.merge(dir, number, method, current.headRefOid) }
         }
         PrSheet.CheckoutWarning -> AppSheet(
             "Uncommitted changes", onDismiss = { sheet = null }, icon = Ph.Warning, tile = AppColors.tiles.peach,
@@ -397,7 +401,7 @@ private fun PrDetailView(dir: File, number: Int, git: Git, prs: GhPullRequests, 
                 OutlinedButton(onClick = { sheet = null }, modifier = Modifier.weight(1f)) { Text("Cancel") }
                 Button(onClick = {
                     sheet = null
-                    act("Checking out #$number", "Checked out #$number.") { prs.checkout(dir, number) }
+                    act(CHECKOUT_LABEL.format(number), "Checked out #$number. $HOOKS_NOTE") { prs.checkout(dir, number) }
                 }, modifier = Modifier.weight(1f)) { Text("Check out anyway") }
             },
         ) {
@@ -405,6 +409,7 @@ private fun PrDetailView(dir: File, number: Int, git: Git, prs: GhPullRequests, 
                 "Switching to the pull request's branch takes them along, or fails if they clash with it. Commit or stash them first (Git actions → Branches & stashes) to keep things apart.",
                 style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
             )
+            Text(HOOKS_NOTE, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         }
         null -> Unit
     }
@@ -644,10 +649,11 @@ private fun MergeSheet(pr: PrDetail, onDismiss: () -> Unit, onMerge: (PrMergeMet
         "Merge #${pr.number}?", onDismiss = onDismiss, subtitle = "${pr.headRef} into ${pr.baseRef}", icon = Ph.GitMerge, tile = AppColors.tiles.lime,
         actions = {
             OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("Cancel") }
-            Button(onClick = { onMerge(method) }, enabled = !pr.isDraft, modifier = Modifier.weight(1f)) { Text("Merge") }
+            Button(onClick = { onMerge(method) }, enabled = !pr.isDraft && pr.headRefOid != null, modifier = Modifier.weight(1f)) { Text("Merge") }
         },
     ) {
         if (pr.isDraft) WarningBanner("Drafts can't be merged: mark it ready for review on GitHub first.")
+        if (pr.headRefOid == null) WarningBanner("Which commit to merge isn't known: refresh the pull request first.")
         if (pr.mergeable.equals("CONFLICTING", true)) WarningBanner("It has conflicts with ${pr.baseRef}: GitHub will refuse the merge.")
         if (pr.checks.failed.isNotEmpty()) WarningBanner("${pr.checks.failed.size} check${if (pr.checks.failed.size == 1) " is" else "s are"} failing.")
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -655,5 +661,9 @@ private fun MergeSheet(pr: PrDetail, onDismiss: () -> Unit, onMerge: (PrMergeMet
         }
         Text(method.description + ". This changes ${pr.baseRef} on GitHub and can't be undone from here.",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        pr.headRefOid?.let { oid ->
+            Text("Merges exactly what you're looking at (commit ${oid.take(7)}). If anything was pushed since, GitHub refuses and nothing is merged.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }

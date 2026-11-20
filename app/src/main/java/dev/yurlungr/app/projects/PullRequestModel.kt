@@ -95,6 +95,8 @@ data class PrDetail(
     val deletions: Int,
     /** MERGEABLE, CONFLICTING or UNKNOWN. */
     val mergeable: String?,
+    /** The commit the branch pointed at when this was loaded: merging is pinned to it. */
+    val headRefOid: String? = null,
 ) {
     val isOpen: Boolean get() = state.equals("OPEN", ignoreCase = true)
 }
@@ -217,6 +219,7 @@ object PrParse {
             additions = o.int("additions"),
             deletions = o.int("deletions"),
             mergeable = o.str("mergeable")?.ifBlank { null },
+            headRefOid = o.str("headRefOid")?.takeIf { it.length == 40 && it.all { c -> c in '0'..'9' || c in 'a'..'f' } },
         )
     }
 
