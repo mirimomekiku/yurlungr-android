@@ -20,6 +20,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import dev.yurlungr.app.runtime.ProcessTree
 import java.io.BufferedWriter
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -44,6 +45,13 @@ class AcpConnection(
     private val process: Process,
     private val scope: CoroutineScope,
     private val handler: Handler,
+    /**
+     * The agent was started through `setsid`, so it leads a process group of its own: everything
+     * it starts (dev servers, MCP servers, shells) is in that group unless it moved itself out.
+     */
+    private val ownGroup: Boolean = false,
+    /** How long [close] waits for the agent to exit on its own before stopping what's left. */
+    private val closeGraceMs: Long = 3_000,
 ) {
     interface Handler {
         /** Agent → client request (permission, fs). Return the result or throw [AcpException]. */
@@ -200,11 +208,25 @@ class AcpConnection(
         }
     }
 
-    /** Closes stdin so the agent can shut down cleanly (and stop its children), then kills it. */
+    /** The agent's pid (0 when unknown, e.g. a test double). Read now: it can't be read once reaped. */
+    private val pid: Int = ProcessTree.pidOf(process)
+
+    /**
+     * Closes stdin so the agent can shut down cleanly (and stop its children), then, after a
+     * grace period, stops whatever is left of it: the agent, its descendants and its process
+     * group. Destroying only the agent's pid left its dev servers, MCP servers and shells running
+     * (re-parented to init, where nothing would ever stop them).
+     */
     fun close() {
         runCatching { synchronized(writer) { writer.close() } }
         thread(isDaemon = true, name = "acp-close") {
-            Thread.sleep(3_000)
+            Thread.sleep(closeGraceMs)
+            if (pid > 0) {
+                // A group kill only when the agent really leads its own group: -pid of anything else
+                // could name an unrelated group.
+                val group = ownGroup && ProcessGroup.leads(pid)
+                runCatching { ProcessTree.terminate(pid, graceMs = 1_500, alsoGroup = group) }
+            }
             runCatching { process.destroy() }
         }
     }
