@@ -34,6 +34,8 @@ object OpenIn {
     const val QUICK_ASK = "quick_ask"
     const val PROJECT = "project:"
     const val ACTIVITY = "activity"
+    /** System checks (e.g. the background process limit fix, from a "stopped by Android" notice). */
+    const val SYSTEM_CHECKS = "system_checks"
 
     /** The chat waiting for an answer, or the Activity screen (what agents are doing). */
     fun agentsIntent(context: Context): Intent {

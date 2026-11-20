@@ -45,7 +45,9 @@ data class SetupStatus(
         fun summary(s: SetupStatus, running: Boolean = false): String = when {
             s.exitCode == 0 -> "Completed"
             s.unfinished && running -> "Running now."
-            s.unfinished -> "Didn't finish: it was stopped without a chance to clean up (the app or phone was closed). Run it again to complete it."
+            s.unfinished -> "Didn't finish: it was stopped without a chance to clean up (the app or phone was closed, or Android killed it). Run it again to complete it."
+            // Killed by signal 9 is the cause, whatever steps it took down with it.
+            PhantomHint.forExit(s.exitCode) != null -> PhantomHint.MESSAGE + " Then run it again to complete it."
             s.failed.isNotEmpty() -> "Failed: " + s.failed.take(5).joinToString(", ") +
                 (if (s.failed.size > 5) " and ${s.failed.size - 5} more" else "") + ". Rerun it after fixing the cause; see the log."
             s.exitCode == 129 -> "Stopped: its terminal was closed before it finished. Run it again to complete it."
