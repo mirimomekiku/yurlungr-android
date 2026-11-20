@@ -16,9 +16,11 @@ object ProjectVenv {
     /**
      * The venv for processes in [cwd]: the nearest `.venv` in [cwd] or a folder above it, up to the
      * project folder (the child of [projects] that holds [cwd]), never above it. Outside
-     * [projects], only [cwd] itself is looked at.
+     * [projects], only [cwd] itself is looked at. A venv in a folder [trusted] says no to (a cloned
+     * repository the user hasn't trusted) is skipped: its `bin` would shadow git, node and python
+     * for everything run there, agents included.
      */
-    fun find(cwd: File, projects: File, prefixBin: File): File? {
+    fun find(cwd: File, projects: File, prefixBin: File, trusted: (File) -> Boolean = { true }): File? {
         // Not canonical: VIRTUAL_ENV should read like the paths the user sees (/data/data/…).
         val dir = cwd.absoluteFile.normalize()
         val root = projects.absoluteFile.normalize()
@@ -29,7 +31,7 @@ object ProjectVenv {
         var levels = 0
         while (d != null && levels <= MAX_LEVELS) {
             val venv = File(d, DIR)
-            if (usable(venv, d, prefixBin)) return venv
+            if (usable(venv, d, prefixBin) && trusted(d)) return venv
             // Stop at the project folder (directly under projects/), or right away outside projects/.
             if (!inside || d.parentFile?.path == root.path) break
             d = d.parentFile
@@ -40,8 +42,11 @@ object ProjectVenv {
 
     /**
      * A venv made on this phone: it has pyvenv.cfg whose `home` is the runtime's own bin (so a
-     * venv copied from a computer, or a folder that only looks like one, isn't put on PATH), and
-     * it's really inside its project (not a link out of it).
+     * venv copied from a computer, or a folder that only looks like one, isn't put on PATH), it's
+     * really inside its project (not a link out of it), and its `bin/python` resolves to a program
+     * under `$PREFIX`. pyvenv.cfg is plain text anyone can write, so a repository could commit one
+     * naming this phone's paths; `python -m venv` and `uv venv` make `bin/python` a link to the
+     * runtime's interpreter, which a committed folder of scripts doesn't have.
      */
     internal fun usable(venv: File, owner: File, prefixBin: File): Boolean {
         val cfg = File(venv, "pyvenv.cfg")
@@ -53,7 +58,20 @@ object ProjectVenv {
             .firstNotNullOfOrNull { line -> line.split('=', limit = 2).takeIf { it.size == 2 && it[0].trim() == "home" }?.get(1)?.trim() }
             ?: return false
         fun same(a: File, b: File) = runCatching { a.canonicalPath == b.canonicalPath }.getOrDefault(false)
-        return File(home).isAbsolute && same(File(home), prefixBin)
+        return File(home).isAbsolute && same(File(home), prefixBin) && pythonInPrefix(canonical, prefixBin)
+    }
+
+    /**
+     * Whether [venv]'s `bin/python` resolves into the prefix ([prefixBin]'s parent). A regular file
+     * there resolves to itself, inside the venv: refused. A venv that is itself inside the prefix is
+     * refused too, since then any file in it would pass.
+     */
+    private fun pythonInPrefix(venv: File, prefixBin: File): Boolean {
+        val prefix = runCatching { prefixBin.canonicalFile.parentFile?.path }.getOrNull() ?: return false
+        fun under(path: String) = path.startsWith(prefix + File.separator)
+        if (under(venv.path)) return false
+        val python = runCatching { File(venv, "bin/python").canonicalFile }.getOrNull() ?: return false
+        return python.isFile && under(python.path)
     }
 
     /** [env] with [venv] activated. */

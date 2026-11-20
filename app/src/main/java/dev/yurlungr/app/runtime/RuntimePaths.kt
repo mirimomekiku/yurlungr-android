@@ -17,6 +17,13 @@ import java.io.File
 class RuntimePaths(context: Context) {
     val packageName: String = context.packageName
 
+    /**
+     * The application context (never an activity, so keeping it can't leak one): what
+     * [RuntimeEnv] needs to ask [dev.yurlungr.app.projects.ProjectTrust] whether a project's own
+     * `.venv` may go first on PATH.
+     */
+    val appContext: Context = context.applicationContext ?: context
+
     @SuppressLint("SdCardPath") // deliberate, see class doc
     val dataDir = File("/data/data/$packageName")
     val filesDir = File(dataDir, "files")
@@ -81,10 +88,18 @@ class RuntimePaths(context: Context) {
             else -> null
         }
 
-        /** Recursive delete that never follows symlinks (the prefix may link into $HOME or shared storage). */
-        fun deleteNoFollow(file: File) {
+        /**
+         * Recursive delete that never follows symlinks (the prefix may link into $HOME or shared
+         * storage). [makeWritable]: give each folder owner write access first, or the files in a
+         * read-only one (some packages install those) can't be deleted.
+         */
+        fun deleteNoFollow(file: File, makeWritable: Boolean = false) {
             val isLink = runCatching { OsConstants.S_ISLNK(Os.lstat(file.path).st_mode) }.getOrDefault(false)
-            if (!isLink && file.isDirectory) file.listFiles()?.forEach(::deleteNoFollow)
+            if (!isLink && file.isDirectory) {
+                // Only real folders reach chmod, which would follow a link.
+                if (makeWritable) runCatching { Os.chmod(file.path, "700".toInt(8)) }
+                file.listFiles()?.forEach { deleteNoFollow(it, makeWritable) }
+            }
             file.delete()
         }
     }

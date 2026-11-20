@@ -17,8 +17,12 @@ object RuntimeEnv {
 
     fun map(paths: RuntimePaths, cwd: File = paths.home): Map<String, String> {
         val env = base(paths, cwd)
-        // In a Python project with a .venv, everything runs as if it were activated.
-        val venv = runCatching { ProjectVenv.find(cwd, paths.projects, paths.bin) }.getOrNull() ?: return env
+        // In a Python project with a .venv, everything runs as if it were activated: only in a
+        // project the user trusts (a cloned repository's committed .venv/bin would otherwise
+        // shadow git, node and python for everything run there).
+        val venv = runCatching {
+            ProjectVenv.find(cwd, paths.projects, paths.bin) { dir -> dev.yurlungr.app.projects.ProjectTrust.isTrusted(paths.appContext, dir) }
+        }.getOrNull() ?: return env
         return ProjectVenv.activate(env, venv)
     }
 
