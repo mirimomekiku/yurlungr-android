@@ -18,19 +18,31 @@ sealed interface RoutineOutcome {
     data class Conflicts(
         val files: List<String>,
         val stage: ConflictStage,
-        /** The user's own changes are still in stash@{0}, to be re-applied once this is resolved. */
+        /** The user's own changes are still in a stash entry, to be re-applied once this is resolved. */
         val stashKept: Boolean,
         override val message: String,
+        /** That entry's commit, so it's found again by what it is, not by its position. */
+        val stashSha: String? = null,
     ) : RoutineOutcome
 
     data class Failed(override val message: String) : RoutineOutcome
+}
+
+/** Told about the stash a routine makes with the user's work, so the app can offer it back until it's restored. */
+interface StashTracker {
+    /** [stash] now holds the user's changes. */
+    fun saved(dir: File, stash: TrackedStash) {}
+    /** It was popped cleanly: nothing to track. */
+    fun restored(dir: File) {}
+    /** It was re-applied with conflicts and git kept the entry: the changes are in the files now. */
+    fun appliedWithConflicts(dir: File, stash: TrackedStash) {}
 }
 
 /**
  * Multi-step git routines ("get the latest changes" = stash → pull → stash pop) that stop at the
  * first problem and say exactly where things were left, so the user (or an agent) can carry on.
  */
-class GitRoutines(private val git: Git) {
+class GitRoutines(private val git: Git, private val stashes: StashTracker = object : StashTracker {}) {
     /**
      * Saves local changes, pulls (merging if the branches diverged), and puts the changes back.
      * Conflicts at either step are returned, not hidden; nothing is ever discarded.
@@ -54,13 +66,18 @@ class GitRoutines(private val git: Git) {
         val before = git.head(dir)
         // Only what was actually stashed is popped later: `git stash` exits 0 with nothing to save
         // (e.g. only ignored files changed), and popping then would apply an older, unrelated stash.
-        var stashed = false
+        // It's popped by its commit, not as stash@{0}: something else may stash meanwhile.
+        var stash: TrackedStash? = null
         if (status.changes.isNotEmpty()) {
             onStep("Saving your local changes (git stash)…")
             val (saved, created) = git.stashSaving(dir, STASH_MESSAGE)
             if (!saved.ok) return RoutineOutcome.Failed(saved.describe("Saving your local changes"))
-            stashed = created
+            if (created) {
+                val sha = git.stashTop(dir) ?: return RoutineOutcome.Failed("Your changes were stashed, but the stash entry can't be read. They're in `git stash list`.")
+                stash = TrackedStash(sha, STASH_MESSAGE).also { stashes.saved(dir, it) }
+            }
         }
+        val stashed = stash != null
 
         onStep("Getting the latest changes (git pull)…")
         val pull = git.pullMerge(dir)
@@ -71,32 +88,37 @@ class GitRoutines(private val git: Git) {
                     after.conflicts, ConflictStage.Pull, stashKept = stashed,
                     "The latest changes conflict with commits on this branch in ${after.conflicts.size} file(s)." +
                         if (stashed) " Your uncommitted changes are saved in the stash meanwhile." else "",
+                    stashSha = stash?.sha,
                 )
             }
             // Nothing merged: put the user's work back exactly as it was.
-            if (stashed) {
+            if (stash != null) {
                 onStep("Putting your changes back…")
-                val back = git.stashPopLatest(dir)
-                if (!back.ok) return RoutineOutcome.Failed(pull.describe("git pull") + "\nYour changes are saved in stash@{0}; restoring them failed.")
+                val back = git.stashPopSha(dir, stash.sha)
+                if (!back.ok) return RoutineOutcome.Failed(pull.describe("git pull") + "\nYour changes are still stashed (Changes tab → Restore); restoring them failed.")
+                stashes.restored(dir)
             }
             return RoutineOutcome.Failed(pull.describe("git pull"))
         }
         val pulled = if (before != null) git.countCommits(dir, before, "HEAD") else 0
 
-        if (stashed) {
+        if (stash != null) {
             onStep("Putting your changes back (git stash pop)…")
-            val pop = git.stashPopLatest(dir)
+            val pop = git.stashPopSha(dir, stash.sha)
             if (!pop.ok) {
                 val after = git.status(dir)
                 if (after.conflicts.isNotEmpty()) {
+                    stashes.appliedWithConflicts(dir, stash.copy(applied = true))
                     return RoutineOutcome.Conflicts(
                         after.conflicts, ConflictStage.RestoreChanges, stashKept = true,
                         "Got the latest changes, but your own changes conflict with them in ${after.conflicts.size} file(s). " +
                             "They're still saved in the stash.",
+                        stashSha = stash.sha,
                     )
                 }
-                return RoutineOutcome.Failed(pop.describe("Putting your changes back") + "\nThey're still saved in stash@{0}.")
+                return RoutineOutcome.Failed(pop.describe("Putting your changes back") + "\nThey're still stashed (Changes tab → Restore).")
             }
+            stashes.restored(dir)
         }
         val got = when (pulled) {
             0 -> "Already up to date."
@@ -121,8 +143,8 @@ class GitRoutines(private val git: Git) {
     /** Undoes the last commit, keeping its changes, but only while nobody else can have it (not pushed). */
     suspend fun undoLastCommit(dir: File): RoutineOutcome {
         val head = git.head(dir) ?: return RoutineOutcome.Failed("There's no commit to undo.")
-        val status = git.status(dir)
-        if (status.hasOrigin && head !in git.unpushed(dir)) {
+        // Any remote, not just origin: a fork's upstream or a second remote has it just the same.
+        if (git.onAnyRemote(dir, head)) {
             return RoutineOutcome.Failed("The last commit is already pushed. Undoing it would rewrite shared history.")
         }
         if (git.countCommits(dir, "HEAD~1", "HEAD") == 0) return RoutineOutcome.Failed("The first commit can't be undone this way.")
@@ -136,6 +158,11 @@ class GitRoutines(private val git: Git) {
 
         private fun fileList(files: List<String>) = files.take(40).joinToString("\n") { "- $it" } +
             if (files.size > 40) "\n- …and ${files.size - 40} more (see `git status`)" else ""
+
+        /** How to find and act on the stash entry with commit [sha]: its position shifts, its commit doesn't. */
+        private fun stashBySha(sha: String, action: String) =
+            "find the entry whose commit is `$sha` (`git stash list --format='%gd %H'`) and run `git stash $action stash@{N}` with its number; " +
+                "never a bare `git stash $action`, which acts on whatever entry is newest"
 
         /** The agent's instructions for resolving [c], ending in the state a careful person would leave. */
         fun conflictPrompt(c: RoutineOutcome.Conflicts, branch: String?, upstream: String?): String = buildString {
@@ -153,25 +180,50 @@ class GitRoutines(private val git: Git) {
             when (c.stage) {
                 ConflictStage.Pull -> {
                     appendLine("4. `git add` the resolved files and finish the merge with `git commit --no-edit`.")
-                    if (c.stashKept) appendLine("5. Then bring my saved uncommitted work back with `git stash pop`, resolving any conflicts the same way and leaving those changes uncommitted.")
+                    if (c.stashKept) {
+                        appendLine("5. Then bring my saved uncommitted work back with `git stash pop`: " +
+                            (c.stashSha?.let { stashBySha(it, "pop") + "." } ?: "the entry named \"$STASH_MESSAGE\".") +
+                            " Resolve any conflicts the same way and leave those changes uncommitted.")
+                    }
                 }
                 ConflictStage.RestoreChanges -> {
                     appendLine("4. Leave the result uncommitted: it's my work in progress. Unstage the files (`git restore --staged <file>`) once resolved.")
-                    appendLine("5. When everything is resolved, drop the stash entry that was applied: `git stash drop`.")
+                    appendLine("5. When everything is resolved, drop the stash entry that was applied (`git stash drop`): " +
+                        (c.stashSha?.let { stashBySha(it, "drop") + "." } ?: "the entry named \"$STASH_MESSAGE\", only if it's still listed."))
                 }
             }
             appendLine()
             append("Don't push. Finish with a short summary of what you did in each file.")
         }
 
-        /** For conflicts already in the working tree (e.g. from an earlier pull). */
-        fun fixConflictsPrompt(files: List<String>, mergeInProgress: Boolean): String = buildString {
+        /**
+         * For conflicts already in the working tree. [operation]: the merge, rebase, cherry-pick or
+         * revert they're part of, which decides how it's finished. [appStash]: the app's own stash
+         * that was re-applied with conflicts, when that's where they came from (and no operation
+         * is in progress); only then is a stash entry dropped, and only that one.
+         */
+        fun fixConflictsPrompt(files: List<String>, operation: GitOperation?, appStash: TrackedStash? = null): String = buildString {
             appendLine("This repository has unresolved conflicts in:")
             appendLine(fileList(files))
             appendLine()
             appendLine("Resolve each one: read both sides, combine them so neither side's intent is lost, and remove every conflict marker. Then check for leftover markers and run the build or tests if there's an obvious command.")
-            if (mergeInProgress) appendLine("A merge is in progress: `git add` the resolved files and finish it with `git commit --no-edit`.")
-            else appendLine("No merge is in progress (these came from re-applying stashed work): leave the result uncommitted and unstaged, and `git stash drop` the applied stash if `git stash list` still shows it.")
+            when (operation) {
+                GitOperation.Merge ->
+                    appendLine("A merge is in progress: `git add` the resolved files and finish it with `git commit --no-edit`.")
+                GitOperation.Rebase, GitOperation.ApplyMailbox, GitOperation.CherryPick, GitOperation.Revert -> {
+                    appendLine("A ${operation.label} is in progress (it stopped on these conflicts): `git add` the resolved files, then continue it with " +
+                        "`GIT_EDITOR=true ${operation.continueCommand}`. Don't `git commit` yourself, and don't touch the stash.")
+                    appendLine("If it stops again on the next commit's conflicts, resolve those the same way and continue until it's done. " +
+                        "If it can't be finished sensibly, stop and ask me: `${operation.abortCommand}` would undo all of it.")
+                }
+                null -> if (appStash != null) {
+                    appendLine("No merge or rebase is in progress: these came from re-applying my stashed uncommitted work. Leave the result uncommitted and unstaged (`git restore --staged <file>`).")
+                    appendLine("Then drop that stash entry, which is only a backup now: ${stashBySha(appStash.sha, "drop")}. Drop nothing else.")
+                } else {
+                    appendLine("No merge, rebase, cherry-pick or revert is in progress (they may come from `git stash pop` or `git checkout -m`). Leave the result uncommitted and unstaged (`git restore --staged <file>`).")
+                    appendLine("Don't drop or pop any stash entry: if `git stash list` has one that looks already applied, tell me instead.")
+                }
+            }
             append("Don't push. Finish with a short summary of what you did in each file.")
         }
 

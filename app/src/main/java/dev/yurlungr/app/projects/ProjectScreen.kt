@@ -158,9 +158,26 @@ fun ProjectScreen(
 
     var tab by rememberSaveable { mutableStateOf(ProjectTab.entries.firstOrNull { it.name.equals(initialTab, ignoreCase = true) } ?: ProjectTab.Overview) }
     var status by remember { mutableStateOf<GitStatus?>(null) }
-    var busy by remember { mutableStateOf<String?>(null) }
+    // Git writes run in GitJobs, not here: they finish (and are reported) even if this screen closes meanwhile.
+    val busy: String? = GitJobs.running[GitJobs.key(dir)]
     var message by remember { mutableStateOf<Pair<String, Boolean>?>(null) } // text, isError
+    /** Everything: the tree, stacks, tasks, checks, git. Bumped by explicit refreshes and by what changes files (pull, switch). */
     var reload by remember { mutableIntStateOf(0) }
+    /** Only git's state (status, history, operation, stash): bumped after stage, commit, discard and the like. */
+    var statusTick by remember { mutableIntStateOf(0) }
+    /** The merge, rebase, cherry-pick or revert waiting to be finished. */
+    var operation by remember(dir.path) { mutableStateOf<GitOperation?>(null) }
+    /** The stash a routine made with the user's work, while it's still in the stash list. */
+    var routineStash by remember(dir.path) { mutableStateOf<TrackedStash?>(null) }
+    /** The last git write failed on index.lock: offer to remove a stale one. */
+    var lockedIndex by remember(dir.path) { mutableStateOf(false) }
+    var trustTick by remember { mutableIntStateOf(0) }
+    /** The untrusted project folder this is in (itself or a parent), or null when it's trusted. */
+    val untrustedRoot = remember(dir.path, trustTick) { ProjectTrust.untrustedRoot(context, dir) }
+    var askTrust by remember { mutableStateOf(false) }
+    var askUntrust by remember { mutableStateOf(false) }
+    /** Changes with any refresh, git-only ones included: for what shows git state (history, the Overview). */
+    val gitKey = refreshTick * 1_000_000 + reload * 1_000 + statusTick
     var askIdentity by remember { mutableStateOf<String?>(null) } // pending commit message
     // Kept until a commit succeeds, so cancelling the identity prompt doesn't lose it.
     var commitMessage by rememberSaveable(dir.path) { mutableStateOf("") }
@@ -203,14 +220,29 @@ fun ProjectScreen(
         val found = withContext(Dispatchers.IO) { stacks.orEmpty().filter { it.needsSetup(paths.prefix) } }
         needs = found
         if (found.isEmpty() || !SetupBannerPrefs.auto(context)) return@LaunchedEffect
+        // Installing runs the project's own scripts (npm lifecycle scripts…): never by itself for an untrusted one.
+        if (!ProjectTrust.isTrusted(context, dir)) return@LaunchedEffect
         val signature = autoSetupSignature(found)
         if (SetupBannerPrefs.autoRan(context, dir, signature) || SetupBannerPrefs.startedNow(dir)) return@LaunchedEffect
         SetupBannerPrefs.markAutoRan(context, dir, signature)
         runInTerminal(installCommand(dir, found), "Set up ${dir.name}")
     }
 
+    // Git's own state: cheap, so refreshed after every git operation without re-reading the whole project.
+    LaunchedEffect(dir, refreshTick, reload, statusTick) {
+        val s = git.status(dir)
+        status = s
+        if (!s.isRepo) { operation = null; routineStash = null; return@LaunchedEffect }
+        operation = git.operationInProgress(dir)
+        routineStash = RoutineStashes.get(context, dir)?.let { tracked ->
+            // Popped or dropped elsewhere (terminal, an agent): stop offering it.
+            when (git.hasStash(dir, tracked.sha)) {
+                false -> { RoutineStashes.clear(context, dir); null }
+                else -> tracked
+            }
+        }
+    }
     LaunchedEffect(dir, refreshTick, reload) {
-        launch { status = git.status(dir) }
         launch {
             val found = withContext(Dispatchers.IO) { runCatching { StackDetector.detect(dir) }.getOrDefault(emptyList()) }
             stacks = found
@@ -223,27 +255,35 @@ fun ProjectScreen(
         } }
     }
 
-    /** [quiet]: say nothing when it works (stage, discard…); failures are always shown. */
-    fun runGit(label: String, quiet: Boolean = false, onSuccess: () -> Unit = {}, block: suspend () -> dev.yurlungr.app.runtime.CommandResult) {
+    /**
+     * Runs a git write in [GitJobs] (it outlives this screen). [quiet]: say nothing when it works
+     * (stage, discard…); failures are always shown. Only git's state is re-read afterwards.
+     */
+    fun runGit(label: String, quiet: Boolean = false, committing: Boolean = false, block: suspend () -> dev.yurlungr.app.runtime.CommandResult) {
         if (busy != null) return
-        busy = label
         message = null
-        scope.launch {
-            val r = block()
-            if (r.ok) onSuccess()
-            // On failure, say why in plain words (not installed, timed out, exit code) before git's own lines.
-            message = if (r.ok && quiet) null else (if (r.ok) r.output.trim().lines().takeLast(6).joinToString("\n").ifBlank { "$label: done" } else r.describe(label)) to !r.ok
-            busy = null
-            reload++
-        }
+        GitJobs.start(dir, label, quiet, committing, block)
+    }
+    // A write finished (maybe while this screen was closed): show it and re-read git's state.
+    val finished = GitJobs.results[GitJobs.key(dir)]
+    LaunchedEffect(finished) {
+        val done = GitJobs.take(dir) ?: return@LaunchedEffect
+        val r = done.result
+        if (done.committed) commitMessage = ""
+        // On failure, say why in plain words (not installed, timed out, exit code) before git's own lines.
+        message = if (r.ok && done.quiet) null
+            else (if (r.ok) r.output.trim().lines().takeLast(6).joinToString("\n").ifBlank { "${done.label}: done" } else r.describe(done.label)) to !r.ok
+        lockedIndex = !r.ok && Git.mentionsIndexLock(r.errorOutput + "\n" + r.output)
+        statusTick++
     }
 
     var commitStagedOnly by remember { mutableStateOf(false) }
     fun doCommit(text: String) =
-        runGit("Commit", onSuccess = { commitMessage = "" }) { if (commitStagedOnly) git.commitStaged(dir, text) else git.commitAll(dir, text) }
+        runGit("Commit", committing = true) { if (commitStagedOnly) git.commitStaged(dir, text) else git.commitAll(dir, text) }
     fun commit(text: String, stagedOnly: Boolean) = scope.launch {
         commitStagedOnly = stagedOnly
-        val (name, email) = git.identity()
+        // What a commit here would use: the repository's own identity counts, not only the global one.
+        val (name, email) = git.identity(dir)
         if (name.isBlank() || email.isBlank()) askIdentity = text else doCommit(text)
     }
 
@@ -254,7 +294,11 @@ fun ProjectScreen(
             .systemBarsPadding()
             .imePadding(),
     ) {
-        Header(dir, paths.projects, onBack, onSwitchProject, onAllProjects)
+        Header(
+            dir, paths.projects, onBack, onSwitchProject, onAllProjects,
+            trusted = untrustedRoot == null,
+            onTrustChange = { if (untrustedRoot == null) askUntrust = true else askTrust = true },
+        )
         // The stat tiles and tabs slide away while scrolling down and come back when scrolling up.
         val collapse = androidx.compose.animation.fadeOut(tween(Motion.SHORT)) +
             androidx.compose.animation.slideOutVertically(tween(Motion.MEDIUM, easing = Motion.Emphasized)) { -it / 2 } +
@@ -277,10 +321,17 @@ fun ProjectScreen(
                     Modifier.weight(1f),
                     valueSize = if (s.hasOrigin) 26.sp else 17.sp,
                 ) {
-                    if (toPush > 0 && busy == null) runGit("Push") { git.push(dir, s) } else tab = ProjectTab.Changes
+                    // Detached HEAD has no branch to push: the Changes tab explains.
+                    if (toPush > 0 && busy == null && !s.detached) runGit("Push") { git.push(dir, s) } else tab = ProjectTab.Changes
                 }
             }
         }
+        }
+        // Someone else's code: what's held back, and Trust. The Overview has the full explanation.
+        untrustedRoot?.let { root ->
+            if (tab != ProjectTab.Overview) {
+                UntrustedBanner(root, compact = true, onTrust = { askTrust = true }, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
+            }
         }
         // Right after cloning (or creating) a project: offer to install what it needs.
         val missing = needs
@@ -309,6 +360,10 @@ fun ProjectScreen(
             when (tab) {
                 ProjectTab.Overview -> OverviewTab(
                     dir, git, status, stacks, refreshKey = refreshTick * 1000 + reload,
+                    untrustedRoot = untrustedRoot, onTrust = { askTrust = true },
+                    operation = operation, busy = busy,
+                    onContinueOperation = { op -> runGit(continueLabel(op)) { git.continueOperation(dir, op) } },
+                    onAbortOperation = { op -> runGit("Abort the ${op.label}") { git.abortOperation(dir, op) } },
                     hasWeb = capabilities?.web?.isNotEmpty() == true, setupNeeded = needs.isNotEmpty(), runInTerminal = runInTerminal,
                     onChanges = { tab = ProjectTab.Changes }, onChecks = { tab = ProjectTab.Checks }, onChats = { tab = ProjectTab.Chats },
                     onOpenChat = onOpenChat, onNewChat = onNewChat, onPreview = onPreview, onDatabases = onDatabases,
@@ -320,7 +375,26 @@ fun ProjectScreen(
                     status = status,
                     busy = busy,
                     message = message,
-                    onDismissMessage = { message = null },
+                    onDismissMessage = { message = null; lockedIndex = false },
+                    operation = operation,
+                    onContinueOperation = { op -> runGit(continueLabel(op)) { git.continueOperation(dir, op) } },
+                    onAbortOperation = { op -> runGit("Abort the ${op.label}") { git.abortOperation(dir, op) } },
+                    routineStash = routineStash,
+                    onRestoreStash = { s ->
+                        runGit("Restore your changes") {
+                            val r = git.stashPopSha(dir, s.sha)
+                            if (r.ok) RoutineStashes.clear(context, dir)
+                            r
+                        }
+                    },
+                    onDropStash = { s ->
+                        runGit("Drop the stash") {
+                            val r = git.stashDropSha(dir, s.sha)
+                            if (r.ok) RoutineStashes.clear(context, dir)
+                            r
+                        }
+                    },
+                    onRemoveLock = if (lockedIndex) ({ runGit("Remove the stale lock") { git.removeStaleLock(dir) } }) else null,
                     onInit = { runGit("Initialize") { git.init(dir) } },
                     commitMessage = commitMessage,
                     onCommitMessageChange = { commitMessage = it },
@@ -331,14 +405,14 @@ fun ProjectScreen(
                     // Shown live in a terminal sheet: progress, prompts and git's own messages.
                     onPull = { gitTerminal = "Pull" to listOf("pull", "--ff-only") },
                     onPush = {
-                        status?.let { s ->
+                        status?.takeIf { !it.detached }?.let { s ->
                             gitTerminal = "Push" to if (s.upstream == null) listOf("push", "-u", "origin", "HEAD") else listOf("push")
                         }
                     },
                     onAddGitignore = {
                         scope.launch {
                             git.addDefaultGitignore(dir)
-                            reload++
+                            statusTick++
                         }
                     },
                     onPublish = {
@@ -372,7 +446,7 @@ fun ProjectScreen(
                         }
                     },
                 )
-                ProjectTab.History -> HistoryView(dir, git, status, refreshKey = refreshTick * 1000 + reload)
+                ProjectTab.History -> HistoryView(dir, git, status, refreshKey = gitKey)
                 ProjectTab.Chats -> ChatsTab(dir, onOpenChat)
             }
         }
@@ -441,12 +515,18 @@ fun ProjectScreen(
         GitTerminalSheet(dir, title, args, onDismiss = { gitTerminal = null; reload++ }, onFinished = { reload++ })
     }
 
+    untrustedRoot?.let { root ->
+        if (askTrust) TrustSheet(root, onDismiss = { askTrust = false }) { askTrust = false; trustTick++ }
+    }
+    if (askUntrust && untrustedRoot == null) UntrustSheet(dir, onDismiss = { askUntrust = false }) { askUntrust = false; trustTick++ }
+
     if (showGitActions) status?.takeIf { it.isRepo }?.let { s ->
         val agents by androidx.compose.runtime.produceState(emptyList<Agent>()) {
             value = withContext(Dispatchers.IO) { agentStatuses(paths).filter { it.installed }.map { it.agent } }
         }
         GitActionsSheet(
             dir, git, s, agents,
+            operation = operation,
             onDismiss = { showGitActions = false },
             onChanged = { reload++ },
             onAgentTask = { agent, prompt ->
@@ -497,6 +577,9 @@ private fun Header(
     onBack: () -> Unit,
     onSwitchProject: (File) -> Unit,
     onAllProjects: () -> Unit,
+    trusted: Boolean,
+    /** Trust the project (when it isn't), or mark it untrusted again. */
+    onTrustChange: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -548,6 +631,15 @@ private fun Header(
                     onClick = {
                         menu = false
                         onAllProjects()
+                    },
+                )
+                HorizontalDivider()
+                DropdownMenuItem(
+                    leadingIcon = { PhIcon(if (trusted) Ph.Warning else Ph.ShieldCheck, null, size = 18.dp) },
+                    text = { Text(if (trusted) "Mark ${dir.name} untrusted…" else "Trust ${dir.name}…") },
+                    onClick = {
+                        menu = false
+                        onTrustChange()
                     },
                 )
             }
@@ -624,6 +716,9 @@ private fun SectionTabs(selected: ProjectTab, changeCount: Int, onSelect: (Proje
 }
 
 // ---- Changes -------------------------------------------------------------------------
+
+/** The busy label for finishing [op]. */
+internal fun continueLabel(op: GitOperation) = if (op == GitOperation.Merge) "Conclude the merge" else "Continue the ${op.label}"
 
 /** Git is missing or failed: what happened, and the fix (install the tools, or retry). */
 @Composable

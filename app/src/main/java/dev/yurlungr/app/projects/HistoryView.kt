@@ -72,6 +72,7 @@ import dev.yurlungr.app.ui.SkeletonCode
 import dev.yurlungr.app.ui.SkeletonListItem
 import java.util.Calendar
 import java.util.Date
+import kotlinx.coroutines.launch
 
 /** Lane colors from the Bento tiles; the first (main) lane is lime in dark, ink in light. */
 @Composable
@@ -118,14 +119,45 @@ fun HistoryView(dir: java.io.File, git: Git, status: GitStatus?, refreshKey: Int
     LaunchedEffect(query) { kotlinx.coroutines.delay(350); debouncedQuery = query }
     val filter = HistoryFilter(filterAuthor, filterPeriod, debouncedQuery)
     var authors by remember(dir.path) { mutableStateOf(emptyList<String>()) }
+    /** How many commits git has given so far (before the hash filter), and whether there are more. */
+    var loaded by remember(dir.path) { mutableStateOf(0) }
+    var hasMore by remember(dir.path) { mutableStateOf(false) }
+    var loadingMore by remember { mutableStateOf(false) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
 
     LaunchedEffect(dir, refreshKey, allBranches, status?.isRepo, status?.unborn, filter) {
-        if (status?.isRepo != true || status.unborn) { commits = emptyList(); logError = null; return@LaunchedEffect }
-        git.log(dir, allBranches = allBranches, filter = filter).fold(
-            onSuccess = { list -> commits = list.filter(filter::matchesHash); logError = null },
-            onFailure = { commits = emptyList(); logError = it.message },
+        if (status?.isRepo != true || status.unborn) { commits = emptyList(); logError = null; hasMore = false; return@LaunchedEffect }
+        // A refresh keeps what "Load more" had shown.
+        val count = maxOf(Git.HISTORY_PAGE, loaded)
+        git.log(dir, count = count, allBranches = allBranches, filter = filter).fold(
+            onSuccess = { list ->
+                loaded = list.size
+                hasMore = list.size >= count
+                var shown = list.filter(filter::matchesHash)
+                // A hash older than what's loaded: ask git for that commit directly.
+                val hash = filter.hashQuery
+                if (hash != null && shown.none { it.hash.startsWith(hash) }) {
+                    git.findCommit(dir, hash)?.let { found -> shown = listOf(found) + shown.filter { it.hash != found.hash } }
+                }
+                commits = shown
+                logError = null
+            },
+            onFailure = { commits = emptyList(); logError = it.message; hasMore = false },
         )
         unpushed = if (status.hasOrigin) git.unpushed(dir) else emptySet()
+    }
+    fun loadMore() {
+        if (loadingMore || !hasMore) return
+        loadingMore = true
+        scope.launch {
+            git.log(dir, allBranches = allBranches, filter = filter, skip = loaded).onSuccess { more ->
+                loaded += more.size
+                hasMore = more.size >= Git.HISTORY_PAGE
+                val known = commits.orEmpty().map { it.hash }.toHashSet()
+                commits = commits.orEmpty() + more.filter(filter::matchesHash).filter { it.hash !in known }
+            }
+            loadingMore = false
+        }
     }
     LaunchedEffect(dir, refreshKey, allBranches, status?.isRepo) {
         if (status?.isRepo == true && !status.unborn) authors = git.authors(dir, allBranches)
@@ -177,7 +209,7 @@ fun HistoryView(dir: java.io.File, git: Git, status: GitStatus?, refreshKey: Int
                     commits?.let { c ->
                         Column(horizontalAlignment = Alignment.End) {
                             Text(
-                                "${c.size}${if (c.size >= 300) "+" else ""} ${if (filter.isActive) "matching" else "commits"}",
+                                "${c.size}${if (hasMore) "+" else ""} ${if (filter.isActive) "matching" else "commits"}",
                                 style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant,
                             )
                             if (unpushed.isNotEmpty() && !filter.isActive) {
@@ -204,11 +236,14 @@ fun HistoryView(dir: java.io.File, git: Git, status: GitStatus?, refreshKey: Int
                 }
             }
             items.isEmpty() -> item { EmptyNote(Ph.GitCommit, "No commits yet", "Commit from the Changes tab and it shows up here.") }
-            else -> items(items, key = { it.key }) { item ->
-                when (item) {
-                    is HistoryItem.Day -> DayHeader(item, laneCount)
-                    is HistoryItem.Entry -> CommitRow(item, laneCount, item.commit.hash in unpushed) { open = item.commit }
+            else -> {
+                items(items, key = { it.key }) { item ->
+                    when (item) {
+                        is HistoryItem.Day -> DayHeader(item, laneCount)
+                        is HistoryItem.Entry -> CommitRow(item, laneCount, item.commit.hash in unpushed) { open = item.commit }
+                    }
                 }
+                if (hasMore) item(key = "more") { LoadMore(loadingMore, ::loadMore) }
             }
         }
     }
@@ -221,6 +256,80 @@ fun HistoryView(dir: java.io.File, git: Git, status: GitStatus?, refreshKey: Int
         )
     }
     open?.let { c -> CommitSheet(dir, git, c, c.hash in unpushed) { open = null } }
+}
+
+@Composable
+private fun LoadMore(loading: Boolean, onClick: () -> Unit) {
+    Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+        if (loading) SkeletonListItem()
+        else androidx.compose.material3.FilledTonalButton(onClick = onClick) { Text("Load ${Git.HISTORY_PAGE} more") }
+    }
+}
+
+/**
+ * One file's history (`git log --follow`, so renames don't cut it short), newest first, a page at
+ * a time. Tap a commit for its details and this file's diff in it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FileHistorySheet(dir: java.io.File, git: Git, path: String, onDismiss: () -> Unit) {
+    var commits by remember(path) { mutableStateOf<List<GitCommit>?>(null) }
+    var error by remember(path) { mutableStateOf<String?>(null) }
+    var hasMore by remember(path) { mutableStateOf(false) }
+    var loadingMore by remember { mutableStateOf(false) }
+    var open by remember { mutableStateOf<GitCommit?>(null) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    LaunchedEffect(path) {
+        git.log(dir, path = path).fold(
+            onSuccess = { commits = it; hasMore = it.size >= Git.HISTORY_PAGE },
+            onFailure = { commits = emptyList(); error = it.message },
+        )
+    }
+    fun loadMore() {
+        val shown = commits ?: return
+        if (loadingMore) return
+        loadingMore = true
+        scope.launch {
+            git.log(dir, path = path, skip = shown.size).onSuccess { more ->
+                hasMore = more.size >= Git.HISTORY_PAGE
+                commits = shown + more
+            }
+            loadingMore = false
+        }
+    }
+    // Without lanes: a file's history skips the commits that don't touch it, so a graph would mislead.
+    val items = remember(commits) { commits?.let { c -> buildItems(c.map { it.copy(parents = emptyList()) }) } }
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        LazyColumn(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp)) {
+            item {
+                Column(Modifier.padding(start = 4.dp, bottom = 8.dp)) {
+                    Text("History of ${path.substringAfterLast('/')}", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        listOfNotNull(path.substringBeforeLast('/', "").ifEmpty { null }, commits?.let { "${it.size}${if (hasMore) "+" else ""} commits" })
+                            .joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            val list = items
+            when {
+                list == null -> items(5) { SkeletonListItem() }
+                error != null -> item { EmptyNote(Ph.Warning, "Couldn't read the history", error.orEmpty()) }
+                list.isEmpty() -> item { EmptyNote(Ph.GitCommit, "No commits yet", "This file hasn't been committed.") }
+                else -> {
+                    items(list, key = { it.key }) { item ->
+                        when (item) {
+                            is HistoryItem.Day -> DayHeader(item, 1)
+                            is HistoryItem.Entry -> CommitRow(item, 1, false) { open = item.commit }
+                        }
+                    }
+                    if (hasMore) item(key = "more") { LoadMore(loadingMore, ::loadMore) }
+                }
+            }
+            item { Spacer(Modifier.height(16.dp)) }
+        }
+    }
+    open?.let { c -> CommitSheet(dir, git, c, notPushed = false, focusPath = path) { open = null } }
 }
 
 @Composable
@@ -486,13 +595,18 @@ private data class Quad(val a: String, val b: Color, val c: Color, val d: Boolea
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CommitSheet(dir: java.io.File, git: Git, c: GitCommit, notPushed: Boolean, onDismiss: () -> Unit) {
+private fun CommitSheet(
+    dir: java.io.File, git: Git, c: GitCommit, notPushed: Boolean,
+    /** From a file's history: that file's diff opens straight away. */
+    focusPath: String? = null,
+    onDismiss: () -> Unit,
+) {
     val context = LocalContext.current
     var body by remember { mutableStateOf<String?>(null) }
     var files by remember { mutableStateOf<List<CommitFile>?>(null) }
     var filesError by remember { mutableStateOf<String?>(null) }
     val diffs = remember { mutableStateMapOf<String, String?>() } // path -> diff (null = loading)
-    var openFile by remember { mutableStateOf<String?>(null) }
+    var openFile by remember { mutableStateOf(focusPath) }
     var fullScreen by remember { mutableStateOf<String?>(null) }
     fullScreen?.let { path ->
         diffs[path]?.let { d -> DiffFullScreen(path, "${c.short} · ${c.subject}", d) { fullScreen = null } }
@@ -500,6 +614,8 @@ private fun CommitSheet(dir: java.io.File, git: Git, c: GitCommit, notPushed: Bo
     LaunchedEffect(c.hash) {
         body = git.commitBody(dir, c.hash)
         files = git.commitFiles(dir, c.hash).getOrElse { filesError = it.message; emptyList() }
+        // Followed through a rename: in older commits the file had another name.
+        if (focusPath != null && files?.none { it.path == focusPath } == true) openFile = files?.singleOrNull()?.path
     }
     LaunchedEffect(openFile) {
         val p = openFile ?: return@LaunchedEffect

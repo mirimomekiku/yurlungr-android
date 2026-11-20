@@ -149,11 +149,18 @@ private const val PAGE = 600
 /**
  * A diff as a reader expects it: +/− counts, line numbers for both sides, added and removed lines
  * tinted with the changed words highlighted, hunk headers, and a wrap toggle. Long diffs show
- * [PAGE] lines at a time.
+ * [PAGE] lines at a time. With [hunkAction], each hunk header starts with that button ("Stage
+ * hunk"), calling [onHunk] with the hunk's number.
  */
 @Composable
-fun DiffViewer(diff: String, modifier: Modifier = Modifier) {
+fun DiffViewer(diff: String, modifier: Modifier = Modifier, hunkAction: String? = null, onHunk: (Int) -> Unit = {}) {
     val parsed = remember(diff) { ParsedDiff.parse(diff) }
+    // Line index → hunk number, only when the hunks shown are exactly the ones a patch can be made of.
+    val hunkOf = remember(parsed, hunkAction != null) {
+        val starts = parsed.lines.withIndex().filter { it.value.kind == DiffLine.Kind.Hunk }.map { it.index }
+        if (hunkAction == null || HunkPatch.parse(diff)?.hunks?.size != starts.size) emptyMap()
+        else starts.withIndex().associate { (n, line) -> line to n }
+    }
     val c = palette()
     var wrap by remember { mutableStateOf(false) }
     var shown by remember(diff) { mutableIntStateOf(PAGE) }
@@ -200,13 +207,16 @@ fun DiffViewer(diff: String, modifier: Modifier = Modifier) {
             return@Column
         }
         val visible = parsed.lines.take(shown)
+        fun hunk(index: Int): (() -> Unit)? = hunkOf[index]?.let { n -> { onHunk(n) } }
         if (wrap) {
-            Column(Modifier.fillMaxWidth()) { visible.forEachIndexed { index, line -> DiffRow(line, spans[index], c, numberWidth, true) } }
+            Column(Modifier.fillMaxWidth()) {
+                visible.forEachIndexed { index, line -> DiffRow(line, spans[index], c, numberWidth, true, hunkAction, hunk(index)) }
+            }
         } else {
             // Unwrapped: one horizontal scroll for the whole diff, every row as wide as the longest.
             Box(Modifier.horizontalScroll(rememberScrollState())) {
                 Column(Modifier.width(IntrinsicSize.Max)) {
-                    visible.forEachIndexed { index, line -> DiffRow(line, spans[index], c, numberWidth, false) }
+                    visible.forEachIndexed { index, line -> DiffRow(line, spans[index], c, numberWidth, false, hunkAction, hunk(index)) }
                 }
             }
         }
@@ -247,7 +257,12 @@ fun DiffFullScreen(path: String, subtitle: String?, diff: String, onDismiss: () 
 }
 
 @Composable
-private fun DiffRow(line: DiffLine, span: IntRange?, c: DiffPalette, numberWidth: androidx.compose.ui.unit.Dp, wrap: Boolean) {
+private fun DiffRow(
+    line: DiffLine, span: IntRange?, c: DiffPalette, numberWidth: androidx.compose.ui.unit.Dp, wrap: Boolean,
+    actionLabel: String? = null,
+    /** On a hunk header: the hunk's action (stage or unstage it). */
+    onAction: (() -> Unit)? = null,
+) {
     val (bg, fg, mark, word) = when (line.kind) {
         DiffLine.Kind.Added -> RowStyle(c.addBg, c.addFg, "+", c.addWord)
         DiffLine.Kind.Removed -> RowStyle(c.delBg, c.delFg, "−", c.delWord)
@@ -258,8 +273,15 @@ private fun DiffRow(line: DiffLine, span: IntRange?, c: DiffPalette, numberWidth
     val rowMod = if (wrap) Modifier.fillMaxWidth() else Modifier.fillMaxWidth().widthIn(min = 0.dp)
     Row(rowMod.background(bg)) {
         if (line.kind == DiffLine.Kind.Hunk) {
+            // First in the row, so it's on screen at the start of the horizontal scroll.
+            if (onAction != null && actionLabel != null) {
+                TextButton(onClick = onAction, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
+                    modifier = Modifier.padding(start = 2.dp)) {
+                    Text(actionLabel, fontSize = 12.sp, color = fg, fontWeight = FontWeight.SemiBold)
+                }
+            }
             Text("@@ ${line.text}", color = fg, fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 16.sp,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+                modifier = Modifier.align(Alignment.CenterVertically).padding(horizontal = 8.dp, vertical = 3.dp))
             return@Row
         }
         Number(line.oldNo, numberWidth, c)

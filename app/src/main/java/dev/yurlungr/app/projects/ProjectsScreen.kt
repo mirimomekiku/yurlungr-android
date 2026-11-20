@@ -3,6 +3,7 @@ package dev.yurlungr.app.projects
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Spacer
 import dev.yurlungr.app.ui.PhIcon
+import dev.yurlungr.app.ui.WarningBanner
 import dev.yurlungr.app.ui.Ph
 import androidx.compose.animation.animateContentSize
 import dev.yurlungr.app.ui.SkeletonLine
@@ -101,6 +102,7 @@ private val PROJECT_NAME = Regex("[A-Za-z0-9._-]{1,64}")
 /** Last fetched GitHub repositories, kept across visits so the list doesn't blink. */
 private object RepoCache {
     var repos: List<GhRepo>? = null
+    var orgs: List<String> = emptyList()
 }
 
 private enum class Filter(val label: String) { All("All"), Local("On this phone"), Remote("Not cloned") }
@@ -181,6 +183,7 @@ fun ProjectsScreen(
                                     onSuccess = { list ->
                                         repos = list.repos
                                         RepoCache.repos = list.repos
+                                        RepoCache.orgs = list.orgs
                                         repoError = list.orgError
                                     },
                                     onFailure = { repoError = it.message ?: "Couldn't load GitHub repositories." },
@@ -192,6 +195,7 @@ fun ProjectsScreen(
                         else -> {
                             repos = null
                             RepoCache.repos = null
+                            RepoCache.orgs = emptyList()
                         }
                     }
                 }
@@ -344,6 +348,8 @@ fun ProjectsScreen(
                                 onToggle = { if (open) collapsed += owner else collapsed -= owner },
                             ) { repo ->
                                 val folder = if (File(paths.projects, repo.name).exists()) repo.slug.replace('/', '-') else repo.name
+                                // One of the user's own repositories: trusted, whatever an earlier folder of this name was.
+                                ProjectTrust.forget(context, File(paths.projects, folder))
                                 runInTerminal(
                                     "mkdir -p ~/projects && cd ~/projects && gh repo clone ${shellQuote(repo.slug)} ${shellQuote(folder)}",
                                     "Clone ${repo.name}",
@@ -357,14 +363,26 @@ fun ProjectsScreen(
     }
 
     if (cloning) {
+        // The user's own logins: their account and organisations. Unknown (signed out, offline) is an empty set.
+        val owners = CloneTrust.owners(gh?.account?.takeIf { gh?.signedIn == true }, RepoCache.orgs, repos.orEmpty())
         CloneSheet(
             root = paths.projects,
+            isOwned = { url -> CloneTrust.isOwned(url, owners) },
             onDismiss = { cloning = false },
             onClone = { url, name, thenRun ->
                 cloning = false
+                val dir = File(paths.projects, name)
                 val command = "mkdir -p ~/projects && cd ~/projects && git clone -- ${shellQuote(url)} ${shellQuote(name)}"
-                if (thenRun) ProjectLaunch.cloneThenRun(context, File(paths.projects, name), command, LaunchCallbacks(onOpenProject, runInTerminal, onPreview))
-                else runInTerminal(command, "Clone $name")
+                val callbacks = LaunchCallbacks(onOpenProject, runInTerminal, onPreview)
+                when {
+                    // Someone else's code: marked untrusted, never installed or started by itself.
+                    !CloneTrust.isOwned(url, owners) -> ProjectLaunch.cloneUntrusted(context, dir, command, callbacks, openAfter = thenRun)
+                    thenRun -> ProjectLaunch.cloneThenRun(context, dir, command, callbacks)
+                    else -> {
+                        ProjectTrust.forget(context, dir)
+                        runInTerminal(command, "Clone $name")
+                    }
+                }
             },
         )
     }
@@ -646,7 +664,13 @@ private fun ProjectSheetHeader(title: String, subtitle: String, clone: Boolean, 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CloneSheet(root: File, onDismiss: () -> Unit, onClone: (url: String, name: String, thenRun: Boolean) -> Unit) {
+private fun CloneSheet(
+    root: File,
+    /** Whether a URL is one of the user's own repositories (else it's cloned untrusted). */
+    isOwned: (String) -> Boolean,
+    onDismiss: () -> Unit,
+    onClone: (url: String, name: String, thenRun: Boolean) -> Unit,
+) {
     val context = LocalContext.current
     var url by rememberSaveable { mutableStateOf("") }
     var name by rememberSaveable { mutableStateOf("") }
@@ -681,9 +705,17 @@ private fun CloneSheet(root: File, onDismiss: () -> Unit, onClone: (url: String,
                 keyboardActions = KeyboardActions(onDone = { submit() }),
                 shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth(),
             )
-            CheckRow("Install and run after cloning", "Open it, install what it needs, and start it if it's a web app", thenRun) {
+            val owned = validUrl && isOwned(url.trim())
+            CheckRow(
+                if (owned || !validUrl) "Install and run after cloning" else "Open after cloning",
+                if (owned || !validUrl) "Open it, install what it needs, and start it if it's a web app" else "Open it once cloned; nothing is installed or started",
+                thenRun,
+            ) {
                 thenRun = it
                 ProjectLaunch.setRunAfterClone(context, it)
+            }
+            if (validUrl && !owned) {
+                WarningBanner("Not your repository: cloned as untrusted, so nothing in it runs by itself.")
             }
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Cancel") }

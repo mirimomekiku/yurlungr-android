@@ -63,8 +63,14 @@ data class GitStatus(
     val conflicts: List<String>
         get() = changes.filter { it.isConflict }.map { it.path }
 
+    /** HEAD is a commit, not a branch: there's nothing to push or publish until a branch is made here. */
+    val detached: Boolean get() = isRepo && branch == DETACHED
+
     companion object {
         val NotARepo = GitStatus(isRepo = false)
+
+        /** What [Git.parseStatus] names the branch when HEAD is detached. */
+        const val DETACHED = "detached HEAD"
     }
 }
 
@@ -111,8 +117,11 @@ data class GhStatus(
     val detail: String? = null,
 )
 
-/** The signed-in account's repositories; [orgError] says why some organisations' repos are missing. */
-data class GhRepoList(val repos: List<GhRepo>, val orgError: String? = null)
+/**
+ * The signed-in account's repositories; [orgError] says why some organisations' repos are missing.
+ * [orgs]: the organisations the account belongs to (their logins), to tell the user's own repositories apart.
+ */
+data class GhRepoList(val repos: List<GhRepo>, val orgError: String? = null, val orgs: List<String> = emptyList())
 
 /** A branch; remote ones are named "origin/x" and only listed when there's no local "x". */
 data class GitBranch(val name: String, val isRemote: Boolean, val upstream: String?, val updated: String, val isCurrent: Boolean)
@@ -120,8 +129,55 @@ data class GitBranch(val name: String, val isRemote: Boolean, val upstream: Stri
 /** The pull request of the current branch, from `gh pr view`. */
 data class GitPullRequest(val number: Int, val title: String, val state: String, val url: String, val isDraft: Boolean = false)
 
-/** A stash entry; [ref] is "stash@{n}". */
-data class GitStash(val ref: String, val message: String, val whenRelative: String)
+/**
+ * A stash entry; [ref] is "stash@{n}" when it was listed, and shifts as entries are added or
+ * dropped, so actions go by [sha] (the stash commit), which doesn't. Empty [sha]: not known.
+ */
+data class GitStash(val ref: String, val message: String, val whenRelative: String, val sha: String = "")
+
+/**
+ * A multi-step git command stopped half way, waiting for the conflicts to be resolved. Each is
+ * finished or undone with its own command: committing a rebase by hand, or dropping a stash to
+ * "finish" a cherry-pick, would leave the repository in a worse state.
+ */
+enum class GitOperation(
+    val label: String,
+    /** What finishes it once the conflicts are resolved and staged. */
+    val continueArgs: List<String>,
+    val abortArgs: List<String>,
+) {
+    Merge("merge", listOf("commit", "--no-edit"), listOf("merge", "--abort")),
+    Rebase("rebase", listOf("rebase", "--continue"), listOf("rebase", "--abort")),
+    /** `git am` applying mailed patches (it shares rebase-apply/ with old-style rebases). */
+    ApplyMailbox("patch series (git am)", listOf("am", "--continue"), listOf("am", "--abort")),
+    CherryPick("cherry-pick", listOf("cherry-pick", "--continue"), listOf("cherry-pick", "--abort")),
+    Revert("revert", listOf("revert", "--continue"), listOf("revert", "--abort"));
+
+    val continueCommand: String get() = "git " + continueArgs.joinToString(" ")
+    val abortCommand: String get() = "git " + abortArgs.joinToString(" ")
+
+    companion object {
+        /** The paths [Git.operationInProgress] asks `git rev-parse --git-path` for, in this order. */
+        val GIT_PATHS = listOf("rebase-merge", "rebase-apply", "rebase-apply/applying", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
+
+        /**
+         * Which operation is in progress, from which of [GIT_PATHS] exist. A rebase wins: while
+         * one stops on a conflict it can leave other state files around, but only `rebase
+         * --continue` moves it on.
+         */
+        fun detect(exists: (String) -> Boolean): GitOperation? = when {
+            exists("rebase-merge") -> Rebase
+            exists("rebase-apply") -> if (exists("rebase-apply/applying")) ApplyMailbox else Rebase
+            exists("MERGE_HEAD") -> Merge
+            exists("CHERRY_PICK_HEAD") -> CherryPick
+            exists("REVERT_HEAD") -> Revert
+            else -> null
+        }
+    }
+}
+
+/** A local branch offered for clean-up: [gone] = its upstream was deleted on the remote. */
+data class CleanupBranch(val name: String, val gone: Boolean, val merged: Boolean)
 
 /** A repository on the signed-in GitHub account. [slug] is "owner/name". */
 data class GhRepo(
@@ -144,8 +200,8 @@ class Git(private val paths: RuntimePaths) {
 
     private val env = ENV
 
-    private suspend fun run(dir: File, vararg args: String, timeoutMs: Long = 60_000): CommandResult =
-        CommandRunner.run(paths, listOf(git, "-C", dir.path, *args), cwd = dir, timeoutMs = timeoutMs, extraEnv = env)
+    private suspend fun run(dir: File, vararg args: String, timeoutMs: Long = 60_000, extraEnv: Map<String, String> = emptyMap()): CommandResult =
+        CommandRunner.run(paths, listOf(git, "-C", dir.path, *args), cwd = dir, timeoutMs = timeoutMs, extraEnv = env + extraEnv)
 
     /** For output that gets parsed: exact stdout, stderr kept apart (warnings can't corrupt it), large cap. */
     private suspend fun runParsed(dir: File, vararg args: String, timeoutMs: Long = 60_000): CommandResult =
@@ -174,11 +230,13 @@ class Git(private val paths: RuntimePaths) {
         return if (result.ok) FileTreeGitState.parseIgnoredPaths(result.output) else null
     }
 
-    /** Unified diff of one change against HEAD, or the whole file for new/unborn files. */
-    suspend fun diff(dir: File, change: GitChange, unborn: Boolean): String {
-        if (change.untracked || unborn) return addedFileDiff(File(dir, change.path))
-        val r = run(dir, "diff", "--no-color", "--no-ext-diff", "HEAD", "--", change.path)
-        return r.output.ifBlank { "(no textual changes)" }
+    /**
+     * Unified diff of one change: against HEAD ([DiffSide.All]), or only its staged or unstaged
+     * part, which is what hunk staging applies to the index. New and unborn files are listed whole.
+     */
+    suspend fun diff(dir: File, change: GitChange, unborn: Boolean, side: DiffSide = DiffSide.All): String {
+        if (change.untracked || (unborn && side != DiffSide.Staged)) return addedFileDiff(File(dir, change.path))
+        return diffOutput(runParsed(dir, *diffArgs(change.path, side).toTypedArray()), "git diff")
     }
 
     private suspend fun addedFileDiff(file: File): String = withContext(Dispatchers.IO) {
@@ -196,13 +254,31 @@ class Git(private val paths: RuntimePaths) {
     }
 
     /** Newest first, topologically ordered (children before parents) for the graph. */
-    suspend fun log(dir: File, count: Int = 300, allBranches: Boolean = false, filter: HistoryFilter = HistoryFilter()): Result<List<GitCommit>> {
-        val args = mutableListOf("log", "-n", count.toString(), "--topo-order", "--no-color", "--pretty=format:%H%x1f%P%x1f%an%x1f%ct%x1f%D%x1f%s%x1e")
-        if (allBranches) args += "--all"
-        args += filter.gitArgs()
-        val r = runParsed(dir, *args.toTypedArray())
+    suspend fun log(
+        dir: File,
+        count: Int = HISTORY_PAGE,
+        allBranches: Boolean = false,
+        filter: HistoryFilter = HistoryFilter(),
+        /** Commits after the first [skip] ("Load more"). */
+        skip: Int = 0,
+        /** One file's history, following renames. */
+        path: String? = null,
+    ): Result<List<GitCommit>> {
+        val r = runParsed(dir, *logArgs(count, allBranches, filter, skip, path).toTypedArray())
         if (!r.ok) return failure(r, "git log")
         return Result.success(parseLog(r.output))
+    }
+
+    /**
+     * The commit a hash (prefix) names, anywhere in the repository: history search only looks at
+     * the commits it loaded, so an older one is looked up directly. Null when there's no such commit.
+     */
+    suspend fun findCommit(dir: File, hash: String): GitCommit? {
+        if (!HEX.matches(hash)) return null
+        val full = runParsed(dir, "rev-parse", "--verify", "--quiet", "$hash^{commit}", timeoutMs = 10_000)
+            .takeIf { it.ok }?.output?.trim()?.takeIf { it.length == 40 } ?: return null
+        val r = runParsed(dir, "log", "-n", "1", "--no-color", LOG_FORMAT, full, timeoutMs = 10_000)
+        return if (r.ok) parseLog(r.output).firstOrNull() else null
     }
 
     /** Commit authors, most commits first (for the history's author filter). */
@@ -233,10 +309,18 @@ class Git(private val paths: RuntimePaths) {
         return Result.success(parseNameStatus(r.output))
     }
 
-    suspend fun commitDiff(dir: File, hash: String, path: String): String =
-        run(dir, "diff-tree", "--root", "-p", "--no-color", "-m", "--first-parent", hash, "--", path).output
-            .lines().dropWhile { it.length == 40 && it.all(Char::isLetterOrDigit) }.joinToString("\n")
-            .ifBlank { "(no textual changes)" }
+    suspend fun commitDiff(dir: File, hash: String, path: String): String {
+        val r = runParsed(dir, "diff-tree", "--root", "-p", "--no-color", "--no-ext-diff", "-m", "--first-parent", hash, "--", path)
+        if (!r.ok) return diffOutput(r, "git diff-tree")
+        // diff-tree starts with the commit's id: not part of the diff.
+        return diffOutput(r.copy(output = r.output.lines().dropWhile { it.length == 40 && it.all(Char::isLetterOrDigit) }.joinToString("\n")), "git diff-tree")
+    }
+
+    /** A diff for showing: capped at [MAX_DIFF_CHARS] with a note saying how much more there is; git's error when it failed. */
+    private fun diffOutput(r: CommandResult, what: String): String = when {
+        !r.ok -> "(couldn't show the changes)\n… " + r.describe(what).lines().joinToString(" ")
+        else -> capDiff(r.output, r.truncated).ifBlank { "(no textual changes)" }
+    }
 
     suspend fun init(dir: File): CommandResult {
         dir.mkdirs()
@@ -257,15 +341,15 @@ class Git(private val paths: RuntimePaths) {
     suspend fun commitAll(dir: File, message: String): CommandResult {
         // `add -A` would mark conflicted files resolved, markers and all.
         unresolved(dir)?.let { return it }
-        val add = run(dir, "add", "-A")
+        val add = run(dir, "add", "-A", timeoutMs = WRITE_TIMEOUT_MS)
         if (!add.ok) return add
         markersStaged(dir)?.let { return it }
-        return run(dir, "commit", "-m", message)
+        return run(dir, "commit", "-m", message, timeoutMs = WRITE_TIMEOUT_MS)
     }
 
-    /** Commits only what's staged. */
+    /** Commits only what's staged. Hooks (lint-staged, tests) can take minutes on a phone: a long limit. */
     suspend fun commitStaged(dir: File, message: String): CommandResult =
-        markersStaged(dir) ?: run(dir, "commit", "-m", message)
+        markersStaged(dir) ?: run(dir, "commit", "-m", message, timeoutMs = WRITE_TIMEOUT_MS)
 
     /** A failure naming the files git still has as unmerged, or null when there are none. */
     private suspend fun unresolved(dir: File): CommandResult? {
@@ -286,14 +370,14 @@ class Git(private val paths: RuntimePaths) {
 
     /** Stages [paths] (including deletions). */
     suspend fun stage(dir: File, paths: List<String>): CommandResult =
-        if (paths.isEmpty()) CommandResult(exitCode = 0, output = "") else run(dir, "add", "-A", "--", *paths.toTypedArray())
+        if (paths.isEmpty()) CommandResult(exitCode = 0, output = "") else run(dir, "add", "-A", "--", *paths.toTypedArray(), timeoutMs = WRITE_TIMEOUT_MS)
 
     /** Takes [paths] out of the next commit, keeping the file changes. */
     suspend fun unstage(dir: File, paths: List<String>, unborn: Boolean): CommandResult = when {
         paths.isEmpty() -> CommandResult(exitCode = 0, output = "")
         // No HEAD to restore from yet: just drop them from the index.
-        unborn -> run(dir, "rm", "--cached", "-r", "-q", "--", *paths.toTypedArray())
-        else -> run(dir, "restore", "--staged", "--", *paths.toTypedArray())
+        unborn -> run(dir, "rm", "--cached", "-r", "-q", "--", *paths.toTypedArray(), timeoutMs = WRITE_TIMEOUT_MS)
+        else -> run(dir, "restore", "--staged", "--", *paths.toTypedArray(), timeoutMs = WRITE_TIMEOUT_MS)
     }
 
     /** Throws away a file's changes: untracked files are deleted, others go back to HEAD. */
@@ -319,7 +403,7 @@ class Git(private val paths: RuntimePaths) {
      * work always lands; conflicts are left for the user or an agent to resolve. --no-edit: no
      * editor can open here.
      */
-    suspend fun pullMerge(dir: File): CommandResult = run(dir, "pull", "--no-rebase", "--no-edit", timeoutMs = 300_000)
+    suspend fun pullMerge(dir: File): CommandResult = run(dir, "pull", "--no-rebase", "--no-edit", timeoutMs = WRITE_TIMEOUT_MS)
 
     /** The current commit's hash, or null (no commits yet, or git failed). */
     suspend fun head(dir: File): String? =
@@ -329,20 +413,83 @@ class Git(private val paths: RuntimePaths) {
     suspend fun countCommits(dir: File, from: String, to: String): Int =
         runParsed(dir, "rev-list", "--count", "$from..$to").takeIf { it.ok }?.output?.trim()?.toIntOrNull() ?: 0
 
-    /** Re-applies and drops the newest stash; on a conflict git keeps it (stash@{0}). */
-    suspend fun stashPopLatest(dir: File): CommandResult = run(dir, "stash", "pop")
-
     /** Undoes the last commit but keeps its changes, staged. */
-    suspend fun undoLastCommit(dir: File): CommandResult = run(dir, "reset", "--soft", "HEAD~1")
+    suspend fun undoLastCommit(dir: File): CommandResult = run(dir, "reset", "--soft", "HEAD~1", timeoutMs = WRITE_TIMEOUT_MS)
 
-    /** A merge is half done (after a conflicted pull): it needs resolving and committing. */
-    suspend fun mergeInProgress(dir: File): Boolean {
-        // --git-path: .git may be a file pointing elsewhere (worktrees, submodules).
-        val r = runParsed(dir, "rev-parse", "--git-path", "MERGE_HEAD", timeoutMs = 10_000)
-        val path = r.output.trim()
-        if (!r.ok || path.isEmpty()) return withContext(Dispatchers.IO) { File(dir, ".git/MERGE_HEAD").exists() }
-        val f = File(path).let { if (it.isAbsolute) it else File(dir, path) }
-        return withContext(Dispatchers.IO) { f.exists() }
+    /**
+     * Whether [commit] is on any remote-tracking branch (of any remote, not just origin): then
+     * someone else may have it. Unknown (git failed) counts as yes, the safe answer.
+     */
+    suspend fun onAnyRemote(dir: File, commit: String): Boolean {
+        val r = runParsed(dir, "for-each-ref", "--contains", commit, "--count=1", "--format=%(refname)", "refs/remotes", timeoutMs = 30_000)
+        return !r.ok || r.output.isNotBlank()
+    }
+
+    /** Where git keeps each of [names] for this repository (`.git` may be a file pointing elsewhere: worktrees, submodules). */
+    private suspend fun gitPaths(dir: File, names: List<String>): List<File>? {
+        val args = names.flatMap { listOf("--git-path", it) }
+        val r = runParsed(dir, "rev-parse", *args.toTypedArray(), timeoutMs = 10_000)
+        val lines = r.output.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        if (!r.ok || lines.size != names.size) return null
+        return lines.map { p -> File(p).let { if (it.isAbsolute) it else File(dir, p) } }
+    }
+
+    /** The merge, rebase, cherry-pick or revert waiting to be finished, or null when there's none. */
+    suspend fun operationInProgress(dir: File): GitOperation? {
+        if (!File(dir, ".git").exists()) return null
+        val files = gitPaths(dir, GitOperation.GIT_PATHS) ?: GitOperation.GIT_PATHS.map { File(dir, ".git/$it") }
+        val found = withContext(Dispatchers.IO) { GitOperation.GIT_PATHS.zip(files).filter { (_, f) -> f.exists() }.map { it.first }.toSet() }
+        return GitOperation.detect { it in found }
+    }
+
+    /**
+     * Finishes [op] once its conflicts are resolved. No editor can open here, so git keeps the
+     * message it prepared (GIT_EDITOR=true); unmerged files or markers in staged files stop it first.
+     */
+    suspend fun continueOperation(dir: File, op: GitOperation): CommandResult {
+        unresolved(dir)?.let { return it }
+        markersStaged(dir)?.let { return it }
+        return run(dir, *op.continueArgs.toTypedArray(), timeoutMs = WRITE_TIMEOUT_MS, extraEnv = mapOf("GIT_EDITOR" to "true"))
+    }
+
+    /** Undoes [op]: the branch goes back to where it was before it started. */
+    suspend fun abortOperation(dir: File, op: GitOperation): CommandResult =
+        run(dir, *op.abortArgs.toTypedArray(), timeoutMs = WRITE_TIMEOUT_MS)
+
+    /**
+     * Applies [patch] (one hunk, from [HunkPatch]) to the index only: stages it, or with
+     * [reverse] unstages it. The file on disk isn't touched. The patch goes through a file, so
+     * CRs and a missing final newline reach git exactly.
+     */
+    suspend fun applyToIndex(dir: File, patch: String, reverse: Boolean): CommandResult {
+        val file = withContext(Dispatchers.IO) {
+            runCatching {
+                val tmp = paths.tmp.takeIf { it.isDirectory || it.mkdirs() } ?: paths.filesDir
+                File.createTempFile("hunk-", ".patch", tmp).apply { writeBytes(patch.toByteArray(Charsets.UTF_8)) }
+            }
+        }.getOrElse { return CommandResult(exitCode = 1, output = "Couldn't write the patch: ${it.message}") }
+        return try {
+            run(dir, *applyArgs(file.path, reverse).toTypedArray(), timeoutMs = WRITE_TIMEOUT_MS)
+        } finally {
+            withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) { file.delete() }
+        }
+    }
+
+    /**
+     * Removes the index.lock a killed git left behind, after checking that no git is running in
+     * this repository (a live one holds it on purpose). The result says what happened.
+     */
+    suspend fun removeStaleLock(dir: File): CommandResult {
+        val lock = gitPaths(dir, listOf("index.lock"))?.single() ?: File(dir, ".git/index.lock")
+        return withContext(Dispatchers.IO) {
+            when {
+                !lock.exists() -> CommandResult(exitCode = 0, output = "The lock is already gone. Try again.")
+                GitLock.gitRunningIn(dir) -> CommandResult(exitCode = 1,
+                    output = "Git is still running in this project (another command, or an agent). Wait for it to finish: it removes the lock itself.")
+                lock.delete() -> CommandResult(exitCode = 0, output = "Removed the stale lock. Try again.")
+                else -> CommandResult(exitCode = 1, output = "Couldn't remove ${lock.path}.")
+            }
+        }
     }
 
     // ---- Branches & stash --------------------------------------------------------------------
@@ -362,24 +509,67 @@ class Git(private val paths: RuntimePaths) {
     suspend fun fetch(dir: File): CommandResult = run(dir, "fetch", "--prune", "--quiet", timeoutMs = 120_000)
 
     suspend fun switchTo(dir: File, branch: GitBranch): CommandResult =
-        if (branch.isRemote) run(dir, "switch", "--track", branch.name) // creates the local branch
-        else run(dir, "switch", branch.name)
+        if (branch.isRemote) run(dir, "switch", "--track", branch.name, timeoutMs = WRITE_TIMEOUT_MS) // creates the local branch
+        else run(dir, "switch", branch.name, timeoutMs = WRITE_TIMEOUT_MS)
 
-    suspend fun createBranch(dir: File, name: String): CommandResult = run(dir, "switch", "-c", name)
+    suspend fun createBranch(dir: File, name: String): CommandResult = run(dir, "switch", "-c", name, timeoutMs = WRITE_TIMEOUT_MS)
+
+    suspend fun renameBranch(dir: File, from: String, to: String): CommandResult = run(dir, "branch", "-m", from, to)
+
+    /**
+     * Local branches that can probably go: merged into HEAD, or whose upstream was deleted on the
+     * remote ("gone", typically after its pull request was merged). Never the current branch, nor
+     * the usual long-lived ones (main, master, develop…), which are "merged" into any branch made from them.
+     */
+    suspend fun cleanupCandidates(dir: File): Result<List<CleanupBranch>> {
+        val all = runParsed(dir, "for-each-ref", "--format=%(refname:short)%1f%(upstream:track)%1f%(HEAD)", "refs/heads")
+        if (!all.ok) return failure(all, "git for-each-ref")
+        val merged = runParsed(dir, "for-each-ref", "--merged=HEAD", "--format=%(refname:short)", "refs/heads")
+        if (!merged.ok) return failure(merged, "git for-each-ref --merged")
+        return Result.success(parseCleanup(all.output, merged.output))
+    }
+
+    /** `git branch -d` (refuses to lose unmerged work), or with [force] `-D` (deletes it anyway). */
+    suspend fun deleteBranch(dir: File, name: String, force: Boolean): CommandResult =
+        run(dir, "branch", if (force) "-D" else "-d", name)
 
     suspend fun stashes(dir: File): Result<List<GitStash>> {
-        val r = runParsed(dir, "stash", "list", "--format=%gd%x1f%s%x1f%cr")
+        val r = runParsed(dir, "stash", "list", "--format=%gd%x1f%H%x1f%s%x1f%cr")
         if (!r.ok) return failure(r, "git stash list")
-        return Result.success(r.output.lines().mapNotNull { line ->
-            val f = line.split('\u001f')
-            if (f.size == 3) GitStash(f[0], f[1], f[2]) else null
-        })
+        return Result.success(parseStashList(r.output))
     }
 
     /** Stashes everything, untracked files included. */
     suspend fun stash(dir: File, message: String): CommandResult =
-        if (message.isBlank()) run(dir, "stash", "push", "--include-untracked")
-        else run(dir, "stash", "push", "--include-untracked", "-m", message)
+        if (message.isBlank()) run(dir, "stash", "push", "--include-untracked", timeoutMs = WRITE_TIMEOUT_MS)
+        else run(dir, "stash", "push", "--include-untracked", "-m", message, timeoutMs = WRITE_TIMEOUT_MS)
+
+    /**
+     * The current "stash@{n}" of the entry whose commit is [sha], checked again just before use:
+     * positions shift whenever anything (another screen, an agent) stashes or drops.
+     */
+    private suspend fun stashRef(dir: File, sha: String): String? {
+        val r = runParsed(dir, "stash", "list", "--format=%gd%x1f%H")
+        if (!r.ok) return null
+        val ref = stashRefIn(r.output, sha) ?: return null
+        val now = runParsed(dir, "rev-parse", "-q", "--verify", ref).output.trim()
+        return ref.takeIf { now == sha }
+    }
+
+    /** Whether the stash entry with commit [sha] is still in the list; null when git couldn't say. */
+    suspend fun hasStash(dir: File, sha: String): Boolean? {
+        val r = runParsed(dir, "stash", "list", "--format=%H")
+        return if (r.ok) r.output.lines().any { it.trim() == sha } else null
+    }
+
+    private suspend fun stashBySha(dir: File, action: String, sha: String): CommandResult {
+        val ref = stashRef(dir, sha)
+            ?: return CommandResult(exitCode = 1, output = "That stash entry isn't there any more (it was popped or dropped elsewhere).")
+        return run(dir, "stash", action, ref, timeoutMs = WRITE_TIMEOUT_MS)
+    }
+
+    suspend fun stashPopSha(dir: File, sha: String): CommandResult = stashBySha(dir, "pop", sha)
+    suspend fun stashDropSha(dir: File, sha: String): CommandResult = stashBySha(dir, "drop", sha)
 
     /** The commit stash@{0} points at, or null when there are no stashes. */
     suspend fun stashTop(dir: File): String? =
@@ -396,14 +586,23 @@ class Git(private val paths: RuntimePaths) {
         return r to stashCreated(before, stashTop(dir))
     }
 
-    suspend fun stashPop(dir: File, stash: GitStash): CommandResult = run(dir, "stash", "pop", stash.ref)
-    suspend fun stashApply(dir: File, stash: GitStash): CommandResult = run(dir, "stash", "apply", stash.ref)
-    suspend fun stashDrop(dir: File, stash: GitStash): CommandResult = run(dir, "stash", "drop", stash.ref)
+    /** Acts on [stash] by its commit when known, so a list that went stale can't hit another entry. */
+    suspend fun stashPop(dir: File, stash: GitStash): CommandResult =
+        if (stash.sha.isNotEmpty()) stashBySha(dir, "pop", stash.sha) else run(dir, "stash", "pop", stash.ref, timeoutMs = WRITE_TIMEOUT_MS)
+    suspend fun stashApply(dir: File, stash: GitStash): CommandResult =
+        if (stash.sha.isNotEmpty()) stashBySha(dir, "apply", stash.sha) else run(dir, "stash", "apply", stash.ref, timeoutMs = WRITE_TIMEOUT_MS)
+    suspend fun stashDrop(dir: File, stash: GitStash): CommandResult =
+        if (stash.sha.isNotEmpty()) stashBySha(dir, "drop", stash.sha) else run(dir, "stash", "drop", stash.ref)
 
-    suspend fun identity(): Pair<String, String> {
-        val home = paths.home
-        val name = run(home, "config", "--global", "user.name").output.trim()
-        val email = run(home, "config", "--global", "user.email").output.trim()
+    /**
+     * The name and email a commit in [dir] would use: git's effective config there (the
+     * repository's own, includes, then global), not just the global one. Global when [dir] is null.
+     */
+    suspend fun identity(dir: File? = null): Pair<String, String> {
+        val where = dir ?: paths.home
+        val scope = if (dir == null) arrayOf("--global") else emptyArray()
+        val name = runParsed(where, "config", *scope, "--get", "user.name").output.trim()
+        val email = runParsed(where, "config", *scope, "--get", "user.email").output.trim()
         return name to email
     }
 
@@ -450,7 +649,7 @@ class Git(private val paths: RuntimePaths) {
                 orgLists.first { it.isFailure }.exceptionOrNull()?.message
             else -> null
         }
-        Result.success(GhRepoList((mine + orgRepos).distinctBy { it.slug.lowercase() }.sortedByDescending { it.updatedAt }, orgError))
+        Result.success(GhRepoList((mine + orgRepos).distinctBy { it.slug.lowercase() }.sortedByDescending { it.updatedAt }, orgError, orgs))
     }
 
     private suspend fun runGh(dir: File, vararg args: String, timeoutMs: Long = 60_000): CommandResult? {
@@ -495,6 +694,111 @@ class Git(private val paths: RuntimePaths) {
         val ENV: Map<String, String> = mapOf(
             "GIT_TERMINAL_PROMPT" to "0", "GIT_PAGER" to "cat", "PAGER" to "cat", "GIT_LITERAL_PATHSPECS" to "1",
         )
+
+        /** Commits per history page ("Load more" fetches the next). */
+        const val HISTORY_PAGE = 300
+
+        /**
+         * For git commands that change things and may run hooks (commit, add, stash, merge, pull):
+         * pre-commit hooks running linters or tests take minutes on a phone, and killing git half
+         * way leaves a stale index.lock or a half-made merge.
+         */
+        const val WRITE_TIMEOUT_MS = 20 * 60_000L
+
+        /** Diffs longer than this are cut, with a note saying how much more there is. */
+        const val MAX_DIFF_CHARS = 512 * 1024
+
+        /** Starts the note [capDiff] adds; a diff with it is incomplete (hunks can't be staged from it). */
+        const val DIFF_TRUNCATED = "… Diff truncated"
+
+        private val HEX = Regex("^[0-9a-fA-F]{4,40}$")
+
+        internal const val LOG_FORMAT = "--pretty=format:%H%x1f%P%x1f%an%x1f%ct%x1f%D%x1f%s%x1e"
+
+        /** Arguments for [log]: a page of history, or one file's (renames followed). */
+        fun logArgs(count: Int, allBranches: Boolean, filter: HistoryFilter, skip: Int = 0, path: String? = null): List<String> = buildList {
+            addAll(listOf("log", "-n", count.toString()))
+            if (skip > 0) add("--skip=$skip")
+            // --follow needs a single path and a plain walk; the graph isn't drawn for one file anyway.
+            if (path == null) add("--topo-order")
+            addAll(listOf("--no-color", LOG_FORMAT))
+            if (allBranches && path == null) add("--all")
+            addAll(filter.gitArgs())
+            if (path != null) addAll(listOf("--follow", "--", path))
+        }
+
+        /**
+         * `git diff` arguments for one path. Fixed a/ b/ prefixes, no textconv or external
+         * diff: whatever the user's config, the text must be a patch `git apply` takes back.
+         */
+        fun diffArgs(path: String, side: DiffSide): List<String> = buildList {
+            addAll(listOf("diff", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"))
+            when (side) {
+                DiffSide.All -> add("HEAD")
+                DiffSide.Staged -> add("--cached")
+                DiffSide.Unstaged -> Unit
+            }
+            addAll(listOf("--", path))
+        }
+
+        /** `git apply` arguments for one hunk's patch file, into the index only. */
+        fun applyArgs(patchFile: String, reverse: Boolean): List<String> = buildList {
+            // nowarn: a user's apply.whitespace=error mustn't refuse their own trailing spaces.
+            addAll(listOf("apply", "--cached", "--whitespace=nowarn"))
+            if (reverse) add("--reverse")
+            add(patchFile)
+        }
+
+        /**
+         * [text] cut at a line end once it passes [max] characters, with a note saying how much is
+         * left out. [alreadyCut]: the runner itself stopped reading, so the rest is unknown.
+         */
+        fun capDiff(text: String, alreadyCut: Boolean = false, max: Int = MAX_DIFF_CHARS): String {
+            if (text.length <= max && !alreadyCut) return text
+            if (text.length <= max) return text.trimEnd('\n') + "\n$DIFF_TRUNCATED: the rest wasn't read.\n"
+            val end = text.lastIndexOf('\n', max).takeIf { it > 0 } ?: max
+            val rest = text.substring(end).toByteArray(Charsets.UTF_8).size
+            val kb = (rest + 1023) / 1024
+            return text.substring(0, end) + "\n$DIFF_TRUNCATED — " + (if (alreadyCut) "over " else "") + "$kb KB more. Open the file to see all of it.\n"
+        }
+
+        /** Parses `git stash list --format=%gd%x1f%H%x1f%s%x1f%cr`. */
+        fun parseStashList(text: String): List<GitStash> = text.lines().mapNotNull { line ->
+            val f = line.split('\u001f')
+            if (f.size == 4 && f[1].length >= 40) GitStash(f[0], f[2], f[3], f[1]) else null
+        }
+
+        /** In `git stash list --format=%gd%x1f%H` output, the "stash@{n}" whose commit is [sha]. */
+        fun stashRefIn(text: String, sha: String): String? = text.lines().firstNotNullOfOrNull { line ->
+            val f = line.split('\u001f')
+            f.getOrNull(0)?.takeIf { f.size == 2 && f[1].trim() == sha && it.startsWith("stash@{") }
+        }
+
+        /** Branch names nobody means to clean up, though they're "merged" into every branch made from them. */
+        private val LONG_LIVED = setOf("main", "master", "develop", "development", "dev", "trunk", "release", "staging", "production", "gh-pages")
+
+        /**
+         * Joins `for-each-ref --format=%(refname:short)%1f%(upstream:track)%1f%(HEAD)` ([all]) with
+         * the names merged into HEAD ([merged]): candidates for clean-up, merged or gone, never the
+         * current branch or a long-lived one.
+         */
+        fun parseCleanup(all: String, merged: String): List<CleanupBranch> {
+            val mergedNames = merged.lines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+            return all.lines().mapNotNull { line ->
+                val f = line.split('\u001f')
+                if (f.size != 3) return@mapNotNull null
+                val name = f[0].trim()
+                if (name.isEmpty() || f[2].trim() == "*" || name in LONG_LIVED) return@mapNotNull null
+                val gone = f[1].trim() == "[gone]"
+                val isMerged = name in mergedNames
+                if (gone || isMerged) CleanupBranch(name, gone, isMerged) else null
+            }
+        }
+
+        private val INDEX_LOCK = Regex("""Unable to create '[^']*index\.lock': File exists""")
+
+        /** Whether [output] is git refusing to run because index.lock exists (another git running, or a killed one's leftover). */
+        fun mentionsIndexLock(output: String): Boolean = INDEX_LOCK.containsMatchIn(output)
 
         /** Whether `git stash push` made an entry: refs/stash moved (it exits 0 with "No local changes to save" too). */
         fun stashCreated(before: String?, after: String?): Boolean = after != null && after != before
@@ -682,7 +986,7 @@ class Git(private val paths: RuntimePaths) {
                                 unborn = true
                                 branch = h.removePrefix("No commits yet on ")
                             }
-                            h.startsWith("HEAD (no branch)") -> branch = "detached HEAD"
+                            h.startsWith("HEAD (no branch)") -> branch = GitStatus.DETACHED
                             else -> HEADER.find(h)?.let { m ->
                                 branch = m.groupValues[1]
                                 upstream = m.groupValues[2].ifEmpty { null }

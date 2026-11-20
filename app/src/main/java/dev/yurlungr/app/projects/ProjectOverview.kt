@@ -129,12 +129,24 @@ internal fun OverviewTab(
     onSetup: () -> Unit,
     onDependencies: () -> Unit,
     onFreeSpace: () -> Unit,
+    /** The untrusted project folder this is in, or null when it's trusted. */
+    untrustedRoot: File? = null,
+    onTrust: () -> Unit = {},
+    /** The merge, rebase, cherry-pick or revert waiting to be finished. */
+    operation: GitOperation? = null,
+    busy: String? = null,
+    onContinueOperation: (GitOperation) -> Unit = {},
+    onAbortOperation: (GitOperation) -> Unit = {},
 ) {
     LazyColumn(
         contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
+        untrustedRoot?.let { root -> item(key = "trust") { UntrustedBanner(root, compact = false, onTrust = onTrust) } }
+        if (operation != null && status != null) {
+            item(key = "operation") { OperationBanner(operation, status, busy, onContinueOperation, onAbortOperation) }
+        }
         item(key = "git") { GitCard(dir, git, status, onChanges) }
         item(key = "checks") { ChecksCard(dir, stacks, refreshKey, runInTerminal, onChecks) }
         if (hasWeb || WebRunSessions.get(dir) != null) item(key = "server") { ServerCard(dir, onPreview) }

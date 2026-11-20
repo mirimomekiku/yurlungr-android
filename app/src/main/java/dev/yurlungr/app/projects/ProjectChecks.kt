@@ -77,6 +77,28 @@ object ProjectChecks {
     fun testsLog(root: File) = File(root, "$DIR/tests.log")
     fun resultsDir(root: File) = File(root, "$DIR/test-results")
 
+    /** How much of a check or test log is read: its end, where the errors and the summary are. */
+    const val MAX_LOG_BYTES = 2 * 1024 * 1024
+    /** Reports (JUnit XML, Jest JSON) bigger than this are skipped: cut short they wouldn't parse anyway. */
+    const val MAX_REPORT_BYTES = 8L * 1024 * 1024
+
+    /**
+     * The last [max] bytes of [file] as text (all of it when it's smaller), starting at a line:
+     * a runaway log (a watch mode left on, a test printing in a loop) mustn't be read whole on every refresh.
+     */
+    fun readTail(file: File, max: Int = MAX_LOG_BYTES): String {
+        if (!file.isFile) return ""
+        val length = file.length()
+        if (length <= max) return file.readText()
+        val bytes = ByteArray(max)
+        java.io.RandomAccessFile(file, "r").use { raf ->
+            raf.seek(length - max)
+            raf.readFully(bytes)
+        }
+        val text = String(bytes, Charsets.UTF_8)
+        return text.substring(text.indexOf('\n') + 1)
+    }
+
     private fun deps(dir: File): Set<String> = runCatching {
         val o = Json.parseToJsonElement(File(dir, "package.json").readText()) as JsonObject
         listOf("dependencies", "devDependencies").flatMap { (o[it] as? JsonObject)?.keys.orEmpty() }.toSet()
@@ -283,13 +305,13 @@ object ProjectChecks {
                 .filter { it.isFile && it.extension == "xml" && it.parentFile?.parentFile?.name == "test-results" && it.lastModified() >= since }
                 .forEach { files += it }
         }
-        return files.flatMap { f ->
+        return files.filter { it.length() <= MAX_REPORT_BYTES }.flatMap { f ->
             when (f.extension) {
                 "xml" -> parseJunit(f.readText())
                 "json" -> parseJest(f.readText())
                 else -> emptyList()
             }
-        } + parseTextTests(testsLog(root).readText())
+        } + parseTextTests(readTail(testsLog(root)))
     }
 
     /** A path from a report, found under [root] (reports often give only a file name). */
@@ -328,7 +350,7 @@ internal fun ChecksTab(
         withContext(Dispatchers.IO) {
             val log = ProjectChecks.problemsLog(root)
             // The log may be mid-rewrite by a running check: unreadable just means no results yet.
-            problems = if (log.isFile) runCatching { ProjectChecks.parseProblems(log.readText(), root) }.getOrNull() else null
+            problems = if (log.isFile) runCatching { ProjectChecks.parseProblems(ProjectChecks.readTail(log), root) }.getOrNull() else null
             checkedAt = log.takeIf { it.isFile }?.lastModified()
             tests = runCatching { ProjectChecks.loadTests(root, stacks) }.getOrNull()?.takeIf { ProjectChecks.testsLog(root).isFile }
             testedAt = ProjectChecks.testsLog(root).takeIf { it.isFile }?.lastModified()

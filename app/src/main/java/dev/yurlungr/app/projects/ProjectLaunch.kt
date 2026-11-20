@@ -68,6 +68,8 @@ internal object ProjectLaunch {
             check(dir.parentFile?.let { it.isDirectory || it.mkdirs() } == true) { "Couldn't open the projects folder." }
             check(!dir.exists()) { "A project with this name already exists." }
             check(dir.mkdir()) { "Couldn't create the folder. Check free storage and try again." }
+            // Made here, from a template: trusted, whatever an earlier folder of this name was.
+            ProjectTrust.forget(context, dir)
             if (!template.isEmpty) for ((path, text) in Templates.allFiles(template, names)) {
                 val file = File(dir, path)
                 check(file.canonicalPath.startsWith(dir.canonicalPath + File.separator)) { "Bad template path: $path" }
@@ -105,9 +107,33 @@ internal object ProjectLaunch {
         }
     }
 
+    /**
+     * Clones someone else's repository: the folder is marked untrusted ([ProjectTrust]) before
+     * anything runs, and nothing is installed or started. With [openAfter], the project opens
+     * once cloned, where its banner explains what's held back. A clone that left no folder
+     * clears the mark again, so a later project of that name starts fresh.
+     */
+    fun cloneUntrusted(context: Context, dir: File, command: String, callbacks: LaunchCallbacks, openAfter: Boolean) {
+        val app = context.applicationContext
+        ProjectTrust.markUntrusted(app, dir)
+        launch(dir) {
+            val ok = runAndWait(app, command, "Clone ${dir.name}", callbacks)
+            if (!withContext(Dispatchers.IO) { dir.isDirectory }) {
+                ProjectTrust.forget(app, dir)
+                return@launch
+            }
+            if (ok == true && openAfter) {
+                callbacks.openProject(dir)
+                toast(app, "${dir.name} isn't your repository, so nothing was installed or started. Look through it, then trust it from the project screen.")
+            }
+        }
+    }
+
     /** Runs the clone [command] for [dir], then opens it, installs what it needs and runs it if it's a web project. */
     fun cloneThenRun(context: Context, dir: File, command: String, callbacks: LaunchCallbacks) {
         val app = context.applicationContext
+        // The user's own repository: a stale mark from an earlier folder of this name doesn't apply.
+        ProjectTrust.forget(app, dir)
         launch(dir) {
             if (runAndWait(app, command, "Clone ${dir.name}", callbacks) != true || !withContext(Dispatchers.IO) { dir.isDirectory }) return@launch
             val prefix = RuntimePaths(app).prefix

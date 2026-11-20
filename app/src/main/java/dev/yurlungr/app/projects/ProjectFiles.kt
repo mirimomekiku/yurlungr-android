@@ -132,18 +132,32 @@ internal fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair
     }
     // Refreshing here also re-reads changes without requiring navigation away from the project.
     var treeStatus by remember(root.path) { mutableStateOf(status) }
-    LaunchedEffect(root, status, refreshKey, treeReload) {
-        treeStatus = if (treeReload > 0) git.status(root) else status
+    // After a git operation only git's state changed: the markers follow it, and the folders on
+    // screen are listed again (a discard or stash can remove files). Cheap: no git runs here.
+    LaunchedEffect(root, status) {
+        treeStatus = status
         top = list(root)
         for (path in open.keys.toList()) open[path] = list(File(path))
+    }
+    // A refresh (pull down, or the project's): git's status read here too.
+    LaunchedEffect(root, refreshKey, treeReload) {
+        if (treeReload > 0) treeStatus = git.status(root)
+        top = list(root)
+        for (path in open.keys.toList()) open[path] = list(File(path))
+        refreshing = false
+    }
+    // Git's ignored paths walk the tree (ls-files --ignored): only on a refresh, not after every stage or commit.
+    val repoKnown = treeStatus?.isRepo
+    LaunchedEffect(root, refreshKey, treeReload, repoKnown) {
         // Keep the previous ignore rules visible while they're re-read (no flicker on refresh).
-        checkingIgnored = treeStatus?.isRepo == true
+        checkingIgnored = repoKnown == true
         if (checkingIgnored) {
             ignored = runCatching { git.ignoredPaths(root) }.getOrNull()
             checkingIgnored = false
         } else ignored = null
-        refreshing = false
     }
+    var historyOf by remember(root.path) { mutableStateOf<String?>(null) }
+    historyOf?.let { path -> FileHistorySheet(root, git, path) { historyOf = null } }
     val isRepo = treeStatus?.isRepo == true
     val gitState = remember(treeStatus, ignored) { FileTreeGitState(ignored.orEmpty(), treeStatus?.changes.orEmpty()) }
     // Uncommitted only needs the status; the ignore-based filters wait for the ignore rules.
@@ -306,6 +320,9 @@ internal fun FilesTab(root: File, status: GitStatus?, git: Git, refreshKey: Pair
                     changedInside = if (entry.isDir && changed) gitState.changedInside[relative] ?: 0 else 0,
                     ignored = isIgnored,
                     modifier = Modifier.animateItem(),
+                    // A committed (or changed) file in a repository: its history is a long press away.
+                    onHistory = if (isRepo && !entry.isDir && !isIgnored && change?.untracked != true) ({ historyOf = relative }) else null,
+                    onOpen = { onOpenFile(f) },
                 ) {
                     when {
                         !entry.isDir -> onOpenFile(f)
@@ -353,18 +370,29 @@ private fun TreeRow(
     change: GitChange? = null,
     /** For folders: how many changed files are inside. */
     changedInside: Int = 0,
-    ignored: Boolean = false, enabled: Boolean = true, onClick: () -> Unit,
+    ignored: Boolean = false, enabled: Boolean = true,
+    /** Long press offers "History of this file". */
+    onHistory: (() -> Unit)? = null,
+    onOpen: () -> Unit = {},
+    onClick: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val guide = colors.outlineVariant.copy(alpha = 0.6f)
     val (icon, iconTint) = if (isDir) Ph.FolderSimple to colors.primary else fileIcon(name)
     val tone = change?.let { changeTone(it).second }
+    var menu by remember { mutableStateOf(false) }
+    Box(modifier) {
+    if (onHistory != null) DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+        DropdownMenuItem(text = { Text("Open") }, leadingIcon = { PhIcon(Ph.FileText, null, size = 18.dp) }, onClick = { menu = false; onOpen() })
+        DropdownMenuItem(text = { Text("History of this file") }, leadingIcon = { PhIcon(Ph.ClockCounterClockwise, null, size = 18.dp) },
+            onClick = { menu = false; onHistory() })
+    }
     Row(
-        modifier
+        Modifier
             .fillMaxWidth()
             .height(if (folder != null) 48.dp else 40.dp)
             .clip(RoundedCornerShape(12.dp))
-            .clickable(enabled = enabled, onClick = onClick)
+            .combinedClickable(enabled = enabled, onClick = onClick, onLongClick = onHistory?.let { { menu = true } }, onLongClickLabel = onHistory?.let { "File actions" })
             // A thin guide per level, so deep trees stay readable.
             .drawBehind {
                 for (level in 0 until depth) {
@@ -410,5 +438,6 @@ private fun TreeRow(
             )
             ignored -> Text("ignored", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
         }
+    }
     }
 }

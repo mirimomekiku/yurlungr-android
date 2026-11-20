@@ -79,10 +79,15 @@ fun GitActionsSheet(
     onOpenBranches: () -> Unit,
     /** Opens the pull requests screen (a number: that one); null when the remote isn't on GitHub. */
     onPullRequests: ((Int?) -> Unit)? = null,
+    /** A merge, rebase, cherry-pick or revert waiting to be finished: routines wait until it's done. */
+    operation: GitOperation? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val routines = remember(git) { GitRoutines(git) }
+    val routines = remember(git) { GitRoutines(git, AppStashTracker(context.applicationContext)) }
+    // Routines run in GitJobs (closing the project mustn't stop one between stash and pop); only an open sheet goes on to the agent.
+    var open by remember { mutableStateOf(true) }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { open = false } }
     var agent by remember { mutableStateOf(GitAiAgent.get(context, installedAgents)) }
     var running by remember { mutableStateOf<String?>(null) }
     val steps = remember { mutableStateListOf<String>() }
@@ -91,23 +96,25 @@ fun GitActionsSheet(
     val conflicts = status.conflicts
     val hasChanges = status.changes.isNotEmpty()
     val canPull = status.hasOrigin && status.upstream != null
+    // Nothing else while one is half done: a pull or an undo in the middle of a rebase makes it worse.
+    val idle = operation == null
 
     fun run(label: String, aiFollowUp: Boolean = false, block: suspend ((String) -> Unit) -> RoutineOutcome) {
         if (running != null) return
         running = label
         steps.clear()
         outcome = null
-        scope.launch {
+        GitJobs.launch {
             val result = try {
                 block { step -> steps += step }
             } finally {
                 running = null
-                onChanged()
+                if (open) onChanged()
             }
             outcome = result
             // The AI variant goes straight on to the agent when there's something to resolve.
             val a = agent
-            if (aiFollowUp && result is RoutineOutcome.Conflicts && a != null) {
+            if (open && aiFollowUp && result is RoutineOutcome.Conflicts && a != null) {
                 onAgentTask(a, GitRoutines.conflictPrompt(result, status.branch, status.upstream))
             }
         }
@@ -139,12 +146,23 @@ fun GitActionsSheet(
             })
         }
 
-        if (conflicts.isNotEmpty()) {
+        if (conflicts.isNotEmpty() || operation != null) {
             Text(
-                "${conflicts.size} file${if (conflicts.size == 1) " has" else "s have"} unresolved conflicts: ${conflicts.take(3).joinToString()}${if (conflicts.size > 3) "…" else ""}",
+                listOfNotNull(
+                    operation?.let { "A ${it.label} is in progress: finish or abort it from the Changes tab first." },
+                    conflicts.takeIf { it.isNotEmpty() }?.let {
+                        "${it.size} file${if (it.size == 1) " has" else "s have"} unresolved conflicts: ${it.take(3).joinToString()}${if (it.size > 3) "…" else ""}"
+                    },
+                ).joinToString("\n"),
                 style = MaterialTheme.typography.bodySmall,
                 color = AppColors.status.onWarningContainer,
                 modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(AppColors.status.warningContainer).padding(12.dp),
+            )
+        }
+        if (status.detached) {
+            Text(
+                "Detached HEAD: you're on a commit, not a branch, so there's nothing to push or sync. Create a branch (Branches & stashes) to keep commits made here.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
@@ -152,18 +170,18 @@ fun GitActionsSheet(
         ActionRow(
             Ph.CloudArrowDown, "Get latest changes",
             if (hasChanges) "Saves your changes, pulls, then puts them back (stash → pull → stash pop)" else "Pulls new commits from ${status.upstream ?: "the remote"}",
-            enabled = running == null && canPull && conflicts.isEmpty(), tile = AppColors.tiles.sky,
+            enabled = running == null && canPull && conflicts.isEmpty() && idle, tile = AppColors.tiles.sky,
         ) { run("Getting the latest changes") { routines.getLatest(dir, it) } }
         ActionRow(
             Ph.ArrowsClockwise, "Sync",
             "Gets the latest changes, then pushes your commits",
-            enabled = running == null && canPull && conflicts.isEmpty(), tile = AppColors.tiles.sky,
+            enabled = running == null && canPull && conflicts.isEmpty() && idle, tile = AppColors.tiles.sky,
         ) { run("Syncing") { routines.sync(dir, it) } }
-        if (status.ahead > 0 || (status.hasOrigin && status.upstream == null)) {
+        if (!status.detached && (status.ahead > 0 || (status.hasOrigin && status.upstream == null))) {
             ActionRow(
                 Ph.CloudArrowUp, if (status.upstream == null) "Publish branch" else "Push ${status.ahead} commit${if (status.ahead == 1) "" else "s"}",
                 if (status.upstream == null) "Sends this branch to the remote for the first time" else "Sends your commits to ${status.upstream}",
-                enabled = running == null && conflicts.isEmpty(), tile = AppColors.tiles.lime,
+                enabled = running == null && conflicts.isEmpty() && idle, tile = AppColors.tiles.lime,
             ) {
                 run("Pushing") { step ->
                     step("Sending your commits (git push)…")
@@ -176,7 +194,7 @@ fun GitActionsSheet(
             ActionRow(
                 Ph.ArrowCounterClockwise, "Undo last commit",
                 "Takes back the last commit (if not pushed) and keeps its changes",
-                enabled = running == null && conflicts.isEmpty(), tile = AppColors.tiles.peach,
+                enabled = running == null && conflicts.isEmpty() && idle, tile = AppColors.tiles.peach,
             ) { run("Undoing the last commit") { routines.undoLastCommit(dir) } }
         }
         // Pull request of this branch: open the existing one, or create it once the branch is pushed.
@@ -244,14 +262,22 @@ fun GitActionsSheet(
             ActionRow(
                 Ph.GitMerge, "Get latest changes & fix conflicts",
                 "Same as Get latest changes; if anything conflicts, ${agent?.displayName ?: "the agent"} resolves it in a new chat",
-                enabled = running == null && canPull && conflicts.isEmpty(), tile = AppColors.tiles.lilac, ai = true,
+                enabled = running == null && canPull && conflicts.isEmpty() && idle, tile = AppColors.tiles.lilac, ai = true,
             ) { run("Getting the latest changes", aiFollowUp = true) { routines.getLatest(dir, it) } }
             if (conflicts.isNotEmpty()) {
                 ActionRow(
-                    Ph.MagicWand, "Fix merge conflicts",
-                    "${agent?.displayName ?: "The agent"} resolves the ${conflicts.size} conflicted file${if (conflicts.size == 1) "" else "s"}",
+                    Ph.MagicWand, "Fix ${operation?.let { "${it.label} " } ?: ""}conflicts",
+                    "${agent?.displayName ?: "The agent"} resolves the ${conflicts.size} conflicted file${if (conflicts.size == 1) "" else "s"}" +
+                        (operation?.let { if (it == GitOperation.Merge) " and concludes the merge" else " and continues the ${it.label}" } ?: ""),
                     enabled = running == null, tile = AppColors.tiles.lilac, ai = true,
-                ) { scope.launch { ask(GitRoutines.fixConflictsPrompt(conflicts, git.mergeInProgress(dir))) } }
+                ) {
+                    scope.launch {
+                        // Read now, not from when the sheet opened: what's in progress decides how it's finished.
+                        val op = git.operationInProgress(dir)
+                        val appStash = RoutineStashes.get(context, dir)?.takeIf { it.applied }
+                        ask(GitRoutines.fixConflictsPrompt(conflicts, op, appStash))
+                    }
+                }
             }
             ActionRow(
                 Ph.GitCommit, "Write commit message & commit",
@@ -265,6 +291,13 @@ fun GitActionsSheet(
             ) { ask(GitRoutines.reviewPrompt()) }
         }
     }
+}
+
+/** Remembers the stash a routine makes, per project ([RoutineStashes]), for the Changes tab's Restore. */
+private class AppStashTracker(private val context: Context) : StashTracker {
+    override fun saved(dir: File, stash: TrackedStash) = RoutineStashes.set(context, dir, stash)
+    override fun restored(dir: File) = RoutineStashes.clear(context, dir)
+    override fun appliedWithConflicts(dir: File, stash: TrackedStash) = RoutineStashes.set(context, dir, stash)
 }
 
 /** A just-created pull request, known only by its URL (…/pull/N); the title loads on the next open. */

@@ -94,24 +94,56 @@ internal fun ChangesTab(
     /** Runs a quick git operation (stage, discard…), then refreshes. */
     onGit: (label: String, block: suspend () -> CommandResult) -> Unit,
     onResolveConflict: (File) -> Unit = onOpenFile,
+    /** The merge, rebase, cherry-pick or revert waiting to be finished. */
+    operation: GitOperation? = null,
+    onContinueOperation: (GitOperation) -> Unit = {},
+    onAbortOperation: (GitOperation) -> Unit = {},
+    /** The user's changes a routine stashed and didn't put back. */
+    routineStash: TrackedStash? = null,
+    onRestoreStash: (TrackedStash) -> Unit = {},
+    onDropStash: (TrackedStash) -> Unit = {},
+    /** Offered when the last git write failed on index.lock: removes a stale one (asks first). */
+    onRemoveLock: (() -> Unit)? = null,
 ) {
     val expanded = remember(dir) { mutableStateMapOf<String, String?>() } // key -> diff (null = loading)
     var fullScreen by remember { mutableStateOf<Pair<GitChange, String>?>(null) }
     var discarding by remember { mutableStateOf<GitChange?>(null) }
+    var confirmLock by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
+    /** Each section shows its own part: staged rows what's in the index, the others what isn't yet. */
+    fun sideOf(key: String) = when (key.substringBefore(':')) {
+        "s" -> DiffSide.Staged
+        "u" -> DiffSide.Unstaged
+        else -> DiffSide.All
+    }
+    fun loadDiff(key: String, change: GitChange) = scope.launch {
+        val diff = git.diff(dir, change, status?.unborn == true, sideOf(key))
+        // Collapsed while this one ran: leave it.
+        if (expanded.containsKey(key)) expanded[key] = diff
+    }
     fun toggleDiff(key: String, change: GitChange) {
         if (expanded.containsKey(key)) expanded.remove(key)
         else {
             expanded[key] = null
-            scope.launch {
-                val diff = git.diff(dir, change, status?.unborn == true)
-                // Collapsed (or reopened by a newer load) while this one ran: leave it.
-                if (expanded.containsKey(key) && expanded[key] == null) expanded[key] = diff
-            }
+            loadDiff(key, change)
         }
     }
-    fun showFull(change: GitChange) = scope.launch { fullScreen = change to git.diff(dir, change, status?.unborn == true) }
+    // The files changed (an edit, staging a hunk, an agent): open diffs are read again, and ones whose row is gone close.
+    androidx.compose.runtime.LaunchedEffect(status) {
+        val s = status ?: return@LaunchedEffect
+        for (key in expanded.keys.toList()) {
+            val path = key.substringAfter(':')
+            val change = s.changes.firstOrNull { it.path == path }
+            val stillThere = change != null && when (key.substringBefore(':')) {
+                "c" -> change.label == "conflict"
+                "s" -> change.isStaged
+                else -> change.hasUnstaged
+            }
+            if (stillThere) loadDiff(key, change!!) else expanded.remove(key)
+        }
+    }
+    fun showFull(key: String, change: GitChange) = scope.launch { fullScreen = change to git.diff(dir, change, status?.unborn == true, sideOf(key)) }
 
     Column(Modifier.fillMaxSize()) {
         LazyColumn(
@@ -126,7 +158,15 @@ internal fun ChangesTab(
                 !status.isRepo -> item { InitCard(busy, onInit) }
                 else -> {
                     item(key = "sync") { SyncCard(status, busy, onPull, onPush, onPublish) }
-                    message?.let { (text, isError) -> item(key = "message") { ResultBox(text, isError, onDismissMessage) } }
+                    operation?.let { op ->
+                        item(key = "operation") { OperationBanner(op, status, busy, onContinueOperation, onAbortOperation) }
+                    }
+                    routineStash?.let { s ->
+                        item(key = "stash") { StashBanner(s, busy, onRestore = { onRestoreStash(s) }, onDrop = { onDropStash(s) }) }
+                    }
+                    message?.let { (text, isError) ->
+                        item(key = "message") { ResultBox(text, isError, onDismissMessage, action = onRemoveLock?.let { { confirmLock = true } }) }
+                    }
                     if (!File(dir, ".gitignore").exists() && status.changes.any { looksGenerated(it.path) }) {
                         item(key = "gitignore") { GitignoreHint(busy, onAddGitignore) }
                     }
@@ -142,19 +182,27 @@ internal fun ChangesTab(
                                     item(key = "h-$prefix") { SectionHeader(title, list.size, actionLabel, enabled = busy == null, onAction = action) }
                                     items(list, key = { "$prefix:${it.path}" }) { change ->
                                         val key = "$prefix:${change.path}"
+                                        val diff = expanded[key]
+                                        // Staging hunk by hunk: only from a diff of exactly the side being changed, never while busy.
+                                        val hunks = remember(diff) { diff?.takeIf { prefix != "c" }?.let(HunkPatch::parse) }
                                         ChangeRow(
                                             change = change,
                                             staged = isStaged,
                                             conflict = prefix == "c",
                                             expanded = expanded.containsKey(key),
-                                            diff = expanded[key],
+                                            diff = diff,
                                             enabled = busy == null,
+                                            hunkAction = if (hunks != null && busy == null) (if (isStaged) "Unstage hunk" else "Stage hunk") else null,
+                                            onHunk = { index ->
+                                                val patch = diff?.let { HunkPatch.forHunk(it, index) }
+                                                if (patch != null) onGit(if (isStaged) "Unstage hunk" else "Stage hunk") { git.applyToIndex(dir, patch, reverse = isStaged) }
+                                            },
                                             onToggleStage = {
                                                 if (isStaged) onGit("Unstage") { git.unstage(dir, listOf(change.path), status.unborn) }
                                                 else onGit("Stage") { git.stage(dir, listOf(change.path)) }
                                             },
                                             onToggleDiff = { toggleDiff(key, change) },
-                                            onFullScreen = { showFull(change) },
+                                            onFullScreen = { showFull(key, change) },
                                             // A conflicted file opens in the merge view.
                                             onOpen = File(dir, change.path).takeIf { it.isFile }?.let { f -> { if (prefix == "c") onResolveConflict(f) else onOpenFile(f) } },
                                             onDiscard = if (prefix == "c" || change.label == "renamed") null else ({ discarding = change }),
@@ -178,6 +226,21 @@ internal fun ChangesTab(
 
     fullScreen?.let { (change, diff) ->
         DiffFullScreen(change.path, changeLabel(change), diff, onDismiss = { fullScreen = null })
+    }
+    if (confirmLock && onRemoveLock != null) {
+        AppSheet(
+            "Remove the stale lock?", onDismiss = { confirmLock = false }, icon = Ph.Warning, subtitle = ".git/index.lock",
+            actions = {
+                OutlinedButton(onClick = { confirmLock = false }, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Cancel") }
+                Button(onClick = { confirmLock = false; onRemoveLock() }, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Remove lock") }
+            },
+        ) {
+            Text(
+                "Git keeps this file while it changes the index, and leaves it behind when it's stopped half way (a timeout, the app closed). " +
+                    "It's only removed if no git is running in this project right now; if one is, wait for it instead.",
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
     discarding?.let { change ->
         AppSheet(
@@ -283,10 +346,16 @@ private fun SyncCard(status: GitStatus, busy: String?, onPull: () -> Unit, onPus
             if (busy != null) {
                 WaveDots(dotSize = 5.dp)
                 Spacer(Modifier.width(6.dp))
-                Text(busy, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                Text(busy, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false))
             }
         }
         when {
+            // No branch to push to or publish: commits made here only stay if a branch is made for them.
+            status.detached -> Text(
+                "Detached HEAD: you're on a commit, not a branch, so there's nothing to push. To keep commits made here, create a branch (Branches → New branch).",
+                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+            )
             status.hasOrigin -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SyncButton("Pull", Ph.CloudArrowDown, status.behind, highlight = status.behind > 0,
                     enabled = busy == null && status.upstream != null, modifier = Modifier.weight(1f), onClick = onPull)
@@ -338,6 +407,9 @@ private fun ChangeRow(
     expanded: Boolean,
     diff: String?,
     enabled: Boolean,
+    /** "Stage hunk" / "Unstage hunk" on each hunk of the diff, or null when it can't be done hunk by hunk. */
+    hunkAction: String? = null,
+    onHunk: (Int) -> Unit = {},
     onToggleStage: () -> Unit,
     onToggleDiff: () -> Unit,
     onFullScreen: () -> Unit,
@@ -398,7 +470,7 @@ private fun ChangeRow(
         }
         if (expanded) {
             Column(Modifier.padding(start = 8.dp, end = 8.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (diff == null) SkeletonCode(lines = 6) else UnifiedDiff(diff)
+                if (diff == null) SkeletonCode(lines = 6) else DiffViewer(diff, hunkAction = hunkAction, onHunk = onHunk)
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(onClick = onFullScreen) { Text("Full screen") }
                     onOpen?.let { TextButton(onClick = it) { Text("Open file") } }
@@ -508,22 +580,24 @@ private fun GitignoreHint(busy: String?, onAdd: () -> Unit) {
 }
 
 @Composable
-private fun ResultBox(text: String, isError: Boolean, onDismiss: () -> Unit) {
+private fun ResultBox(text: String, isError: Boolean, onDismiss: () -> Unit, action: (() -> Unit)? = null) {
     val colors = MaterialTheme.colorScheme
-    Row(
+    Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
-            .background(if (isError) colors.errorContainer else colors.surfaceContainerHighest)
-            .padding(start = 12.dp, top = 4.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.Top,
+            .background(if (isError) colors.errorContainer else colors.surfaceContainerHighest),
     ) {
-        Text(
-            text,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            lineHeight = 15.sp,
-            color = if (isError) colors.onErrorContainer else colors.onSurfaceVariant,
-            modifier = Modifier.weight(1f).padding(vertical = 8.dp),
-        )
-        IconButton(onClick = onDismiss) { PhIcon(Ph.XCircle, "Dismiss", size = 18.dp, tint = colors.onSurfaceVariant) }
+        Row(Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Top) {
+            Text(
+                text,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                color = if (isError) colors.onErrorContainer else colors.onSurfaceVariant,
+                modifier = Modifier.weight(1f).padding(vertical = 8.dp),
+            )
+            IconButton(onClick = onDismiss) { PhIcon(Ph.XCircle, "Dismiss", size = 18.dp, tint = colors.onSurfaceVariant) }
+        }
+        // A killed git's index.lock: the fix is one tap (asked first), not a terminal command.
+        if (action != null) TextButton(onClick = action, modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)) { Text("Remove stale lock…") }
     }
 }

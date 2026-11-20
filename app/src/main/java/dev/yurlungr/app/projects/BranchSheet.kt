@@ -63,13 +63,14 @@ import java.io.File
 private val BRANCH_NAME = Regex("[A-Za-z0-9._/-]{1,100}")
 
 /**
- * Branch sheet (opened from the branch chip): pull, create, switch (offering to stash when the
- * working tree has changes), and stash / apply / pop / drop.
+ * Branch sheet (opened from the branch chip): pull, create, rename, switch (offering to stash
+ * when the working tree has changes), clean up merged or gone branches, and stash / apply /
+ * pop / drop. Stash entries are acted on by their commit, not their position.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BranchSheet(dir: File, git: Git, status: GitStatus, onDismiss: () -> Unit, onChanged: () -> Unit) {
-    val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
     var branches by remember { mutableStateOf<List<GitBranch>?>(null) }
     var stashes by remember { mutableStateOf<List<GitStash>>(emptyList()) }
     var busy by remember { mutableStateOf<String?>(null) }
@@ -78,7 +79,13 @@ fun BranchSheet(dir: File, git: Git, status: GitStatus, onDismiss: () -> Unit, o
     var creating by remember { mutableStateOf(false) }
     var stashing by remember { mutableStateOf(false) }
     var confirmSwitch by remember { mutableStateOf<GitBranch?>(null) }
+    var dropping by remember { mutableStateOf<GitStash?>(null) }
+    var renaming by remember { mutableStateOf<GitBranch?>(null) }
+    var cleaningUp by remember { mutableStateOf(false) }
     val dirty = status.changes.isNotEmpty()
+    // Ops run in GitJobs, so closing the sheet (or the project) can't stop a stash-and-switch half way.
+    var open by remember { mutableStateOf(true) }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { open = false } }
 
     LaunchedEffect(reload) {
         branches = git.branches(dir).getOrElse { result = (it.message ?: "Couldn't list branches") to true; emptyList() }
@@ -93,31 +100,39 @@ fun BranchSheet(dir: File, git: Git, status: GitStatus, onDismiss: () -> Unit, o
         if (busy != null) return
         busy = label
         result = null
-        scope.launch {
+        GitJobs.launch {
             val r = block()
             if (r.ok) then()
             result = (if (r.ok) r.output.trim().lines().takeLast(4).joinToString("\n").ifBlank { "$label: done" } else r.describe(label)) to !r.ok
             busy = null
             reload++
-            onChanged()
+            if (open) onChanged()
         }
     }
 
     fun switch(branch: GitBranch, stashFirst: Boolean) = op("Switch") {
         if (!stashFirst) return@op git.switchTo(dir, branch)
-        val (s, stashed) = git.stashSaving(dir, "Before switching to ${branch.name}")
+        val reason = "Before switching to ${branch.name}"
+        val (s, stashed) = git.stashSaving(dir, reason)
         if (!s.ok) return@op s
+        // Remembered by its commit: the Changes tab offers it back until it's restored.
+        val sha = if (stashed) git.stashTop(dir) else null
+        sha?.let { RoutineStashes.set(context, dir, TrackedStash(it, reason)) }
         val switched = git.switchTo(dir, branch)
         // Nothing stashed (e.g. only ignored files changed), or the switch worked: done.
-        if (switched.ok || !stashed) return@op switched
+        if (switched.ok || sha == null) {
+            return@op if (switched.ok && sha != null) switched.copy(output = switched.output.trim() + "\nYour changes are stashed: Restore them from the Changes tab when you want them here.")
+            else switched
+        }
         // The switch failed: bring the changes back rather than leaving them hidden in a stash.
-        val restored = git.stashPop(dir, GitStash("stash@{0}", "", ""))
+        val restored = git.stashPopSha(dir, sha)
+        if (restored.ok) RoutineStashes.clear(context, dir)
         val note = if (restored.ok) {
             "Your changes were restored."
         } else {
-            "Your changes are saved in stash@{0} (Stashes below); restoring them failed:\n${restored.output.trim().lines().takeLast(2).joinToString("\n")}"
+            "Your changes are still stashed (Stashes below, or Restore in the Changes tab); restoring them failed:\n${restored.describe("git stash pop").lines().takeLast(2).joinToString("\n")}"
         }
-        CommandResult(switched.exitCode, switched.output.trim() + "\n" + note, switched.timedOut)
+        CommandResult(switched.exitCode, switched.output.trim() + "\n" + note, switched.timedOut, errorOutput = switched.errorOutput)
     }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
@@ -160,6 +175,11 @@ fun BranchSheet(dir: File, git: Git, status: GitStatus, onDismiss: () -> Unit, o
                     Spacer(Modifier.width(6.dp))
                     Text("Stash changes")
                 }
+                FilledTonalButton(onClick = { cleaningUp = true }, enabled = busy == null && !status.unborn) {
+                    PhIcon(Ph.Trash, null, size = 16.dp)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Clean up")
+                }
             }
 
             result?.let { (text, isError) ->
@@ -183,19 +203,22 @@ fun BranchSheet(dir: File, git: Git, status: GitStatus, onDismiss: () -> Unit, o
                 val list = branches
                 if (list == null) items(3) { SkeletonListItem() }
                 else items(list, key = { (if (it.isRemote) "r:" else "l:") + it.name }) { b ->
-                    BranchRow(b, enabled = busy == null && !b.isCurrent) {
+                    BranchRow(
+                        b, enabled = busy == null && !b.isCurrent,
+                        onRename = if (b.isRemote || busy != null) null else ({ renaming = b }),
+                    ) {
                         if (dirty) confirmSwitch = b else switch(b, stashFirst = false)
                     }
                 }
                 if (stashes.isNotEmpty()) {
                     item { SectionLabel("Stashes · ${stashes.size}", Modifier.padding(top = 8.dp)) }
-                    items(stashes, key = { it.ref }) { s ->
+                    items(stashes, key = { it.sha.ifEmpty { it.ref } }) { s ->
                         StashRow(
                             s,
                             enabled = busy == null,
-                            onPop = { op("Pop") { git.stashPop(dir, s) } },
+                            onPop = { op("Pop") { git.stashPop(dir, s).also { if (it.ok) forgetTracked(context, dir, s) } } },
                             onApply = { op("Apply") { git.stashApply(dir, s) } },
-                            onDrop = { op("Drop") { git.stashDrop(dir, s) } },
+                            onDrop = { dropping = s },
                         )
                     }
                 }
@@ -230,6 +253,46 @@ fun BranchSheet(dir: File, git: Git, status: GitStatus, onDismiss: () -> Unit, o
             op("Stash") { git.stash(dir, message) }
         }
     }
+    dropping?.let { s ->
+        dev.yurlungr.app.ui.AppSheet(
+            "Drop this stash?", onDismiss = { dropping = null }, icon = Ph.Trash, subtitle = s.message,
+            actions = {
+                androidx.compose.material3.OutlinedButton(onClick = { dropping = null }, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("Cancel") }
+                Button(
+                    onClick = {
+                        dropping = null
+                        op("Drop") { git.stashDrop(dir, s).also { if (it.ok) forgetTracked(context, dir, s) } }
+                    },
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                    modifier = Modifier.weight(1f).heightIn(min = 52.dp),
+                ) { Text("Drop") }
+            },
+        ) {
+            Text(
+                "The saved changes in it are deleted (${s.whenRelative}). This can't be undone from here.",
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    renaming?.let { b ->
+        NameDialog(
+            title = "Rename ${b.name}",
+            label = "New name",
+            supporting = "Only the local branch is renamed; a remote one keeps its name until you push.",
+            validate = { it != b.name && BRANCH_NAME.matches(it) && !it.startsWith("-") && ".." !in it },
+            confirm = "Rename",
+            initial = b.name,
+            onDismiss = { renaming = null },
+        ) { name ->
+            renaming = null
+            op("Rename") { git.renameBranch(dir, b.name, name) }
+        }
+    }
+    if (cleaningUp) {
+        BranchCleanupSheet(dir, git, onDismiss = { cleaningUp = false }, onChanged = { reload++; if (open) onChanged() })
+    }
     confirmSwitch?.let { b ->
         AlertDialog(
             onDismissRequest = { confirmSwitch = null },
@@ -254,8 +317,13 @@ fun BranchSheet(dir: File, git: Git, status: GitStatus, onDismiss: () -> Unit, o
     }
 }
 
+/** The tracked routine stash is gone once its entry is popped or dropped here. */
+private fun forgetTracked(context: android.content.Context, dir: File, s: GitStash) {
+    if (s.sha.isNotEmpty() && RoutineStashes.get(context, dir)?.sha == s.sha) RoutineStashes.clear(context, dir)
+}
+
 @Composable
-private fun BranchRow(b: GitBranch, enabled: Boolean, onClick: () -> Unit) {
+private fun BranchRow(b: GitBranch, enabled: Boolean, onRename: (() -> Unit)? = null, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     Row(
         Modifier
@@ -286,6 +354,16 @@ private fun BranchRow(b: GitBranch, enabled: Boolean, onClick: () -> Unit) {
             )
         }
         if (b.isCurrent) Chip("Current", onClick = {}, selected = true)
+        if (onRename != null) {
+            var menu by remember { mutableStateOf(false) }
+            Box {
+                IconButton(onClick = { menu = true }) { PhIcon(Ph.DotsThreeVertical, "More", size = 18.dp) }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text("Rename…") }, leadingIcon = { PhIcon(Ph.PencilSimple, null, size = 18.dp) },
+                        onClick = { menu = false; onRename() })
+                }
+            }
+        }
     }
 }
 
@@ -317,10 +395,11 @@ private fun NameDialog(
     supporting: String,
     validate: (String) -> Boolean,
     confirm: String,
+    initial: String = "",
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit,
 ) {
-    var text by remember { mutableStateOf("") }
+    var text by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
