@@ -80,7 +80,10 @@ internal object WebDeploy {
      * leaves the project: absolute paths, "..", or a link that points elsewhere.
      */
     fun resolveOutput(dir: File, relative: String): File? {
-        val rel = relative.trim().trim('/').ifEmpty { "." }
+        val typed = relative.trim()
+        // Judged before any slash is trimmed: "/tmp/x" must not turn into the project's own "tmp/x".
+        if (typed.startsWith("/") || File(typed).isAbsolute) return null
+        val rel = typed.trimEnd('/').ifEmpty { "." }
         if (rel.startsWith("~") || File(rel).isAbsolute || rel.contains('\\') || rel.contains('\u0000')) return null
         if (rel.split('/').any { it == ".." }) return null
         val root = runCatching { SpaceCleaner.realFile(dir) }.getOrNull() ?: return null
@@ -114,25 +117,57 @@ internal object WebDeploy {
     fun isValidSite(name: String) = SITE.matches(name)
 
     /**
-     * The deploy command for [provider], run from [projectDir]. Tokens never appear in it: the CLI reads them
-     * from the environment, which the command clears before the terminal's shell takes over. Null when a
-     * needed site name is missing or isn't a plain name.
+     * The deploy CLIs, pinned to exact releases (each a few weeks old when picked, not "latest"), so a
+     * hijacked new release can't reach the deploy token the day it's published. Bump them together.
      */
-    fun deployCommand(provider: DeployProvider, projectDir: File, outDir: File, site: String?): String? {
+    val DEPLOY_CLIS: Map<DeployProvider, String> = mapOf(
+        DeployProvider.Cloudflare to "wrangler@4.156.0",
+        DeployProvider.Netlify to "netlify-cli@27.16.0",
+        DeployProvider.Vercel to "vercel@65.8.0",
+    )
+
+    /** Where the deploy CLIs come from, whatever a project's or the user's .npmrc says. */
+    const val NPM_REGISTRY = "https://registry.npmjs.org/"
+
+    /** The app-owned folder a deploy of [projectDir] runs in (CLIs keep site links there), under [cliDir]. */
+    fun deployWorkDir(cliDir: File, projectDir: File): File {
+        val path = runCatching { projectDir.canonicalPath }.getOrDefault(projectDir.absolutePath)
+        val hash = java.security.MessageDigest.getInstance("SHA-256").digest(path.toByteArray()).take(8).joinToString("") { "%02x".format(it) }
+        return File(cliDir, "work/$hash")
+    }
+
+    /**
+     * The deploy command for [provider]. Tokens never appear in it: the CLI reads them from the environment,
+     * which the command clears before the terminal's shell takes over. Null when a needed site name is
+     * missing or isn't a plain name.
+     *
+     * The project's own code must not get the token. `npx` run inside the project prefers the project's
+     * `node_modules/.bin/wrangler` (whoever wrote the repository controls it), and npm reads the project's
+     * `.npmrc` (a `registry=` line can serve a look-alike CLI). So the pinned CLI runs from [cliDir], an
+     * app-owned npm prefix, with an empty app-owned user config and the public registry named explicitly,
+     * in a per-project folder under it ([deployWorkDir]); the project is only the folder that's uploaded.
+     */
+    fun deployCommand(provider: DeployProvider, projectDir: File, cliDir: File, outDir: File, site: String?, npm: String = "npm"): String? {
         val q = Git::shellQuote
         val name = site?.trim().orEmpty()
         if (name.isNotEmpty() && !isValidSite(name)) return null
         if (provider.siteRequired && name.isEmpty()) return null
         val out = q(outDir.invariantSeparatorsPath)
-        // --yes on npx: install the CLI without asking.
+        val prefix = q(cliDir.invariantSeparatorsPath)
+        val npmrc = q(File(cliDir, "npmrc").invariantSeparatorsPath)
+        val work = q(deployWorkDir(cliDir, projectDir).invariantSeparatorsPath)
+        // --yes: install the pinned CLI without asking.
+        val exec = "${q(npm)} exec --yes --prefix $prefix --userconfig $npmrc --registry=$NPM_REGISTRY --package=${DEPLOY_CLIS.getValue(provider)} --"
         val cli = when (provider) {
-            DeployProvider.Cloudflare -> "npx --yes wrangler pages deploy $out --project-name ${q(name)}"
+            DeployProvider.Cloudflare -> "$exec wrangler pages deploy $out --project-name ${q(name)}"
             // --no-build: the site is already built (deploy otherwise runs the build again).
-            DeployProvider.Netlify -> "npx --yes netlify-cli deploy --dir $out --prod --no-build" + if (name.isEmpty()) "" else " --site ${q(name)}"
-            DeployProvider.Vercel -> "npx --yes vercel deploy $out --prod --yes" + if (name.isEmpty()) "" else " --project ${q(name)}"
+            DeployProvider.Netlify -> "$exec netlify deploy --dir $out --prod --no-build" + if (name.isEmpty()) "" else " --site ${q(name)}"
+            DeployProvider.Vercel -> "$exec vercel deploy $out --prod --yes" + if (name.isEmpty()) "" else " --project ${q(name)}"
         }
+        // The user config is emptied every time, so nothing left in it can point npm elsewhere.
+        val setup = "mkdir -p $work && : > $npmrc && cd $work"
         // The tab stays open as a shell afterwards: it must not keep the tokens.
-        return "cd ${q(projectDir.invariantSeparatorsPath)} && $cli; _deploy_exit=\$?; unset ${provider.envNames.joinToString(" ")}; (exit \$_deploy_exit)"
+        return "$setup && $cli; _deploy_exit=\$?; unset ${provider.envNames.joinToString(" ")}; (exit \$_deploy_exit)"
     }
 
     /** The environment for a deploy, or the label of the first value still missing. */

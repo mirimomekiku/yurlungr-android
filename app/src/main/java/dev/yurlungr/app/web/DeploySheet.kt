@@ -243,9 +243,13 @@ internal fun BuildDeploySheet(
                         DeployPrefs.values(context, provider)
                     }
                     val env = WebDeploy.deployEnv(provider, values).getOrElse { error = it.message; return@launch }
-                    val command = WebDeploy.deployCommand(provider, dir, out, site)
+                    // The CLI runs from app-owned folders, never the project's (see deployCommand).
+                    val cliDir = File(context.cacheDir, "deploy-cli")
+                    val command = WebDeploy.deployCommand(provider, dir, cliDir, out, site, npm = File(paths.bin, "npm").path)
                         ?: run { error = if (site.isBlank()) "Enter the ${provider.siteLabel.lowercase()}." else "Use letters, digits, dots, dashes or underscores in the name."; return@launch }
-                    runCatching { TerminalSessions.create(context, command, "Deploy · ${dir.name}", workingDirectory = dir, extraEnv = env) }
+                    val workDir = WebDeploy.deployWorkDir(cliDir, dir)
+                    withContext(Dispatchers.IO) { workDir.mkdirs() }
+                    runCatching { TerminalSessions.create(context, command, "Deploy · ${dir.name}", workingDirectory = workDir, extraEnv = env) }
                         .onSuccess { onDismiss(); onOpenTerminal() }
                         .onFailure { error = "Couldn't start the deploy: ${it.message}" }
                 } finally { busy = null }
