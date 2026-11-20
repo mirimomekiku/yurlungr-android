@@ -86,7 +86,7 @@ object ChatSessions {
         val chat = wire(ChatSession(context.applicationContext, agent, cwd, skipPermissions = skipPermissions))
         chats.add(0, chat)
         // Save right away: a chat stuck at sign-in would otherwise vanish on the next restart.
-        chat.onChanged?.invoke(chat)
+        chat.onChanged?.invoke(chat, false)
         onRegistryChanged?.invoke() // before start(), so listeners see its first events
         chat.start()
         AgentStatus.changed(context)
@@ -122,6 +122,7 @@ object ChatSessions {
         NotificationManagerCompat.from(context).cancel(chat.id.hashCode())
         val id = chat.id
         Drafts.set(context, id, "")
+        pendingSaves.remove(id)
         io.execute { ChatStore.delete(appContext, id) }
         cleanup.launch { runCatching { Checkpoints.delete(appContext, id) } }
         RuntimeService.refresh(context)
@@ -129,11 +130,10 @@ object ChatSessions {
 
     private fun wire(chat: ChatSession) = chat.apply {
         listeners += dev.yurlungr.app.runtime.RuntimeStatus
-        onChanged = { c ->
-            val snapshot = c.snapshot() // taken on the main thread
-            io.execute { ChatStore.write(appContext, snapshot) }
-            // Most recently active first.
-            val index = chats.indexOf(c)
+        onChanged = { c, activity ->
+            save(c)
+            // Most recently active first (a save of streamed output doesn't move it).
+            val index = if (activity) chats.indexOf(c) else -1
             if (index > 0) {
                 chats.removeAt(index)
                 chats.add(0, c)
@@ -157,12 +157,35 @@ object ChatSessions {
         }
         onAttentionResolved = { c ->
             clearUrgent(c.id)
-            if (awaitingApproval.remove(c.id)) {
-                runCatching { NotificationManagerCompat.from(appContext).cancel(c.id.hashCode()) }
+            val next = c.openPermission
+            if (next == null) {
+                if (awaitingApproval.remove(c.id)) {
+                    runCatching { NotificationManagerCompat.from(appContext).cancel(c.id.hashCode()) }
+                }
+            } else {
+                // Another prompt is still open: the banner and the alert (one per chat) move on to it.
+                val what = c.attentionText(next)
+                urgent += Urgent(c.id, c.agent.displayName, what)
+                if (c.id in awaitingApproval && !appVisible) {
+                    ChatNotifications.approval(appContext, c, next, "${c.agent.displayName} needs you", what)
+                }
             }
             AgentStatus.changed(appContext)
         }
         listeners += AgentStatus
+    }
+
+    /** Snapshots waiting to be written, at most one per chat: a newer one replaces it instead of queueing behind it. */
+    private val pendingSaves = java.util.concurrent.ConcurrentHashMap<String, SavedChat>()
+
+    /**
+     * Saves [chat] on [io]. Snapshots are taken on the main thread; when the writer is behind (a
+     * big chat streaming), only the newest snapshot of each chat is written.
+     */
+    private fun save(chat: ChatSession) {
+        val snapshot = chat.snapshot()
+        if (pendingSaves.put(chat.id, snapshot) != null) return // a write is already queued; it takes this one
+        io.execute { pendingSaves.remove(chat.id)?.let { ChatStore.write(appContext, it) } }
     }
 
     /** Chats whose current notification asks for an approval (cleared once it's answered). */

@@ -57,11 +57,18 @@ object Activity {
      */
     class AgentUsage(val agent: Agent, val chats: Int, val prompts: Int, val costs: Map<String, Double>, val contextInUse: Long)
 
-    fun usage(chats: List<ChatSession>): List<AgentUsage> = chats.groupBy { it.agent }.map { (agent, list) ->
-        val costs = list.mapNotNull { c -> c.usage?.costAmount?.let { (c.usage?.currency ?: "USD") to it } }
-            .groupBy({ it.first }, { it.second }).mapValues { (_, v) -> v.sum() }
-        AgentUsage(agent, list.size, list.sumOf { c -> c.items.count { it is ChatItem.User } }, costs, list.sumOf { it.usage?.used ?: 0L })
-    }.sortedByDescending { it.prompts }
+    /**
+     * [turnCosts] are each chat's recorded per-turn costs (they add up across agent restarts); a chat
+     * without any falls back to the session cost its agent last reported (saved with the chat).
+     */
+    fun usage(chats: List<ChatSession>, turnCosts: Map<String, Map<String, Double>> = emptyMap()): List<AgentUsage> =
+        chats.groupBy { it.agent }.map { (agent, list) ->
+            val costs = list.map { c ->
+                turnCosts[c.id]?.takeIf { it.isNotEmpty() }
+                    ?: c.usage?.costAmount?.let { mapOf((c.usage?.currency ?: "USD") to it) }.orEmpty()
+            }.fold(emptyMap<String, Double>(), Checkpoints::addCosts)
+            AgentUsage(agent, list.size, list.sumOf { c -> c.items.count { it is ChatItem.User } }, costs, list.sumOf { it.usage?.used ?: 0L })
+        }.sortedByDescending { it.prompts }
 }
 
 @Composable
@@ -69,13 +76,12 @@ fun ActivityScreen(onBack: () -> Unit, onOpenChat: (String) -> Unit) {
     val context = LocalContext.current
     val chats = ChatSessions.chats.toList()
     val working = Activity.working(chats)
-    val usage = Activity.usage(chats)
     // Keyed on the latest activity too, so totals refresh after a turn, not only when a chat is added.
-    val totals by produceState(Checkpoints.Stats(0, 0, 0), chats.size, chats.maxOfOrNull { it.updatedAt }) {
-        value = withContext(Dispatchers.IO) {
-            chats.map { Checkpoints.stats(context, it.id) }.let { s -> Checkpoints.Stats(s.sumOf { it.turns }, s.sumOf { it.millis }, s.sumOf { it.filesChanged }) }
-        }
+    val perChat by produceState(emptyMap<String, Checkpoints.Stats>(), chats.size, chats.maxOfOrNull { it.updatedAt }) {
+        value = withContext(Dispatchers.IO) { chats.associate { it.id to Checkpoints.stats(context, it.id) } }
     }
+    val totals = perChat.values.fold(Checkpoints.Stats(0, 0, 0)) { a, b -> a + b }
+    val usage = Activity.usage(chats, perChat.mapValues { it.value.costs })
     val colors = MaterialTheme.colorScheme
     Column(Modifier.fillMaxSize().background(colors.background).systemBarsPadding()) {
         ScreenHeader("Activity", onBack)
@@ -141,7 +147,7 @@ fun ActivityScreen(onBack: () -> Unit, onOpenChat: (String) -> Unit) {
             }
             item {
                 Text(
-                    "Cost and context use are what each agent reports for chats opened since the app started; agents that don't report them show n/a.",
+                    "Cost and context use are what each agent reports, kept with each chat; agents that don't report them show n/a.",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                 )
             }

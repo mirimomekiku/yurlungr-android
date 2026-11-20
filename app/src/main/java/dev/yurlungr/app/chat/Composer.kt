@@ -293,7 +293,10 @@ fun ComposerField(
     val mentionStart = value.text.substring(0, cursor).let { head -> head.lastIndexOfAny(charArrayOf(' ', '\n')) + 1 }
     val mention = value.text.substring(mentionStart, cursor).takeIf { it.startsWith("@") && suggestFiles != null }?.removePrefix("@")
     val fileHits by androidx.compose.runtime.produceState(emptyList<String>(), mention) {
-        this.value = if (mention == null) emptyList() else suggestFiles?.invoke(mention).orEmpty()
+        if (mention == null) { this.value = emptyList(); return@produceState }
+        // Debounced: each keystroke cancels the previous lookup before it starts listing files.
+        kotlinx.coroutines.delay(150)
+        this.value = suggestFiles?.invoke(mention).orEmpty()
     }
     if (showPrompts) PromptLibrarySheet(
         current = value.text,

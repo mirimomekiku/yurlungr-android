@@ -108,15 +108,7 @@ object ChatNotifications {
     }
 
     /** Sends [text] from a notification reply: now if the agent is free, after the turn if it's busy, after a restart if it stopped. */
-    fun reply(chat: ChatSession, text: String) {
-        when (chat.state) {
-            ChatState.Ready, ChatState.Running, ChatState.Starting -> chat.enqueue(text, emptyList())
-            ChatState.Saved -> { chat.queue(text, emptyList()); chat.resume() }
-            is ChatState.Failed -> { chat.queue(text, emptyList()); chat.restart() }
-            // Signing in needs the app; the message waits and goes out after "I've signed in".
-            ChatState.AuthRequired -> chat.queue(text, emptyList())
-        }
-    }
+    fun reply(chat: ChatSession, text: String) = chat.deliver(text, emptyList())
 }
 
 /** Handles the buttons on chat notifications. Not exported: only this app's notifications reach it. */
@@ -148,7 +140,11 @@ class ChatActionReceiver : BroadcastReceiver() {
                         val open = chat.items.any { it.key == key && it is ChatItem.Permission && it.resolved == null }
                         if (open) chat.answerPermission(key, option)
                         else Toast.makeText(context, "That request was already answered", Toast.LENGTH_SHORT).show()
-                        nm.cancel(ChatNotifications.id(chatId))
+                        // Another prompt still waiting keeps the (re-posted) alert for it; only the last answer clears it.
+                        if (chat.openPermission == null) nm.cancel(ChatNotifications.id(chatId))
+                        else if (!open) chat.openPermission?.let { next ->
+                            ChatNotifications.approval(context, chat, next, "${chat.agent.displayName} needs you", chat.attentionText(next))
+                        }
                     }
                     ChatNotifications.ACTION_REPLY -> {
                         // Cancelling also ends the notification's "sending" spinner.

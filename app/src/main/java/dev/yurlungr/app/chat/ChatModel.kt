@@ -53,6 +53,12 @@ interface ChatModel {
     fun sendQueuedNow() {}
     /** Project files matching [query] for @-mentions (relative paths). */
     suspend fun suggestFiles(query: String): List<String> = emptyList()
+    /** A terminal the agent ran a command in (live output), when it runs on this phone. */
+    fun terminal(id: String): TerminalView? = null
+    /** Stops a terminal's command and everything it started. */
+    fun killTerminal(id: String) {}
+    /** The project folder files are opened from (tool-call locations), when it's on this phone. */
+    val localCwd: java.io.File? get() = null
 
     fun resume()
     fun restart()

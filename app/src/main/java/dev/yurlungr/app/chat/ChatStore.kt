@@ -37,6 +37,8 @@ data class SavedChat(
     val pinned: Boolean = false,
     /** The user named this chat: the agent's own titles no longer replace it. */
     val titleLocked: Boolean = false,
+    /** The agent's last reported context use and cost, so they're still shown after a restart. */
+    val usage: Usage? = null,
 )
 
 /**
@@ -47,6 +49,21 @@ object ChatStore {
     private const val TAG = "ChatStore"
     private const val VERSION = 1
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = false }
+
+    /** A tool's text output is kept to this many characters, in memory and on disk. */
+    const val MAX_TOOL_TEXT = 20_000
+
+    /**
+     * [text] within [max] characters: its start and, mostly, its end (where errors and results
+     * are), with a note of what was left out between them.
+     */
+    fun capText(text: String, max: Int): String {
+        if (text.length <= max) return text
+        val head = max * 2 / 5
+        val tail = max - head
+        val omitted = text.length - head - tail
+        return text.substring(0, head) + "\n… $omitted characters left out …\n" + text.substring(text.length - tail)
+    }
 
     private fun dir(context: Context): File = context.getDir("chats", Context.MODE_PRIVATE)
 
@@ -87,6 +104,7 @@ object ChatStore {
         chat.pendingText?.let { put("pending", it) }
         if (chat.queuedTexts.isNotEmpty()) putJsonArray("queued") { chat.queuedTexts.forEach { add(JsonPrimitive(it)) } }
         chat.acpSessionId?.let { put("acpSessionId", it) }
+        chat.usage?.let { put("usage", AcpExtras.encodeUsage(it)) }
         put("updatedAt", chat.updatedAt)
         putJsonArray("items") { chat.items.forEach { add(encodeItem(it)) } }
     }
@@ -117,6 +135,19 @@ object ChatStore {
             is ChatItem.Permission -> {
                 put("t", "permission")
                 put("title", item.toolTitle)
+                item.toolKind?.let { put("kind", it) }
+                item.details.command?.let { put("command", it) }
+                if (item.details.paths.isNotEmpty()) put("paths", buildJsonArray { item.details.paths.forEach { add(it) } })
+                // The changes travel to a paired device (its card shows them); the saved chat has them in the tool call.
+                if (wire && item.details.diffs.isNotEmpty()) putJsonArray("diffs") {
+                    item.details.diffs.forEach { d ->
+                        addJsonObject {
+                            put("path", d.path)
+                            d.oldText?.let { put("old", it.take(20_000)) }
+                            put("new", d.newText.take(20_000))
+                        }
+                    }
+                }
                 if (wire) {
                     item.resolved?.let { put("resolved", it) }
                     putJsonArray("options") {
@@ -140,13 +171,17 @@ object ChatStore {
                     item.content.forEach { c ->
                         addJsonObject {
                             when (c) {
-                                is ToolContent.Text -> { put("type", "text"); put("text", c.text.take(20_000)) }
+                                is ToolContent.Text -> { put("type", "text"); put("text", capText(c.text, MAX_TOOL_TEXT)) }
                                 is ToolContent.Diff -> {
                                     put("type", "diff"); put("path", c.path)
                                     c.oldText?.let { put("old", it.take(50_000)) }
                                     put("new", c.newText.take(50_000))
                                 }
-                                is ToolContent.Terminal -> { put("type", "terminal"); put("id", c.terminalId) }
+                                is ToolContent.Terminal -> {
+                                    put("type", "terminal"); put("id", c.terminalId)
+                                    c.output?.let { put("output", capText(it, MAX_TOOL_TEXT)) }
+                                    c.exitLabel?.let { put("exit", it) }
+                                }
                             }
                         }
                     }
@@ -168,6 +203,7 @@ object ChatStore {
         titleLocked = (obj["titleLocked"] as? JsonPrimitive)?.booleanOrNull ?: false,
         queuedTexts = (obj["queued"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull },
         acpSessionId = obj.str("acpSessionId"),
+        usage = AcpExtras.parseUsage(obj["usage"] as? JsonObject),
         updatedAt = (obj["updatedAt"] as? JsonPrimitive)?.longOrNull ?: 0L,
         items = (obj["items"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonObject)?.let(::decodeItem) },
     )
@@ -191,9 +227,10 @@ object ChatStore {
                 val p = el as? JsonObject ?: return@mapNotNull null
                 PermissionOption(p.str("id") ?: return@mapNotNull null, p.str("name").orEmpty(), p.str("kind").orEmpty())
             }
-            ChatItem.Permission(o.str("title").orEmpty(), options, CompletableDeferred()).apply { resolved = o.str("resolved") }
+            ChatItem.Permission(o.str("title").orEmpty(), options, CompletableDeferred(), o.str("kind"), permissionDetails(o))
+                .apply { resolved = o.str("resolved") }
         } else {
-            ChatItem.Permission(o.str("title").orEmpty(), emptyList(), CompletableDeferred<String?>(null))
+            ChatItem.Permission(o.str("title").orEmpty(), emptyList(), CompletableDeferred<String?>(null), o.str("kind"), permissionDetails(o))
                 .apply { resolved = o.str("resolved") ?: "Interrupted" }
         }
         "tool" -> ChatItem.ToolCall(o.str("id") ?: "tool").apply {
@@ -211,13 +248,22 @@ object ChatStore {
                 when (c.str("type")) {
                     "text" -> ToolContent.Text(c.str("text").orEmpty())
                     "diff" -> ToolContent.Diff(c.str("path") ?: "?", c.str("old"), c.str("new").orEmpty())
-                    "terminal" -> ToolContent.Terminal(c.str("id").orEmpty())
+                    "terminal" -> ToolContent.Terminal(c.str("id").orEmpty(), c.str("output"), c.str("exit"))
                     else -> null
                 }
             }
         }
         else -> null
     }
+
+    private fun permissionDetails(o: JsonObject) = PermissionDetails(
+        command = o.str("command"),
+        paths = (o["paths"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull },
+        diffs = (o["diffs"] as? JsonArray).orEmpty().mapNotNull { el ->
+            val d = el as? JsonObject ?: return@mapNotNull null
+            ToolContent.Diff(d.str("path") ?: return@mapNotNull null, d.str("old"), d.str("new").orEmpty())
+        },
+    )
 
     private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
 }

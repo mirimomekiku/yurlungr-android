@@ -62,6 +62,9 @@ fun CheckpointsSheet(chat: ChatSession, onDismiss: () -> Unit) {
         "Checkpoints", onDismiss = onDismiss, icon = Ph.ClockCounterClockwise, tile = AppColors.tiles.lilac,
         subtitle = "The project before and after each prompt. Kept outside the project's own git.",
     ) {
+        Checkpoints.workingIn(ChatSessions.chats, chat.cwd)?.let { other ->
+            Text(Checkpoints.busyMessage(other, chat), style = MaterialTheme.typography.bodySmall, color = colors.error)
+        }
         if (turns.isEmpty()) Text(
             if (Checkpoints.enabledFor(dev.yurlungr.app.runtime.RuntimePaths(context), chat.cwd)) "No turns yet: each prompt adds one."
             else "Checkpoints are kept for chats in a project folder, not the home folder.",
@@ -86,8 +89,8 @@ fun CheckpointsSheet(chat: ChatSession, onDismiss: () -> Unit) {
                     if (t.before != null && t.after != null && (t.filesChanged ?: 0) > 0) TextButton(onClick = {
                         scope.launch { diff = t to Checkpoints.diff(context, chat.id, chat.cwd, t.before, t.after) }
                     }) { Text("Diff") }
-                    // Not while the agent works: the restore and the agent would write the same files.
-                    val busy = chat.state == ChatState.Running
+                    // Not while an agent works in this folder (this chat or another): the restore and the agent would write the same files.
+                    val busy = Checkpoints.workingIn(ChatSessions.chats, chat.cwd) != null
                     if (t.before != null && t.endedAt != null) TextButton(enabled = !busy && !Checkpoints.restoring, onClick = { restoring = t }) {
                         Text(if (t.restore) "Undo this restore" else "Restore to before")
                     }
@@ -104,9 +107,9 @@ fun CheckpointsSheet(chat: ChatSession, onDismiss: () -> Unit) {
                     onClick = {
                         restoring = null
                         val app = context.applicationContext
-                        // Checked again now: the agent may have started a turn while this sheet was open.
-                        if (chat.state == ChatState.Running) {
-                            Toast.makeText(app, "${chat.agent.displayName} is working. Stop it first, then restore.", Toast.LENGTH_LONG).show()
+                        // Checked again now: an agent may have started a turn while this sheet was open.
+                        Checkpoints.workingIn(ChatSessions.chats, chat.cwd)?.let { other ->
+                            Toast.makeText(app, Checkpoints.busyMessage(other, chat), Toast.LENGTH_LONG).show()
                             return@Button
                         }
                         // In the app's scope: closing this sheet mustn't stop a restore halfway.
@@ -137,6 +140,7 @@ fun CheckpointsSheet(chat: ChatSession, onDismiss: () -> Unit) {
 fun UsageSheet(chat: ChatModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val stats by produceState(Checkpoints.Stats(0, 0, 0)) { value = withContext(Dispatchers.IO) { Checkpoints.stats(context, chat.id) } }
+    fun money(costs: Map<String, Double>) = costs.entries.joinToString(" · ") { (cur, v) -> String.format(java.util.Locale.US, "%.4f %s", v, cur) }
     val colors = MaterialTheme.colorScheme
     AppSheet("Usage", onDismiss = onDismiss, icon = Ph.Lightning, tile = AppColors.tiles.sky, subtitle = chat.title) {
         @Composable
@@ -149,10 +153,11 @@ fun UsageSheet(chat: ChatModel, onDismiss: () -> Unit) {
         line("Prompts", "${stats.turns}")
         line("Time working", duration(stats.millis))
         line("Files changed", "${stats.filesChanged}")
+        if (stats.costs.isNotEmpty()) line("Cost of these prompts", money(stats.costs))
         val u = chat.usage
         if (u != null) {
             line("Context used", "${u.used / 1000}k of ${u.size / 1000}k tokens (${(u.used * 100 / u.size.coerceAtLeast(1))}%)")
-            line("Cost", u.costAmount?.let { String.format(java.util.Locale.US, "%.4f %s", it, u.currency ?: "USD") } ?: "not reported by ${chat.agent.displayName}")
+            line("Session cost", u.costAmount?.let { String.format(java.util.Locale.US, "%.4f %s", it, u.currency ?: "USD") } ?: "not reported by ${chat.agent.displayName}")
         } else {
             Text("${chat.agent.displayName} hasn't reported token usage or cost for this session.", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         }

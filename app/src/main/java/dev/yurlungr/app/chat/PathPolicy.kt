@@ -39,9 +39,10 @@ class PathPolicy(dataDir: File, filesDir: File, home: File) {
 
     /**
      * Whether a standing rule for [project] may approve a tool call that names [paths] without asking.
-     * Every path must be inside the project, not in its `.git` folder, and the project itself must
-     * not be the runtime home (or a folder above it), whose dotfiles include agent credentials and
-     * shell start-up files.
+     * Every path must be inside the project, not in its `.git` folder or any other file that
+     * configures agents, editors or hooks (see [isSensitive]), and the project itself must not be
+     * the runtime home (or a folder above it), whose dotfiles include agent credentials and shell
+     * start-up files.
      */
     fun allowsAutoApproval(project: File, paths: List<String>): Boolean {
         val root = norm(canonical(project))
@@ -49,12 +50,41 @@ class PathPolicy(dataDir: File, filesDir: File, home: File) {
         return paths.all { raw ->
             val f = resolve(raw) ?: return@all false
             if (!allowsAccess(f) || !isUnder(norm(f), root)) return@all false
-            val rel = norm(f).removePrefix(root).trimStart('/')
-            rel.split('/').none { it == ".git" }
+            !isSensitive(norm(f).removePrefix(root).trimStart('/'))
         }
     }
 
     companion object {
+        /**
+         * Folders whose files decide what agents, editors and git run: an "Edit files" rule that
+         * covered them would let an agent widen its own permissions (add MCP servers, allow
+         * commands, add hooks or tasks that run later). Matched as any path segment.
+         */
+        private val SENSITIVE_DIRS = setOf(".git", ".claude", ".gemini", ".codex", ".qwen", ".cursor", ".husky", ".githooks")
+
+        /** Files with the same power, matched by name anywhere in the project. */
+        private val SENSITIVE_FILES = setOf(
+            ".mcp.json", ".envrc", ".pre-commit-config.yaml", "lefthook.yml", "lefthook.yaml", ".lefthook.yml",
+        )
+
+        /**
+         * Whether [relative] (a path inside a project, '/'-separated) is a file a standing rule must
+         * never cover: agent and tool configuration (`.claude/`, `.mcp.json`, `.gemini/`, `.codex/`,
+         * `.qwen/`, `.cursor/`), `.vscode/tasks.json`, environment files (`.envrc`, `.env*`), and git
+         * hooks (`.git/`, `.husky/`, `.githooks/`, hook managers' configs). Those still ask every time.
+         */
+        fun isSensitive(relative: String): Boolean {
+            val parts = relative.split('/').filter { it.isNotEmpty() && it != "." }
+            if (parts.isEmpty()) return false // the project folder itself (a search of the whole project)
+            val name = parts.last()
+            if (parts.any { it in SENSITIVE_DIRS }) return true
+            if (name in SENSITIVE_FILES) return true
+            if (name == ".env" || name.startsWith(".env.")) return true
+            if (parts.size >= 2 && parts[parts.size - 2] == ".vscode" && name == "tasks.json") return true
+            return false
+        }
+
+
         /** True if [path] is [dir] or inside it (by whole path segments, so `/a/b` isn't inside `/a/bc`). */
         fun isUnder(path: String, dir: String): Boolean {
             val d = dir.trimEnd('/')

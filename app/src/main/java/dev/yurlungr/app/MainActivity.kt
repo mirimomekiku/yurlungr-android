@@ -266,6 +266,7 @@ class MainActivity : ComponentActivity() {
                     Box(Modifier.fillMaxSize()) {
                     CompositionLocalProvider(
                         dev.yurlungr.app.ui.LocalOpenFile provides { nav.push(Route.FileView(it.path)) },
+                        dev.yurlungr.app.chat.LocalOpenFileAt provides { f, line -> nav.push(Route.FileView(f.path, edit = line != null, line = line)) },
                         LocalOpenDrawer provides openDrawer,
                         dev.yurlungr.app.projects.LocalFindCode provides { project -> nav.push(Route.FindCode(project)) },
                         dev.yurlungr.app.ui.LocalOpenExtensions provides { agent, project -> nav.push(Route.Extensions(agent, project)) },

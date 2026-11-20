@@ -18,6 +18,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -37,6 +38,9 @@ data class ChatTurn(
     val filesChanged: Int? = null,
     /** A restore, recorded like a turn: [before] is the state it replaced, so restoring that undoes it. */
     val restore: Boolean = false,
+    /** What the turn cost, from the agent's reported session cost (null when it doesn't report one). */
+    val cost: Double? = null,
+    val currency: String? = null,
 ) {
     val millis: Long get() = (endedAt ?: startedAt) - startedAt
 }
@@ -87,7 +91,8 @@ object Checkpoints {
             fun l(k: String) = p(k)?.longOrNull
             val index = p("index")?.intOrNull ?: return@mapNotNull null
             ChatTurn(index, s("prompt").orEmpty(), l("startedAt") ?: 0, l("endedAt"),
-                s("before"), s("after"), p("filesChanged")?.intOrNull, s("restore") == "true")
+                s("before"), s("after"), p("filesChanged")?.intOrNull, s("restore") == "true",
+                p("cost")?.doubleOrNull, s("currency"))
         }
     }
 
@@ -97,6 +102,8 @@ object Checkpoints {
             t.endedAt?.let { put("endedAt", it) }; t.before?.let { put("before", it) }; t.after?.let { put("after", it) }
             t.filesChanged?.let { put("filesChanged", it) }
             if (t.restore) put("restore", true)
+            t.cost?.let { put("cost", it) }
+            t.currency?.let { put("currency", it) }
         }
     }).toString()
 
@@ -116,6 +123,25 @@ object Checkpoints {
         private set
     private val restoreBusy = MutableStateFlow(false)
 
+    /**
+     * A chat whose agent is working in [cwd] (the same folder, however it's spelled: canonical
+     * paths), or null. A restore then has to wait: it would write the files the agent is writing,
+     * and two chats in one project share them.
+     */
+    fun workingIn(chats: List<ChatSession>, cwd: File): ChatSession? {
+        val running = chats.filter { it.state == ChatState.Running }
+        if (running.isEmpty()) return null
+        val target = canonical(cwd)
+        return running.firstOrNull { canonical(it.cwd) == target }
+    }
+
+    private fun canonical(f: File): String = runCatching { f.canonicalPath }.getOrDefault(f.absolutePath).trimEnd('/')
+
+    /** Why a restore can't run now, naming the chat that's working. */
+    fun busyMessage(working: ChatSession, restoring: ChatSession): String =
+        if (working === restoring) "${working.agent.displayName} is working in this chat. Stop it first, then restore."
+        else "Another chat is working in this folder (${working.agent.displayName} · ${working.title}). Stop it first, then restore."
+
     /** Returns once no restore is running: a prompt mustn't reach the agent while files are being put back. */
     suspend fun awaitRestore() {
         restoreBusy.first { !it }
@@ -129,11 +155,25 @@ object Checkpoints {
     private fun lockFor(repo: File): Mutex = repoLocks.computeIfAbsent(repo.path) { Mutex() }
 
     /**
+     * One lock per chat, taken before a repository's: a turn's start and end, a restore and a
+     * delete of the same chat run one at a time. So a delete can't run between a turn's final
+     * snapshot and its turns-file write (which leaked a ref and re-created the deleted chat's file).
+     */
+    private val chatLocks = ConcurrentHashMap<String, Mutex>()
+    private fun chatLock(chatId: String): Mutex = chatLocks.computeIfAbsent(chatId) { Mutex() }
+
+    /** Chats deleted in this process: their late turn ends write nothing. */
+    private val deleted: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /**
      * Forgets a chat's checkpoints: its turns, its index, and its snapshots in every project's
      * shadow repository (then gc drops unreferenced objects once past git's grace period), so
      * storage doesn't only grow.
      */
-    suspend fun delete(context: Context, chatId: String) = withContext(Dispatchers.IO) {
+    suspend fun delete(context: Context, chatId: String) = chatLock(chatId).withLock { deleteLocked(context, chatId) }
+
+    private suspend fun deleteLocked(context: Context, chatId: String) = withContext(Dispatchers.IO) {
+        deleted += chatId
         turnsFile(context, chatId).delete()
         File(root(context), "$chatId.index").delete()
         val paths = RuntimePaths(context)
@@ -202,21 +242,27 @@ object Checkpoints {
     }
 
     /** Starts a turn: its snapshot before the agent works. */
-    suspend fun begin(context: Context, chatId: String, cwd: File, prompt: String): ChatTurn {
+    suspend fun begin(context: Context, chatId: String, cwd: File, prompt: String): ChatTurn = chatLock(chatId).withLock {
+        check(chatId !in deleted) { "Chat deleted" }
         val before = snapshot(context, chatId, cwd, "before: ${prompt.take(60)}")
         val turns = withContext(Dispatchers.IO) { turnsForUpdate(context, chatId) }
         val turn = ChatTurn(turns.size + 1, prompt.take(200), System.currentTimeMillis(), before = before)
-        save(context, chatId, turns + turn)
-        return turn
+        withContext(Dispatchers.IO) { save(context, chatId, turns + turn) }
+        turn
     }
 
-    /** Ends a turn: its snapshot after, and how many files changed. */
-    suspend fun end(context: Context, chatId: String, cwd: File, turn: ChatTurn) {
-        val after = snapshot(context, chatId, cwd, "after: ${turn.prompt.take(60)}")
-        val changed = if (turn.before != null && after != null) changedFiles(context, chatId, cwd, turn.before, after).size else null
-        val done = turn.copy(endedAt = System.currentTimeMillis(), after = after, filesChanged = changed)
-        save(context, chatId, turnsForUpdate(context, chatId).map { if (it.index == turn.index && it.startedAt == turn.startedAt) done else it })
-    }
+    /** Ends a turn: its snapshot after, how many files changed, and what it cost. Nothing for a deleted chat. */
+    suspend fun end(context: Context, chatId: String, cwd: File, turn: ChatTurn, cost: Double? = null, currency: String? = null) =
+        chatLock(chatId).withLock {
+            if (chatId in deleted) return@withLock
+            val after = snapshot(context, chatId, cwd, "after: ${turn.prompt.take(60)}")
+            val changed = if (turn.before != null && after != null) changedFiles(context, chatId, cwd, turn.before, after).size else null
+            val done = turn.copy(endedAt = System.currentTimeMillis(), after = after, filesChanged = changed,
+                cost = cost, currency = currency.takeIf { cost != null })
+            withContext(Dispatchers.IO) {
+                save(context, chatId, turnsForUpdate(context, chatId).map { if (it.index == turn.index && it.startedAt == turn.startedAt) done else it })
+            }
+        }
 
     suspend fun changedFiles(context: Context, chatId: String, cwd: File, from: String, to: String): List<String> =
         git(context, chatId, cwd, "diff", "-z", "--name-only", from, to).output.split('\u0000').filter { it.isNotEmpty() }
@@ -252,7 +298,10 @@ object Checkpoints {
         if (!restoreBusy.compareAndSet(false, true)) return Result.failure(IllegalStateException("Another restore is running"))
         try {
             withContext(Dispatchers.Main) { restoring = true }
-            return lockFor(gitDir(context, cwd)).withLock { withContext(Dispatchers.IO) { restoreLocked(context, chatId, cwd, target, label) } }
+            return chatLock(chatId).withLock {
+                if (chatId in deleted) return@withLock Result.failure(IllegalStateException("This chat was deleted"))
+                lockFor(gitDir(context, cwd)).withLock { withContext(Dispatchers.IO) { restoreLocked(context, chatId, cwd, target, label) } }
+            }
         } finally {
             withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) { restoring = false }
             restoreBusy.value = false
@@ -281,10 +330,18 @@ object Checkpoints {
         return Result.success(now)
     }
 
-    /** Turns, time and the agent's last reported usage, for one chat. */
-    data class Stats(val turns: Int, val millis: Long, val filesChanged: Int)
-
-    fun stats(context: Context, chatId: String): Stats = turns(context, chatId).let { t ->
-        Stats(t.size, t.sumOf { it.millis }, t.sumOf { it.filesChanged ?: 0 })
+    /** Turns, time, changes and what the turns cost (per currency), for one chat or several. */
+    data class Stats(val turns: Int, val millis: Long, val filesChanged: Int, val costs: Map<String, Double> = emptyMap()) {
+        operator fun plus(o: Stats) = Stats(turns + o.turns, millis + o.millis, filesChanged + o.filesChanged, addCosts(costs, o.costs))
     }
+
+    fun stats(context: Context, chatId: String): Stats = stats(turns(context, chatId))
+
+    internal fun stats(t: List<ChatTurn>): Stats = Stats(
+        t.size, t.sumOf { it.millis }, t.sumOf { it.filesChanged ?: 0 },
+        t.mapNotNull { turn -> turn.cost?.let { (turn.currency ?: "USD") to it } }.groupBy({ it.first }, { it.second }).mapValues { it.value.sum() },
+    )
+
+    internal fun addCosts(a: Map<String, Double>, b: Map<String, Double>): Map<String, Double> =
+        (a.keys + b.keys).associateWith { (a[it] ?: 0.0) + (b[it] ?: 0.0) }
 }

@@ -69,8 +69,12 @@ object ApprovalRules {
 
     fun remove(context: Context, rule: ApprovalRule) = store(context, load(context) - rule)
 
-    /** Kinds that act on files: a rule covers them only when the call names the files, all inside the project. */
-    private val fileKinds = setOf("read", "edit")
+    /**
+     * Kinds a rule covers only when the call names what it acts on, all inside the project. A search
+     * that names no folder could search anywhere; a fetch names a URL, which a per-project rule
+     * can't judge, so a fetch is approved by a rule only when it reads project files.
+     */
+    private val pathKinds = setOf("read", "edit", "search", "fetch")
 
     fun matches(context: Context, project: String, kind: String?, paths: List<String>, policy: PathPolicy): Boolean =
         allows(load(context), project, kind, paths, policy)
@@ -83,7 +87,7 @@ object ApprovalRules {
     fun allows(rules: List<ApprovalRule>, project: String, kind: String?, paths: List<String>, policy: PathPolicy): Boolean {
         if (kind == null || kind !in kinds) return false
         if (rules.none { it.kind == kind && (it.scope == "*" || it.scope == project) }) return false
-        if (kind in fileKinds && paths.isEmpty()) return false
+        if (kind in pathKinds && paths.isEmpty()) return false
         return policy.allowsAutoApproval(java.io.File(project), paths)
     }
 }
@@ -111,7 +115,9 @@ fun ApprovalRulesSheet(project: String, onDismiss: () -> Unit) {
             }
         }
         Text(
-            "Matching requests are approved once without asking, and the chat notes it. ⚠ These can change files or run code. Anything not switched on still asks you.",
+            "Matching requests are approved once without asking, and the chat notes it. ⚠ These can change files or run code. " +
+                "Reads, edits, searches and fetches count only when they name files inside this project, and agent settings, " +
+                "git hooks and .env files always ask. Anything not switched on still asks you.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 10.dp),

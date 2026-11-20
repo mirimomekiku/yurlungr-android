@@ -19,6 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -95,7 +96,10 @@ fun ToolOutputBlock(text: String) {
         Column(body) {
             val window = view
             when {
-                showAll -> lines.forEachIndexed { i, l -> OutputLine(l, i == error) }
+                // Every line: one Text per chunk of lines, not one per line, so huge output stays responsive.
+                showAll -> for (chunk in lines.indices.chunked(CHUNK_LINES)) {
+                    key(chunk.first()) { OutputChunk(lines, chunk.first()..chunk.last(), error) }
+                }
                 window != null -> {
                     if (window.first > 0) Gap(window.first) { view = ALL }
                     for (i in window) OutputLine(lines[i], i == error)
@@ -115,6 +119,27 @@ fun ToolOutputBlock(text: String) {
 
 /** Marker for "show every line". */
 private val ALL = IntRange(-1, -1)
+
+/** Lines drawn by one Text when showing everything. */
+private const val CHUNK_LINES = 200
+
+/** [range] of [lines] as one text, error lines coloured and the first error ([error]) highlighted. */
+@Composable
+private fun OutputChunk(lines: List<String>, range: IntRange, error: Int?) {
+    val text = remember(lines, range, error) {
+        androidx.compose.ui.text.buildAnnotatedString {
+            for (i in range) {
+                val l = lines[i]
+                val start = length
+                append(l)
+                val isError = i == error || OutputFold.isError(l)
+                if (isError) addStyle(androidx.compose.ui.text.SpanStyle(color = ErrFg, background = if (i == error) ErrBg else Color.Transparent), start, length)
+                if (i < range.last) append('\n')
+            }
+        }
+    }
+    Text(text, fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 15.sp, softWrap = false, color = Fg)
+}
 
 @Composable
 private fun Action(label: String, color: Color, onClick: () -> Unit) {

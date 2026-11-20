@@ -68,6 +68,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -104,19 +105,36 @@ fun ChatScreen(
     LaunchedEffect(chat.id) { chat.resume() }
     val voice = dev.yurlungr.app.voice.rememberVoiceChat(chat)
 
-    // Follow the conversation while the user is at the bottom.
-    val atBottom by remember {
-        derivedStateOf {
-            val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-            last >= info.totalItemsCount - 2
+    // Follow the conversation while the user is really at the end. Scrolling up (a drag) stops
+    // following until they come back to the end, so a long streaming reply can be read from its top.
+    var follow by remember(chat.id) { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect { i ->
+            when (i) {
+                is androidx.compose.foundation.interaction.DragInteraction.Start -> follow = false
+                is androidx.compose.foundation.interaction.DragInteraction.Stop,
+                is androidx.compose.foundation.interaction.DragInteraction.Cancel -> if (!listState.canScrollForward) follow = true
+            }
         }
     }
-    val lastTextLength = (chat.items.lastOrNull() as? ChatItem.AgentText)?.text?.length ?: 0
-    LaunchedEffect(chat.items.size, lastTextLength / 120, chat.state) {
-        if (atBottom || chat.items.lastOrNull() is ChatItem.User) {
-            listState.scrollToItem(chat.items.size) // footer item
+    LaunchedEffect(listState) {
+        // A fling that ends at the bottom.
+        snapshotFlow { listState.canScrollForward }.collect { if (!it) follow = true }
+    }
+    // Read inside a flow, not here: streamed text must not recompose the whole screen per chunk.
+    LaunchedEffect(chat) {
+        snapshotFlow {
+            val last = chat.items.lastOrNull()
+            Triple(chat.items.size, ((last as? ChatItem.AgentText)?.text?.length ?: 0) / 120, chat.state)
+        }.collect {
+            val sentByUser = chat.items.lastOrNull() is ChatItem.User
+            if (sentByUser) follow = true
+            if (follow) listState.scrollToItem(chat.items.size) // footer item
         }
+    }
+    // The reply being written, if any: only it is parsed while it streams (throttled, see MarkdownText).
+    val streamingKey by remember(chat) {
+        derivedStateOf { if (chat.isRunning) (chat.items.lastOrNull() as? ChatItem.AgentText)?.key else null }
     }
 
     Column(
@@ -149,7 +167,7 @@ fun ChatScreen(
             items(chat.items, key = { it.key }) { item ->
                 // New messages fade/slide in; existing ones glide when the list reflows.
                 Box(Modifier.animateItem(fadeInSpec = tween(Motion.MEDIUM), placementSpec = tween(Motion.MEDIUM, easing = Motion.Emphasized))) {
-                    ChatItemView(chat, item, voice)
+                    ChatItemView(chat, item, voice, streaming = item.key == streamingKey)
                 }
             }
             item(key = "footer") { ChatFooter(chat, onLogin, onInstallAgents, onSystemChecks) }
@@ -346,17 +364,21 @@ private fun stateLabel(state: ChatState) = when (state) {
 }
 
 @Composable
-private fun ChatItemView(chat: ChatModel, item: ChatItem, voice: dev.yurlungr.app.voice.VoiceChat) {
+private fun ChatItemView(chat: ChatModel, item: ChatItem, voice: dev.yurlungr.app.voice.VoiceChat, streaming: Boolean = false) {
     when (item) {
         is ChatItem.User -> UserBubble(item)
         is ChatItem.AgentText -> Column {
-            SelectionContainer { MarkdownText(item.text, allowLocalFiles = !chat.isRemote) }
+            SelectionContainer {
+                // The text is read inside MarkdownStream (not here) while it streams, so a chunk doesn't recompose this.
+                if (streaming) MarkdownStream({ item.text }, allowLocalFiles = !chat.isRemote)
+                else MarkdownText(item.text, allowLocalFiles = !chat.isRemote)
+            }
             dev.yurlungr.app.voice.ReadAloudButton(voice, item)
         }
         is ChatItem.Thought -> ThoughtView(item)
-        is ChatItem.ToolCall -> ToolCallCard(item)
+        is ChatItem.ToolCall -> ToolCallCard(item, chat)
         is ChatItem.Plan -> PlanCard(item)
-        is ChatItem.Permission -> PermissionCard(item, onAlways = if (chat is ChatSession && item.toolKind in ApprovalRules.kinds) ({ chat.alwaysAllow(item) }) else null) { option -> chat.answerPermission(item, option) }
+        is ChatItem.Permission -> PermissionCard(item, chat.localCwd?.path, onAlways = if (chat is ChatSession && item.toolKind in ApprovalRules.kinds) ({ chat.alwaysAllow(item) }) else null) { option -> chat.answerPermission(item, option) }
         is ChatItem.Notice -> Text(
             item.text,
             style = MaterialTheme.typography.labelMedium,
@@ -420,9 +442,91 @@ private fun ThoughtView(item: ChatItem.Thought) {
     )
 }
 
+/** Opens a file in the editor at a line (1-based; null for the top). Null outside the app shell. */
+val LocalOpenFileAt = androidx.compose.runtime.compositionLocalOf<((java.io.File, Int?) -> Unit)?> { null }
+
+/** A tool call's `path` or `path:line` location, split; relative paths are taken from [cwd]. */
+internal fun parseLocation(location: String, cwd: java.io.File?): Pair<java.io.File, Int?>? {
+    val m = Regex("^(.*?)(?::(\\d+))?$").find(location) ?: return null
+    val path = m.groupValues[1].ifEmpty { return null }
+    val line = m.groupValues[2].toIntOrNull()?.takeIf { it > 0 }
+    val f = java.io.File(path)
+    val file = if (f.isAbsolute) f else cwd?.let { java.io.File(it, path) } ?: return null
+    return file to line
+}
+
+/** The tool call's locations, each one tappable when it's a file on this phone. */
 @Composable
-private fun ToolCallCard(item: ChatItem.ToolCall) {
-    var expanded by remember { mutableStateOf(false) }
+private fun ToolLocations(locations: List<String>, chat: ChatModel) {
+    val openAt = LocalOpenFileAt.current
+    val cwd = chat.localCwd
+    val context = LocalContext.current
+    val style = MaterialTheme.typography.labelSmall
+    if (openAt == null || cwd == null) {
+        Text(
+            locations.joinToString(", "), style = style, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 28.dp, top = 2.dp),
+        )
+        return
+    }
+    FlowRow(Modifier.padding(start = 28.dp, top = 2.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (loc in locations.take(6)) {
+            Text(
+                loc.substringAfterLast('/').ifEmpty { loc },
+                style = style,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .widthIn(max = 220.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable {
+                        val (file, line) = parseLocation(loc, cwd) ?: return@clickable
+                        if (file.isFile) openAt(file, line)
+                        else android.widget.Toast.makeText(context, "Not found: ${file.path}", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                    .padding(vertical = 2.dp),
+            )
+        }
+        if (locations.size > 6) Text("+${locations.size - 6}", style = style, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** Output of a command the agent runs through an ACP terminal: live, with Stop while it runs. */
+@Composable
+private fun TerminalBlock(content: ToolContent.Terminal, chat: ChatModel) {
+    val live = remember(content.terminalId) { chat.terminal(content.terminalId) }
+    val text = live?.text ?: content.output
+    val running = live?.running == true
+    val exit = live?.exit?.label ?: content.exitLabel
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            PhIcon(Ph.Terminal, null, size = 14.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                when {
+                    running -> "Running…"
+                    exit != null -> exit
+                    chat.isRemote -> "Runs on the other phone"
+                    else -> "Command output"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            if (running) TextButton(onClick = { chat.killTerminal(content.terminalId) }) {
+                Text("Stop", color = MaterialTheme.colorScheme.error)
+            }
+        }
+        if (!text.isNullOrEmpty()) ToolOutputBlock(text)
+    }
+}
+
+@Composable
+private fun ToolCallCard(item: ChatItem.ToolCall, chat: ChatModel) {
+    // A running command's output is worth seeing without a tap.
+    var userExpanded by remember { mutableStateOf<Boolean?>(null) }
+    val expanded = userExpanded ?: (item.content.any { it is ToolContent.Terminal } && item.status != "completed" && item.status != "failed")
     val hasDetail = item.content.isNotEmpty()
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
@@ -430,7 +534,7 @@ private fun ToolCallCard(item: ChatItem.ToolCall) {
     ) {
         Column(
             Modifier
-                .clickable(enabled = hasDetail) { expanded = !expanded }
+                .clickable(enabled = hasDetail) { userExpanded = !expanded }
                 .padding(horizontal = 12.dp, vertical = 10.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -446,16 +550,7 @@ private fun ToolCallCard(item: ChatItem.ToolCall) {
                 Spacer(Modifier.width(8.dp))
                 ToolStatus(item.status)
             }
-            if (item.locations.isNotEmpty()) {
-                Text(
-                    item.locations.joinToString(", "),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = 28.dp, top = 2.dp),
-                )
-            }
+            if (item.locations.isNotEmpty()) ToolLocations(item.locations, chat)
             // Folded: a failed call still shows what went wrong.
             val errorLine = if (!expanded && item.status == "failed") remember(item.content) { firstErrorLine(item) } else null
             if (errorLine != null) {
@@ -475,7 +570,7 @@ private fun ToolCallCard(item: ChatItem.ToolCall) {
                     when (c) {
                         is ToolContent.Text -> ToolOutputBlock(c.text)
                         is ToolContent.Diff -> DiffView(c)
-                        is ToolContent.Terminal -> Text("Terminal output (${c.terminalId})", style = MaterialTheme.typography.bodySmall)
+                        is ToolContent.Terminal -> TerminalBlock(c, chat)
                     }
                     Spacer(Modifier.height(6.dp))
                 }
@@ -577,14 +672,15 @@ private fun PlanCard(item: ChatItem.Plan) {
 }
 
 @Composable
-private fun PermissionCard(item: ChatItem.Permission, onAlways: (() -> Unit)? = null, onChoose: (PermissionOption) -> Unit) {
+private fun PermissionCard(item: ChatItem.Permission, cwd: String?, onAlways: (() -> Unit)? = null, onChoose: (PermissionOption) -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().animateContentSize(),
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Permission needed", style = MaterialTheme.typography.labelLarge)
             Text(item.toolTitle, style = MaterialTheme.typography.bodyMedium)
+            PermissionDetailsView(item.details, cwd, open = item.resolved == null)
             val resolved = item.resolved
             if (resolved != null) {
                 Text("→ $resolved", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
@@ -603,6 +699,58 @@ private fun PermissionCard(item: ChatItem.Permission, onAlways: (() -> Unit)? = 
                 }
             }
         }
+    }
+}
+
+/**
+ * What a prompt approves: the command, the files, and the changes (folded; tap to see them).
+ * Open prompts show the command and files at once; answered ones keep them behind a tap.
+ */
+@Composable
+private fun PermissionDetailsView(details: PermissionDetails, cwd: String?, open: Boolean) {
+    if (details.isEmpty) return
+    var expanded by remember { mutableStateOf(false) }
+    val colors = MaterialTheme.colorScheme
+    val command = details.command
+    if (command != null && (open || expanded)) {
+        Text(
+            command,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
+            color = Color(0xFFE6EDF3),
+            maxLines = if (expanded) 40 else 4,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small).background(Color(0xFF0D1117))
+                .clickable { expanded = !expanded }.padding(8.dp),
+        )
+    }
+    val files = (details.paths + details.diffs.map { it.path }).distinct()
+    if (files.isNotEmpty() && (open || expanded)) {
+        val shown = if (expanded) files else files.take(3)
+        Text(
+            shown.joinToString("\n") { PermissionDetails.relativeTo(it, cwd) } + if (shown.size < files.size) "\n… and ${files.size - shown.size} more" else "",
+            style = MaterialTheme.typography.labelMedium,
+            fontFamily = FontFamily.Monospace,
+            color = colors.onTertiaryContainer,
+        )
+    }
+    val changes = details.diffs.isNotEmpty()
+    if (changes || !open || files.size > 3) {
+        Text(
+            when {
+                expanded -> "Hide details"
+                changes -> "Show changes (${details.diffs.size} file${if (details.diffs.size == 1) "" else "s"})"
+                else -> "Show details"
+            },
+            style = MaterialTheme.typography.labelMedium,
+            color = colors.primary,
+            modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { expanded = !expanded }.padding(vertical = 2.dp),
+        )
+    }
+    if (expanded) for (d in details.diffs) {
+        Text(PermissionDetails.relativeTo(d.path, cwd), style = MaterialTheme.typography.labelSmall, color = colors.onTertiaryContainer)
+        DiffView(d)
     }
 }
 
