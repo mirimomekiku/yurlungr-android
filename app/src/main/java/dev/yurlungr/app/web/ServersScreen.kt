@@ -176,10 +176,19 @@ fun ServersScreen(onBack: () -> Unit, onPreview: (url: String, title: String) ->
             if (links.isNotEmpty()) {
                 item { SectionLabel("Public links") }
                 item {
+                    // Ticks so the time left stays current while the screen is open.
+                    val now by androidx.compose.runtime.produceState(System.currentTimeMillis()) {
+                        while (true) { delay(30_000); value = System.currentTimeMillis() }
+                    }
                     Group {
                         for (t in links) GroupRow(
                             t.url ?: "Starting…",
-                            subtitle = "${t.label} · port ${t.port} · ${t.state.label}",
+                            subtitle = listOfNotNull(
+                                t.label, "port ${t.port}", t.state.label,
+                                if (t.key != null) "access key" else "open to anyone with it",
+                                if (t.state == TunnelState.Live) TunnelLinks.remaining(now, t.expiresAt) ?: "until stopped" else null,
+                            ).joinToString(" · "),
+                            subtitleLines = 2,
                             icon = Ph.Globe,
                             tile = if (t.state == TunnelState.Live) AppColors.tiles.sky else null,
                             trailing = {

@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const net = require('node:net');
+const crypto = require('node:crypto');
 const {spawn} = require('node:child_process');
 const adapters = require('./web-adapters.cjs');
 const configPath = process.argv[2];
@@ -13,6 +14,8 @@ const statusPath = path.join(runDir, 'status.json');
 const controlPath = path.join(runDir, 'stop');
 // The app writes this when the project's files changed and the server doesn't reload itself.
 const restartPath = path.join(runDir, 'restart');
+// The app writes the public link's access key here while the link is live, and removes it when it stops.
+const accessPath = path.join(runDir, 'access');
 config.compatibilityCache ||= path.join(runDir,'compatibility');
 let phase = 'Starting', child = null, ending = false, backendPort = null;
 // recipe: how the dev command was launched, reused on restart. previous: a dev command being restarted.
@@ -21,8 +24,11 @@ const sockets = new Set();
 let diagnosticText = '', lastHttpStatus = null;
 const preload = path.join(__dirname,'web-node-preload.cjs');
 const bins=[...new Set([config.cwd,config.installCwd].map(dir=>path.join(dir,'node_modules','.bin')))].join(path.delimiter);
+// Vite also reads the allowed-hosts env var; the proxy already rewrites Host, so it only matters for
+// requests that reach the dev server some other way.
 const runtimeEnv = {...process.env, PATH:bins+path.delimiter+(process.env.PATH||''), YURLUNGR_NODE_BINARY:config.node,
-  NEXT_TELEMETRY_DISABLED:'1',ASTRO_TELEMETRY_DISABLED:'1',NUXT_TELEMETRY_DISABLED:'1'};
+  NEXT_TELEMETRY_DISABLED:'1',ASTRO_TELEMETRY_DISABLED:'1',NUXT_TELEMETRY_DISABLED:'1',
+  __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS:'.trycloudflare.com'};
 if (fs.existsSync(preload)) runtimeEnv.NODE_OPTIONS = `${process.env.NODE_OPTIONS || ''} --require ${JSON.stringify(preload)}`.trim();
 function status(state, message = '', code = '', recovery = '') {
   phase = state;
@@ -110,15 +116,97 @@ function staticRequest(req, res) {
     if (req.method === 'HEAD') res.end(); else fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
   } catch (_) { res.writeHead(404); res.end('Not found'); }
 }
+// Public links (cloudflared) arrive with the visitor's Host, xxx.trycloudflare.com. Dev servers refuse unknown
+// hosts (Vite 5.4.12+/6.0.9+, Astro, Nuxt, SvelteKit, Angular 17+; webpack-dev-server: "Invalid Host header"),
+// so the backend gets this run's loopback Host and the public one in X-Forwarded-Host. cloudflared sends
+// X-Forwarded-Proto: https; keeping it avoids redirect loops and http OAuth callbacks.
+function hostName(host) {
+  const value = String(host || '').trim().toLowerCase();
+  if (value.startsWith('[')) return value.slice(0, value.indexOf(']') + 1);
+  return value.replace(/:\d*$/, '');
+}
+const loopbackNames = new Set(['127.0.0.1', 'localhost', '[::1]']);
+function isLoopbackHost(host) { return loopbackNames.has(hostName(host)); }
+function forwardedProto(value) {
+  const first = String(value || '').split(',')[0].trim().toLowerCase();
+  return first === 'https' || first === 'http' ? first : 'http';
+}
+// Through the tunnel: a non-loopback Host, or Cloudflare's own headers (only its edge adds them).
+function isPublic(req) {
+  return !isLoopbackHost(req.headers.host) || 'cf-ray' in req.headers || 'cf-connecting-ip' in req.headers;
+}
+const accessCookie = 'yurlungr_access';
+let accessKey = null;
+function readAccessKey() {
+  try {
+    if (!fs.existsSync(accessPath)) { accessKey = null; return; }
+    const key = fs.readFileSync(accessPath, 'utf8').trim();
+    accessKey = /^[A-Za-z0-9_-]{16,128}$/.test(key) ? key : null;
+  } catch (_) { accessKey = null; }
+}
+function cookieValue(header, name) {
+  for (const part of String(header || '').split(';')) {
+    const at = part.indexOf('=');
+    if (at > 0 && part.slice(0, at).trim() === name) return part.slice(at + 1).trim();
+  }
+  return null;
+}
+function sameKey(given, key) {
+  const a = Buffer.from(String(given || '')), b = Buffer.from(String(key || ''));
+  return b.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+// The app never sees the access cookie: it's the link's, not the app's.
+function withoutAccessCookie(header) {
+  if (header === undefined) return undefined;
+  const kept = String(header).split(';').map(part => part.trim()).filter(part => part && part.split('=')[0].trim() !== accessCookie);
+  return kept.length ? kept.join('; ') : undefined;
+}
+function backendHeaders(req) {
+  const incoming = req.headers.host || `127.0.0.1:${config.port}`;
+  const proto = forwardedProto(req.headers['x-forwarded-proto']);
+  const port = /^\d{1,5}$/.test(String(req.headers['x-forwarded-port'] || '')) ? String(req.headers['x-forwarded-port'])
+    : proto === 'https' && !isLoopbackHost(incoming) ? '443' : String(config.port);
+  const headers = {...req.headers, 'x-forwarded-host': incoming, 'x-forwarded-proto': proto, 'x-forwarded-port': port};
+  // This run's own loopback address (dev servers check only the name), so absolute URLs a server builds
+  // from Host still come back through this listener.
+  if (!isLoopbackHost(incoming)) headers.host = `127.0.0.1:${config.port}`;
+  const cookie = withoutAccessCookie(req.headers.cookie);
+  if (cookie === undefined) delete headers.cookie; else headers.cookie = cookie;
+  return headers;
+}
+// While a public link has an access key, visitors need it: `?key=` once (it becomes a cookie and leaves
+// the address bar), the cookie afterwards. Local requests (the preview, health checks) never do.
+function allowed(req) {
+  if (!accessKey || !isPublic(req)) return true;
+  return sameKey(cookieValue(req.headers.cookie, accessCookie), accessKey);
+}
+function gate(req, res) {
+  if (allowed(req)) return true;
+  let url = null;
+  try { url = new URL(req.url, 'http://link'); } catch (_) {}
+  if (url && sameKey(url.searchParams.get('key'), accessKey)) {
+    url.searchParams.delete('key');
+    const secure = forwardedProto(req.headers['x-forwarded-proto']) === 'https' ? '; Secure' : '';
+    // Only ever a path on this site: "//host" would leave it.
+    const location = url.pathname.replace(/^\/+/, '/') + url.search;
+    res.writeHead(302, {'Set-Cookie': `${accessCookie}=${accessKey}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400${secure}`,
+      Location: location, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'});
+    res.end(); return false;
+  }
+  res.writeHead(401, {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'});
+  res.end('<!doctype html><meta name="viewport" content="width=device-width"><title>Access key needed</title>' +
+    '<p style="font-family:sans-serif;margin:2em">This link needs its access key. Ask whoever shared it for the full link.</p>');
+  return false;
+}
 const server = http.createServer((req, res) => {
+  if (!gate(req, res)) return;
   if (req.url === '/.yurlungr/health/' + config.id) {
     res.writeHead(phase === 'Running' ? 200 : 503, {'Content-Type':'application/json'});
     res.end(JSON.stringify({id:config.id, state:phase})); return;
   }
   if (phase !== 'Running') { res.writeHead(503, {'Retry-After':'1'}); res.end('The app is starting. Check its Yurlungr terminal.'); return; }
   if (config.kind === 'Static') { staticRequest(req,res); return; }
-  const request = http.request({host:'127.0.0.1',port:backendPort,path:req.url,method:req.method,
-    headers:{...req.headers,'x-forwarded-host':req.headers.host,'x-forwarded-proto':'http','x-forwarded-port':String(config.port)}}, response => {
+  const request = http.request({host:'127.0.0.1',port:backendPort,path:req.url,method:req.method,headers:backendHeaders(req)}, response => {
       res.writeHead(response.statusCode, response.headers); response.pipe(res);
     });
   request.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end('Dev server unavailable.'); });
@@ -130,8 +218,9 @@ server.on('upgrade', (req, socket, head) => {
   // Node drops the server's error listener on upgraded sockets: without this, a browser that hangs up
   // mid-handshake raises an uncaught ECONNRESET and takes the whole run down.
   socket.on('error', () => socket.destroy());
+  if (!allowed(req)) { socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); return; }
   if (phase !== 'Running' || !backendPort) { socket.destroy(); return; }
-  const request = http.request({host:'127.0.0.1',port:backendPort,path:req.url,headers:{...req.headers,'x-forwarded-host':req.headers.host,'x-forwarded-proto':'http','x-forwarded-port':String(config.port)}});
+  const request = http.request({host:'127.0.0.1',port:backendPort,path:req.url,headers:backendHeaders(req)});
   request.on('upgrade', (response, upstream, upstreamHead) => {
     socket.write(`HTTP/1.1 ${response.statusCode} ${response.statusMessage}\r\n` + Object.entries(response.headers).map(([k,v]) => `${k}: ${v}\r\n`).join('') + '\r\n');
     if (upstreamHead.length) socket.write(upstreamHead);
@@ -200,7 +289,9 @@ async function restartBackend() {
   serveBackend(gen,true).catch(error=>failure(error.message,error));
 }
 
+readAccessKey();
 setInterval(() => {
+  readAccessKey();
   if (fs.existsSync(controlPath) || process.ppid === 1) finish('Stopped');
   else if (fs.existsSync(restartPath)) { try { fs.unlinkSync(restartPath); } catch (_) {} restartBackend(); }
 },200).unref();

@@ -18,13 +18,53 @@ import java.io.File
 
 enum class TunnelState(val label: String) { Starting("Starting"), Connecting("Connecting"), Live("Live"), Failed("Failed"), Stopped("Stopped") }
 
+/** How long a public link stays up before it stops by itself. */
+enum class TunnelLifetime(val label: String, val millis: Long?) {
+    Minutes15("15 min", 15 * 60_000L), Hour1("1 hour", 60 * 60_000L), Hours4("4 hours", 4 * 60 * 60_000L), UntilStopped("Until stopped", null),
+}
+
 /** A public link to a local port, made by cloudflared's account-free Quick Tunnel. */
-class Tunnel(val port: Int, val label: String) {
+class Tunnel(val port: Int, val label: String, val lifetime: TunnelLifetime = TunnelLifetime.Hour1, val key: String? = null) {
     var state by mutableStateOf(TunnelState.Starting)
     var url by mutableStateOf<String?>(null)
     var message by mutableStateOf("")
     var terminal: TerminalSession? = null
+    /** When the link stops by itself (counted from when it went live); null until then, or for [TunnelLifetime.UntilStopped]. */
+    var expiresAt by mutableStateOf<Long?>(null)
+    /** Where the run's supervisor reads [key] from; null when the port isn't a Yurlungr run (no gate possible). */
+    internal var accessFile: java.io.File? = null
     val active get() = state == TunnelState.Starting || state == TunnelState.Connecting || state == TunnelState.Live
+    /** The link to hand out: with the access key when there is one, so sharing stays one tap. */
+    val shareUrl get() = url?.let { TunnelLinks.withKey(it, key) }
+}
+
+/** The pure parts of public links: access keys, expiry and how much time is left. */
+internal object TunnelLinks {
+    private val random = java.security.SecureRandom()
+
+    /** 24 random bytes, URL-safe: what the supervisor accepts (16–128 of A–Z a–z 0–9 _ -). */
+    fun newKey(): String {
+        val bytes = ByteArray(24).also(random::nextBytes)
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+    }
+
+    fun withKey(url: String, key: String?): String = if (key == null) url else url.trimEnd('/') + "/?key=" + key
+
+    fun expiresAt(liveAt: Long, lifetime: TunnelLifetime): Long? = lifetime.millis?.let { liveAt + it }
+
+    fun expired(now: Long, expiresAt: Long?): Boolean = expiresAt != null && now >= expiresAt
+
+    /** "45 min left", "1 h 5 min left", "Less than a minute left"; null when the link has no end. */
+    fun remaining(now: Long, expiresAt: Long?): String? {
+        expiresAt ?: return null
+        val minutes = (expiresAt - now + 59_999) / 60_000 // rounded up: "1 min left" until it's gone
+        return when {
+            expiresAt - now < 60_000 -> "Less than a minute left"
+            minutes < 60 -> "$minutes min left"
+            minutes % 60 == 0L -> "${minutes / 60} h left"
+            else -> "${minutes / 60} h ${minutes % 60} min left"
+        }
+    }
 }
 
 /**
@@ -37,6 +77,9 @@ object TunnelSessions {
     private val URL = Regex("https://[a-z0-9][a-z0-9-]*\\.trycloudflare\\.com")
     private const val GIVE_UP_MS = 60_000L
     private const val PORT_CHECK_MS = 5_000L
+    // One at a time, in order: a stopped link removing its key must not race a new link writing its own.
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val keyFiles = Dispatchers.IO.limitedParallelism(1)
 
     private fun isListening(port: Int): Boolean = runCatching {
         java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 1_000) }
@@ -66,10 +109,22 @@ object TunnelSessions {
             .replace(Regex("^\\S+\\s+(ERR|INF|WRN)\\s+"), "").take(240)
     }
 
-    fun start(context: Context, port: Int, label: String): Tunnel {
+    /** The run serving [port], whose supervisor can check an access key; null for other servers. */
+    private fun runFor(port: Int): WebRun? = WebRunSessions.all().firstOrNull { it.config.port == port && !it.finalized }
+
+    /** Whether a link to [port] can require an access key: only Yurlungr's own runs check one. */
+    fun canProtect(port: Int): Boolean = runFor(port) != null
+
+    /** What the user picked last time (this session): new links start from it. */
+    var lastLifetime by mutableStateOf(TunnelLifetime.Hour1)
+    var lastProtect by mutableStateOf(true)
+
+    fun start(context: Context, port: Int, label: String, lifetime: TunnelLifetime = lastLifetime, protect: Boolean = lastProtect): Tunnel {
         val app = context.applicationContext
         tunnels[port]?.takeIf { it.active }?.let { return it }
-        val tunnel = Tunnel(port, label)
+        val run = if (protect) runFor(port) else null
+        val tunnel = Tunnel(port, label, lifetime, key = run?.let { TunnelLinks.newKey() })
+        tunnel.accessFile = run?.let { File(it.directory, "access") }
         tunnels[port] = tunnel
         if (!isInstalled(app)) {
             tunnel.state = TunnelState.Failed
@@ -82,8 +137,8 @@ object TunnelSessions {
             TerminalSessions.manage(terminal, TerminalSessions.ManagedLifecycle(
                 end = { stop(app, tunnel) },
                 close = { stop(app, tunnel) },
-                restart = { stop(app, tunnel); start(app, port, label) },
-                exited = { if (tunnel.active) fail(tunnel, terminal) },
+                restart = { stop(app, tunnel); start(app, port, label, lifetime, protect) },
+                exited = { if (tunnel.active) fail(app, tunnel, terminal) },
             ))
             // Wide, so the link never wraps across lines.
             terminal.updateSize(160, 24, 8, 16)
@@ -93,7 +148,20 @@ object TunnelSessions {
             return tunnel
         }
         val terminal = tunnel.terminal ?: return tunnel
+        TunnelNotifications.update(app)
         scope.launch {
+            // The supervisor must know the key before the link can go live (this runs before the loop that
+            // marks it live). If it can't be written, no link rather than an open one.
+            val key = tunnel.key
+            val file = tunnel.accessFile
+            if (key != null && file != null) {
+                val written = withContext(keyFiles) { runCatching { writePrivate(file, key) }.isSuccess }
+                if (!written) {
+                    tunnel.message = "Couldn't set the link's access key, so it wasn't shared."
+                    stop(app, tunnel, failed = true)
+                    return@launch
+                }
+            }
             val started = System.currentTimeMillis()
             var portMisses = 0
             var lastPortCheck = 0L
@@ -105,9 +173,19 @@ object TunnelSessions {
                     if (url != null) {
                         tunnel.url = url
                         tunnel.state = if (isRegistered(text)) TunnelState.Live else TunnelState.Connecting
+                        if (tunnel.state == TunnelState.Live) {
+                            tunnel.expiresAt = TunnelLinks.expiresAt(System.currentTimeMillis(), tunnel.lifetime)
+                            TunnelNotifications.update(app)
+                        }
                     }
                 }
-                if (!terminal.isRunning) { if (tunnel.active) fail(tunnel, terminal); break }
+                if (!terminal.isRunning) { if (tunnel.active) fail(app, tunnel, terminal); break }
+                // A forgotten link shouldn't stay open for days.
+                if (tunnel.state == TunnelState.Live && TunnelLinks.expired(System.currentTimeMillis(), tunnel.expiresAt)) {
+                    tunnel.message = "The link stopped after ${tunnel.lifetime.label}, as chosen."
+                    stop(app, tunnel)
+                    break
+                }
                 if (tunnel.state != TunnelState.Live && System.currentTimeMillis() - started > GIVE_UP_MS) {
                     tunnel.message = if (tunnel.state == TunnelState.Starting) "No link after a minute. Check the network, then try again."
                         else "Cloudflare gave a link but it never went live. Try again."
@@ -132,10 +210,11 @@ object TunnelSessions {
         return tunnel
     }
 
-    private fun fail(tunnel: Tunnel, terminal: TerminalSession) {
+    private fun fail(context: Context, tunnel: Tunnel, terminal: TerminalSession) {
         tunnel.message = failureLine(terminal.emulator?.screen?.transcriptText.orEmpty())
         tunnel.state = TunnelState.Failed
         tunnel.url = null
+        ended(context.applicationContext, tunnel)
     }
 
     fun stop(context: Context, tunnel: Tunnel, failed: Boolean = false) {
@@ -143,6 +222,24 @@ object TunnelSessions {
         tunnel.url = null
         tunnel.terminal?.let { TerminalSessions.closeDirect(context.applicationContext, it) }
         tunnel.terminal = null
+        ended(context.applicationContext, tunnel)
+    }
+
+    /** A link is gone: its key goes with it (a later link gets a new one), and the notification catches up. */
+    private fun ended(app: Context, tunnel: Tunnel) {
+        tunnel.expiresAt = null
+        val key = tunnel.key
+        tunnel.accessFile?.let { file -> scope.launch(keyFiles) { if (runCatching { file.readText() }.getOrNull() == key) file.delete() } }
+        TunnelNotifications.update(app)
+    }
+
+    /** Writes [text] readable by this app only, replacing the file in one step. */
+    private fun writePrivate(file: File, text: String) {
+        val tmp = File(file.parentFile, file.name + ".tmp")
+        tmp.writeText(text)
+        tmp.setReadable(false, false); tmp.setReadable(true, true)
+        tmp.setWritable(false, false); tmp.setWritable(true, true)
+        check(tmp.renameTo(file)) { "Couldn't write ${file.name}" }
     }
 
     /** A server went away: its public link must not outlive it. */

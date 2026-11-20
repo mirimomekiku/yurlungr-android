@@ -49,6 +49,8 @@ internal object WebRunSessions {
 
     fun init(context: Context) {
         appContext = context.applicationContext
+        // Tunnels live in this process: a public-link notification left by an earlier one is stale.
+        TunnelNotifications.cancel(context.applicationContext)
         // Capture old run directories before the UI can start a new run. Never adopt stale PIDs.
         val previous = File(context.cacheDir,"web-runs").listFiles().orEmpty()
             .filter { it.isDirectory && runCatching { UUID.fromString(it.name) }.isSuccess }

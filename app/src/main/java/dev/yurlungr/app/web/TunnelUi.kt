@@ -5,7 +5,14 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.Switch
+import androidx.compose.runtime.produceState
+import dev.yurlungr.app.ui.Chip
+import kotlinx.coroutines.delay
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -59,12 +66,13 @@ fun TunnelSheet(port: Int, label: String, onDismiss: () -> Unit, onOpenTerminal:
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 ) { Text("Install Servers & tunnels") }
             }
-            tunnel == null || !tunnel.active && !confirmed && tunnel.state != TunnelState.Failed -> Confirm(port) { confirmed = true; TunnelSessions.start(context, port, label) }
+            tunnel == null || !tunnel.active && !confirmed && tunnel.state != TunnelState.Failed ->
+                Confirm(port, null) { confirmed = true; TunnelSessions.start(context, port, label) }
             tunnel.state == TunnelState.Failed -> {
                 Text(tunnel.message.ifBlank { "The tunnel stopped." }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
                 Button(onClick = { TunnelSessions.start(context, port, label) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("Try again") }
             }
-            tunnel.state == TunnelState.Stopped -> Confirm(port) { TunnelSessions.start(context, port, label) }
+            tunnel.state == TunnelState.Stopped -> Confirm(port, tunnel.message.takeIf { it.isNotBlank() }) { TunnelSessions.start(context, port, label) }
             tunnel.state != TunnelState.Live || url == null -> {
                 Text(if (url == null) "Asking Cloudflare for a link…" else "Got a link, waiting for it to go live…", style = MaterialTheme.typography.bodyMedium)
                 FlowBar(Modifier.fillMaxWidth())
@@ -72,20 +80,27 @@ fun TunnelSheet(port: Int, label: String, onDismiss: () -> Unit, onOpenTerminal:
                 OutlinedButton(onClick = { TunnelSessions.stop(context, tunnel) }, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
             }
             else -> {
-                Text(url, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.titleSmall)
+                // The link as shared: with its access key, so whoever gets it is let in with one tap.
+                val link = tunnel.shareUrl ?: url
+                val now by produceState(System.currentTimeMillis(), tunnel.expiresAt) {
+                    while (true) { value = System.currentTimeMillis(); delay(30_000) }
+                }
+                Text(link, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.titleSmall)
                 // Scan it from another phone or tablet to try the app there.
-                QrCode(url, Modifier.align(androidx.compose.ui.Alignment.CenterHorizontally))
+                QrCode(link, Modifier.align(androidx.compose.ui.Alignment.CenterHorizontally))
+                val ends = TunnelLinks.remaining(now, tunnel.expiresAt)?.let { "Stops by itself: ${it.replaceFirstChar(Char::lowercase)}." } ?: "Stays up until you stop it or the server stops."
                 Text(
-                    "Anyone with this link can reach port $port. It changes next time, and stops when the server stops.",
+                    (if (tunnel.key != null) "Only people with this exact link (it carries an access key) can reach port $port. "
+                        else "Anyone with this link can reach port $port. ") + "It changes next time. $ends",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilledTonalButton(onClick = { copy(context, url) }, modifier = Modifier.weight(1f)) { Text("Copy") }
+                    FilledTonalButton(onClick = { copy(context, link) }, modifier = Modifier.weight(1f)) { Text("Copy") }
                     FilledTonalButton(onClick = {
-                        val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, url)
+                        val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, link)
                         context.startActivity(Intent.createChooser(send, "Share link").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                     }, modifier = Modifier.weight(1f)) { Text("Share") }
-                    FilledTonalButton(onClick = { RuntimeBridge.open(context, url) }, modifier = Modifier.weight(1f)) { Text("Open") }
+                    FilledTonalButton(onClick = { RuntimeBridge.open(context, link) }, modifier = Modifier.weight(1f)) { Text("Open") }
                 }
                 OutlinedButton(onClick = { TunnelSessions.stop(context, tunnel) }, modifier = Modifier.fillMaxWidth()) { Text("Stop sharing") }
             }
@@ -93,12 +108,31 @@ fun TunnelSheet(port: Int, label: String, onDismiss: () -> Unit, onOpenTerminal:
     }
 }
 
+/** Asks first, with how long the link lasts and whether it needs an access key ([note]: why the last one stopped). */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun Confirm(port: Int, onStart: () -> Unit) {
+private fun Confirm(port: Int, note: String?, onStart: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    note?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
     Text(
         "This makes the server on port $port reachable from the internet through a random https address. " +
             "Anyone who has the link can open it, including pages that show your data. The link changes each time; stop sharing when you're done.",
         style = MaterialTheme.typography.bodyMedium,
+    )
+    Text("Stop sharing after", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        for (option in TunnelLifetime.entries) Chip(option.label, onClick = { TunnelSessions.lastLifetime = option }, selected = TunnelSessions.lastLifetime == option)
+    }
+    // Only Yurlungr's own runs can check a key: other servers get a plain link.
+    if (TunnelSessions.canProtect(port)) Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Require an access key", style = MaterialTheme.typography.bodyMedium)
+            Text("The link you share includes it; a guessed address without it gets nothing.", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        }
+        Switch(TunnelSessions.lastProtect, { TunnelSessions.lastProtect = it })
+    } else Text(
+        "This server isn't run by Yurlungr, so its link can't require an access key.",
+        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
     )
     Button(onClick = onStart, modifier = Modifier.fillMaxWidth().padding(top = 4.dp).heightIn(min = 48.dp)) {
         PhIcon(Ph.Globe, null, size = 18.dp)

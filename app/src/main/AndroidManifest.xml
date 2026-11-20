@@ -74,6 +74,8 @@
         </service>
         <!-- Allow / Deny / Reply on chat notifications; only this app's notifications can reach it. -->
         <receiver android:name=".chat.ChatActionReceiver" android:exported="false" />
+        <!-- Stop on the public-link notification; only this app's notification can reach it. -->
+        <receiver android:name=".web.TunnelActionReceiver" android:exported="false" />
         <receiver android:name=".widgets.HomeWidget" android:exported="false" android:label="@string/app_name">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
