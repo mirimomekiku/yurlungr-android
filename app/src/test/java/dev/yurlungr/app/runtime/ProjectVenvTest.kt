@@ -6,6 +6,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.nio.file.Files
 
 class ProjectVenvTest {
     @get:Rule val tmp = TemporaryFolder()
@@ -13,10 +14,17 @@ class ProjectVenvTest {
     private val prefixBin get() = File(tmp.root, "usr/bin").apply { mkdirs() }
     private val projects get() = File(tmp.root, "home/projects")
 
-    /** A venv as `python -m venv` makes it on the phone: pyvenv.cfg pointing at the runtime's python. */
-    private fun venv(dir: File, home: File = prefixBin): File = File(dir, ".venv").apply {
+    /** The runtime's interpreter, which a venv's bin/python links to. */
+    private val prefixPython get() = File(prefixBin, "python3.12").apply { if (!exists()) writeText("elf") }
+
+    /**
+     * A venv as `python -m venv` makes it on the phone: pyvenv.cfg pointing at the runtime's bin, and
+     * bin/python a link to [python] (the runtime's interpreter; null: no bin/python at all).
+     */
+    private fun venv(dir: File, home: File = prefixBin, python: File? = prefixPython): File = File(dir, ".venv").apply {
         File(this, "bin").mkdirs()
         File(this, "pyvenv.cfg").writeText("home = ${home.path}\ninclude-system-site-packages = true\nversion = 3.12.7\n")
+        if (python != null) Files.createSymbolicLink(File(this, "bin/python").toPath(), python.toPath())
     }
 
     private fun path(f: File?) = f?.invariantSeparatorsPath
@@ -58,6 +66,35 @@ class ProjectVenvTest {
         val bare = File(projects, "bare").apply { mkdirs() }
         File(bare, ".venv/bin").mkdirs() // no pyvenv.cfg
         assertNull(ProjectVenv.find(bare, projects, prefixBin))
+    }
+
+    @Test fun `a venv whose python isn't the runtime's is not activated`() {
+        // pyvenv.cfg names this phone's bin (anyone can write that), but bin/python is a committed script.
+        val app = File(projects, "committed").apply { mkdirs() }
+        venv(app, python = null).also { File(it, "bin/python").writeText("#!/bin/sh\nexec something-else") }
+        assertNull(ProjectVenv.find(app, projects, prefixBin))
+        // A link that stays in the repository doesn't count either.
+        val other = File(projects, "linked").apply { mkdirs() }
+        venv(other, python = File(other, "tools/python").apply { parentFile!!.mkdirs(); writeText("x") })
+        assertNull(ProjectVenv.find(other, projects, prefixBin))
+        // No bin/python at all.
+        val bare = File(projects, "nopython").apply { mkdirs() }
+        venv(bare, python = null)
+        assertNull(ProjectVenv.find(bare, projects, prefixBin))
+    }
+
+    @Test fun `an untrusted project's venv is not activated, nor one in a folder inside it`() {
+        val app = File(projects, "cloned").apply { mkdirs() }
+        venv(app)
+        val sub = File(app, "backend").apply { mkdirs() }
+        venv(sub)
+        // What ProjectTrust.isTrusted answers for a project marked untrusted.
+        val root = app.canonicalPath
+        val trusted = { d: File -> d.canonicalPath != root && !d.canonicalPath.startsWith("$root/") }
+        assertNull(ProjectVenv.find(app, projects, prefixBin, trusted))
+        assertNull(ProjectVenv.find(sub, projects, prefixBin, trusted))
+        // Once trusted, it's activated.
+        assertEquals(path(File(sub, ".venv")), path(ProjectVenv.find(sub, projects, prefixBin) { true }))
     }
 
     @Test fun `activation puts the venv first on PATH and sets VIRTUAL_ENV`() {

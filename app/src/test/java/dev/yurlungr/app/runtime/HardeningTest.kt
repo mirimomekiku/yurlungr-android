@@ -161,8 +161,11 @@ class HardeningTest {
 
     @Test fun `probes run a few at a time, with a kill timeout`() {
         val script = Toolchain.probeScript(Toolchain.tools)
-        val waits = script.lines().count { it == "wait" }
-        assertEquals((Toolchain.tools.size + Toolchain.PROBE_PARALLEL - 1) / Toolchain.PROBE_PARALLEL + if (Toolchain.tools.size % Toolchain.PROBE_PARALLEL == 0) 1 else 0, waits)
+        // A rolling pool: before each probe past the first few, wait for one to end if the pool is full.
+        val gates = script.lines().count { it == "if [ \$n -ge ${Toolchain.PROBE_PARALLEL} ]; then wait -n; n=\$((n - 1)); fi" }
+        assertEquals(Toolchain.tools.size - Toolchain.PROBE_PARALLEL, gates)
+        assertEquals(Toolchain.tools.size, script.lines().count { it == "n=\$((n + 1))" })
+        assertEquals("one final wait for the last probes", 1, script.lines().count { it == "wait" })
         assertTrue(script.contains("timeout -k 5 "))
         assertTrue(script.contains("mkdir -p"))
         assertFalse("no head: SIGPIPE would fail pipefail probes", Toolchain.tools.any { "head" in it.probe })
